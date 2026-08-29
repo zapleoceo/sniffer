@@ -243,6 +243,51 @@ if [ -n "$PG_CID" ]; then
   if [ "$PG_HEALTH" = "unhealthy" ]; then FAIL=1; fi
 fi
 
+# ── 6.5 Функциональная проверка ──────────────────────────────────────────────
+# Контейнер в состоянии running ещё ничего не доказывает: процесс может стоять,
+# схема не примениться, а образ собраться из чужого коммита. Поэтому деплой
+# считается успешным только после того, как система ответила на реальные
+# вопросы. Любой провал здесь — красный деплой, а не предупреждение.
+log "функциональная проверка"
+
+# 1. Задеплоен именно тот коммит, который просили.
+ACTUAL_SHA="$(git -C "$DEPLOY_PATH" rev-parse HEAD)"
+EXPECTED_SHA="$(git -C "$DEPLOY_PATH" rev-parse "$TARGET_REF" 2>/dev/null || echo "")"
+if [ -n "$EXPECTED_SHA" ] && [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+  echo "   код на сервере не тот: ждали ${EXPECTED_SHA}, на диске ${ACTUAL_SHA}" >&2
+  FAIL=1
+else
+  info "коммит: ${ACTUAL_SHA}"
+fi
+
+# 2. База отвечает и схема на месте. Пустой список таблиц означает, что
+#    init-скрипт не отработал, и бот упадёт на первом же запросе.
+if [ -n "${PG_CID:-}" ]; then
+  TABLES="$(docker exec "$PG_CID" psql -U sniffer -d sniffer -tAc     "select count(*) from information_schema.tables where table_schema='public'" 2>/dev/null || echo 0)"
+  if [ "${TABLES:-0}" -lt 5 ]; then
+    echo "   схема БД пуста или неполна: таблиц ${TABLES:-0}, ожидалось не меньше 5" >&2
+    FAIL=1
+  else
+    info "схема БД: ${TABLES} таблиц"
+  fi
+fi
+
+# 3. Образ рабочий: код импортируется. Ловит битую сборку и сломанные
+#    зависимости до того, как их поймает клиент.
+if docker compose run --rm --no-deps -T bot python -c "import sniffer, sniffer.search.planner, sniffer.sources.base" >/dev/null 2>&1; then
+  info "импорт модулей: ок"
+else
+  echo "   образ собран, но модули не импортируются" >&2
+  FAIL=1
+fi
+
+if [ "$FAIL" -ne 0 ]; then
+  echo >&2
+  echo "ДЕПЛОЙ НЕ ПРОШЁЛ ПРОВЕРКУ — состояние выше" >&2
+  exit 40
+fi
+log "проверка пройдена: деплой успешен"
+
 # ── 7. Уборка ───────────────────────────────────────────────────────────────
 log "уборка"
 docker image prune -f 2>&1 | tail -n1 | sed 's/^/   /' || true

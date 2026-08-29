@@ -87,11 +87,12 @@ jobs:
     timeout-minutes: 25
 
     env:
-      SSH_HOST: ${{ secrets.SSH_HOST }}
-      SSH_USER: ${{ secrets.SSH_USER }}
-      # Порт нестандартный — заводится секретом SSH_PORT. 22 здесь только
-      # затем, чтобы workflow не падал синтаксисом на пустом значении.
-      SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
+      SSH_HOST: ${{ secrets.SSH_HOST || '135.181.87.140' }}
+      SSH_USER: ${{ secrets.SSH_USER || 'root' }}
+      # Хост, пользователь и порт не секреты: они и так лежат в docs/deploy.md
+      # и в CLAUDE.md. Секретами их можно переопределить при переезде, но без
+      # них деплой обязан работать — иначе забытый секрет молча ломает пайплайн.
+      SSH_PORT: ${{ secrets.SSH_PORT || '9617' }}
       DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '/var/www/sniffer' }}
 
     steps:
