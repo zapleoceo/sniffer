@@ -13,7 +13,7 @@ SnifferBot живёт на том же Hetzner-сервере, что Вера, 
 | | |
 |---|---|
 | Домен | `lbot.zapleo.com` — указывает на этот сервер |
-| Сервер | **отдельная машина под проект** — IP, SSH-алиас и порт проставить при заказе |
+| Сервер | **135.181.87.140** — Hetzner CX23, Хельсинки. SSH-алиас `sniffer`, порт **9617** |
 | Каталог | `/var/www/sniffer` |
 | Репозиторий | `https://github.com/zapleoceo/sniffer`, ветка `master` |
 | Compose-проект | `sniffer` (сеть `sniffer_default`, том `sniffer_sniffer_pgdata`) |
@@ -85,7 +85,7 @@ ssh-keygen -t ed25519 -f ~/.ssh/sniffer_deploy -C "github-actions sniffer" -N ""
 Публичную часть — на сервер, приватную — в GitHub Secrets (раздел 4).
 
 ```bash
-ssh -p <порт> root@<ip> \
+ssh -p 9617 root@135.181.87.140 \
   "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys" < ~/.ssh/sniffer_deploy.pub
 ```
 
@@ -178,16 +178,16 @@ Settings → Secrets and variables → Actions → **New repository secret**.
 | Секрет | Обязателен | Что кладём |
 |---|---|---|
 | `SSH_PRIVATE_KEY` | да | Содержимое `~/.ssh/sniffer_deploy` **целиком**, вместе со строками `-----BEGIN…` и `-----END…` и переводом строки в конце |
-| `SSH_HOST` | да | IP нового сервера |
+| `SSH_HOST` | да | `135.181.87.140` |
 | `SSH_USER` | да | `root` |
-| `SSH_PORT` | **на этой машине да** | порт SSH нового сервера, если он не 22 |
-| `SSH_KNOWN_HOSTS` | желательно | Вывод `ssh-keyscan -p <порт> <ip>`. Без него ключ хоста принимается без проверки, и в лог падает `::warning::` |
+| `SSH_PORT` | **на этой машине да** | `9617` — без него workflow пойдёт на 22 и упрётся в отказ |
+| `SSH_KNOWN_HOSTS` | желательно | Вывод `ssh-keyscan -p 9617 135.181.87.140`. Без него ключ хоста принимается без проверки, и в лог падает `::warning::` |
 | `DEPLOY_PATH` | нет | Только если каталог не `/var/www/sniffer` |
 
 Проверить ключ до первого деплоя:
 
 ```bash
-ssh -i ~/.ssh/sniffer_deploy -p <порт> root@<ip> 'echo ok && docker compose version'
+ssh -i ~/.ssh/sniffer_deploy -p 9617 root@135.181.87.140 'echo ok && docker compose version'
 ```
 
 **Про `root`.** Деплой ходит под root, потому что так уже устроен доступ к
@@ -241,7 +241,7 @@ push master
 ## 6. Ручной деплой и диагностика
 
 ```bash
-ssh <алиас-сервера>
+ssh sniffer
 cd /var/www/sniffer
 
 bash infra/deploy.sh --check          # только проверки, ничего не меняет
@@ -278,7 +278,7 @@ git revert <sha> && git push
 **Срочный путь**, когда ждать CI нельзя:
 
 ```bash
-ssh <алиас-сервера> '/var/www/sniffer/infra/deploy.sh /var/www/sniffer <предыдущий-sha>'
+ssh sniffer '/var/www/sniffer/infra/deploy.sh /var/www/sniffer <предыдущий-sha>'
 ```
 
 После этого всё равно сделать `git revert` в `master` — иначе следующий же

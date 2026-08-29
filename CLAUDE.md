@@ -10,7 +10,8 @@
 ## Быстрые факты
 
 - Домен: https://lbot.zapleo.com
-- Сервер: **отдельная машина под проект**, IP и SSH-алиас проставить при заказе
+- Сервер: **135.181.87.140** (Hetzner CX23, Хельсинки), SSH-алиас `sniffer`, порт **9617**
+- ОС: Ubuntu 26.04 LTS · 2 vCPU · 4 ГБ RAM · 38 ГБ диска · Docker 29.7.2
 - Каталог на сервере: `/var/www/sniffer`
 - Репозиторий: https://github.com/zapleoceo/sniffer
 - БД: `docker exec sniffer-postgres psql -U sniffer -d sniffer`
