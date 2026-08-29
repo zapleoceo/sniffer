@@ -1,0 +1,211 @@
+name: deploy
+
+# Единственный путь кода на сервер. Ручных правок в /var/www/sniffer нет:
+# состояние сервера определяется репозиторием (CLAUDE.md, раздел CI/CD).
+#
+# master → docs-gate + quality → deploy.
+# Откат — `git revert` и обычный пуш, а не правка на сервере.
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+# Два деплоя подряд не должны наезжать друг на друга. cancel-in-progress: false —
+# отменённый на середине деплой оставил бы сервер в промежуточном состоянии.
+concurrency:
+  group: deploy-sniffer
+  cancel-in-progress: false
+
+jobs:
+  # ── 1. Документация ────────────────────────────────────────────────────────
+  docs-gate:
+    name: docs-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Код источников/верификатора/воронки менялся вместе с docs/
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" != "push" ]; then
+            echo "::notice::${{ github.event_name }} — диффа нет, гейт пропускаю"
+            exit 0
+          fi
+
+          BASE="${{ github.event.before }}"
+          HEAD="${{ github.sha }}"
+          if [ -z "${BASE:-}" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            BASE="$(git rev-parse "${HEAD}~1" 2>/dev/null || echo "$HEAD")"
+          fi
+
+          CHANGED="$(git diff --name-only "$BASE" "$HEAD")"
+          echo "== изменённые файлы =="
+          echo "$CHANGED"
+
+          CODE="$(echo "$CHANGED" | grep -E '^src/sniffer/(sources|search|verifier|pipeline)/' || true)"
+          DOCS="$(echo "$CHANGED" | grep -E '^docs/.*\.md$' || true)"
+
+          if [ -n "$CODE" ] && [ -z "$DOCS" ]; then
+            echo "::error::поведение системы изменилось, а её описание — нет."
+            echo
+            echo "Изменены файлы, за которыми docs/ обязан следовать:"
+            echo "$CODE" | sed 's/^/  /'
+            echo
+            echo "В docs/ изменений в этом диффе нет. Правило — CLAUDE.md,"
+            echo "Definition of Done, пункт 3: документация обновляется в том же"
+            echo "коммите, что и код. Разъехавшаяся документация хуже отсутствующей:"
+            echo "ей верят."
+            echo
+            echo "Что обновить: docs/spec-v2.md (источники, планировщик, verifier),"
+            echo "docs/architecture.md (воронка), docs/deploy.md (если изменился"
+            echo "состав сервисов)."
+            exit 1
+          fi
+
+          echo "docs-gate пройден"
+
+  # ── 2. Качество ────────────────────────────────────────────────────────────
+  # Тот же workflow, что крутится на ветках, — чтобы правила проверки жили в
+  # одном файле и не разъезжались между веткой и master.
+  quality:
+    name: quality
+    uses: ./.github/workflows/quality.yml
+
+  # ── 3. Деплой ──────────────────────────────────────────────────────────────
+  deploy:
+    name: deploy на Hetzner
+    needs: [docs-gate, quality]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    env:
+      SSH_HOST: ${{ secrets.SSH_HOST }}
+      SSH_USER: ${{ secrets.SSH_USER }}
+      # Порт нестандартный — заводится секретом SSH_PORT. 22 здесь только
+      # затем, чтобы workflow не падал синтаксисом на пустом значении.
+      SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
+      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '/var/www/sniffer' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Секреты заведены
+        env:
+          HAS_KEY: ${{ secrets.SSH_PRIVATE_KEY != '' }}
+        run: |
+          set -euo pipefail
+          missing=""
+          [ -n "${SSH_HOST:-}" ]  || missing="$missing SSH_HOST"
+          [ -n "${SSH_USER:-}" ]  || missing="$missing SSH_USER"
+          [ "$HAS_KEY" = "true" ] || missing="$missing SSH_PRIVATE_KEY"
+          if [ -n "$missing" ]; then
+            echo "::error::не заведены секреты:$missing"
+            echo "Settings → Secrets and variables → Actions → New repository secret."
+            echo "Как их получить — docs/deploy.md, раздел «GitHub Secrets»."
+            exit 1
+          fi
+          echo "секреты на месте, цель: $SSH_USER@$SSH_HOST:$SSH_PORT$DEPLOY_PATH"
+
+      - name: Ключ и known_hosts
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          # $RUNNER_TEMP, а не рабочая копия: каталог живёт ровно столько,
+          # сколько job, и не попадает ни в артефакты, ни в кэш.
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          touch ~/.ssh/known_hosts
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$RUNNER_TEMP/sniffer_deploy_key"
+          chmod 600 "$RUNNER_TEMP/sniffer_deploy_key"
+
+          if [ -n "${SSH_KNOWN_HOSTS:-}" ]; then
+            printf '%s\n' "$SSH_KNOWN_HOSTS" >> ~/.ssh/known_hosts
+            echo "ключ хоста взят из секрета SSH_KNOWN_HOSTS"
+          else
+            # Без пиннинга: доверяем тому, что отдал сервер при первом
+            # соединении. Заведите SSH_KNOWN_HOSTS, чтобы закрыть MITM.
+            ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+            echo "::warning::SSH_KNOWN_HOSTS не задан — ключ хоста принят без проверки"
+          fi
+
+          if [ ! -s ~/.ssh/known_hosts ]; then
+            echo "::error::ключ хоста не получен: $SSH_HOST:$SSH_PORT не отвечает."
+            echo "Проверить секреты SSH_HOST и SSH_PORT — порт на этом сервере"
+            echo "нестандартный, значение в docs/deploy.md, раздел «GitHub Secrets»."
+            exit 1
+          fi
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Деплой (диск → git → сборка → up -d)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Порт у scp пишется через -P, у ssh — через -p. Общая часть в
+          # массиве, порт добавляется отдельно каждой команде.
+          OPTS=(-i "$RUNNER_TEMP/sniffer_deploy_key"
+                -o BatchMode=yes -o ConnectTimeout=15
+                -o ServerAliveInterval=30 -o ServerAliveCountMax=20
+                -o StrictHostKeyChecking=yes)
+
+          # Скрипт кладём на сервер из этого коммита, а не запускаем тот, что
+          # уже лежит в /var/www/sniffer: иначе правка самого deploy.sh
+          # применялась бы только со следующего деплоя.
+          scp "${OPTS[@]}" -P "$SSH_PORT" infra/deploy.sh \
+              "$SSH_USER@$SSH_HOST:/tmp/sniffer-deploy.sh"
+
+          run_deploy() {
+            ssh "${OPTS[@]}" -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" \
+                "bash /tmp/sniffer-deploy.sh '$DEPLOY_PATH' '$GITHUB_SHA'" </dev/null
+          }
+
+          for attempt in 1 2 3; do
+            rc=0
+            run_deploy || rc=$?
+            if [ "$rc" -eq 0 ]; then exit 0; fi
+
+            # 15 — «замок занят», то есть на сервере идёт ручной или
+            # предыдущий деплой. Это единственный код, который стоит
+            # повторить: остальные — настоящие поломки, и глотать их нельзя.
+            if [ "$rc" -ne 15 ]; then
+              case "$rc" in
+                10) echo "::error::сервер не готов: нет каталога, .env или docker (см. вывод выше)" ;;
+                20) echo "::error::деплой отменён из-за диска — чистить по инструкции в docs/deploy.md" ;;
+                40) echo "::error::контейнеры не поднялись или падают по кругу" ;;
+                *)  echo "::error::деплой упал с кодом $rc" ;;
+              esac
+              exit "$rc"
+            fi
+
+            echo "::notice::замок занят другим деплоем — попытка $attempt из 3, жду 90с"
+            sleep 90
+          done
+
+          echo "::error::замок занят больше четырёх минут — деплой не прошёл"
+          exit 15
+
+      # always(): при упавшем деплое этот вывод нужнее всего.
+      - name: Состояние и логи
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          KEY="$RUNNER_TEMP/sniffer_deploy_key"
+          [ -f "$KEY" ] || { echo "ключа нет — соединение не поднималось"; exit 0; }
+          ssh -i "$KEY" -p "$SSH_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
+              -o StrictHostKeyChecking=yes "$SSH_USER@$SSH_HOST" \
+              "cd '$DEPLOY_PATH' && docker compose ps && echo && df -h . && echo && free -m && echo && docker compose logs --tail 50 --no-color --timestamps" \
+              </dev/null || echo "не смог снять состояние с сервера"
+
+      - name: Убрать ключ
+        if: always()
+        run: rm -f "$RUNNER_TEMP/sniffer_deploy_key"
