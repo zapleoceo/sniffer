@@ -53,8 +53,11 @@ src/sniffer/
   config.py      настройки из окружения
   domain/        паспорт запроса, объявление
   broker/        клиент AIbroker (submit + поллинг)
+  search/        планировщик: паспорт → план поиска по источникам
+  sources/       адаптеры источников, один метод search()
   collector/     Telethon: live-подписка и messages.search
   pipeline/      гейт → prefilter → извлечение → дедуп
+  verifier/      grounding, соответствие паспорту, живость лота
   matching/      паспорт → SQL-запрос, ранжирование
   bot/           aiogram: диалог, карточки, подписки
 tests/

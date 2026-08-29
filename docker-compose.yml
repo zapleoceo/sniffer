@@ -1,5 +1,16 @@
 name: sniffer
 
+# Изоляция от Веры — контракт из spec-v2.md, раздел 1. Здесь он выглядит так:
+# имя проекта sniffer (отсюда сеть sniffer_default и том sniffer_sniffer_pgdata),
+# все контейнеры с префиксом sniffer-, порт БД 5433 и только на 127.0.0.1.
+# Ни одного общего имени с vera3-* и stepan2-*.
+#
+# Потолки памяти (mem_limit) — часть той же изоляции. Машина общая, 3.8 ГБ на
+# всех и уже в свопе; процесс, потёкший здесь, без потолка утащил бы за собой
+# чужие контейнеры, потому что OOM-killer выбирает жертву по всей машине, а не
+# по проекту. Это ПОТОЛКИ, а не резервирование: в норме весь стек живёт в
+# 400–600 МБ. Если памяти станет совсем мало — резать worker, он самый жирный.
+
 # Четыре процесса отличаются только командой, поэтому образ один и собирается
 # один раз: общий якорь с одним image-тегом вместо четырёх сборок.
 x-app: &app
@@ -31,7 +42,15 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+      # Первый старт делает initdb и прогоняет 001_init.sql. На машине,
+      # которая уже свопит, это дольше 50 секунд из retries × interval, и без
+      # start_period зависимые сервисы стартовать отказывались бы.
+      start_period: 40s
     restart: unless-stopped
+    mem_limit: ${SNIFFER_MEM_POSTGRES:-384m}
+    # Логи Postgres тоже надо ограничивать: диск на этой машине общий с Верой
+    # и Степаном, и деплой отменяется при заполнении выше 85%.
+    logging: {driver: json-file, options: {max-size: 10m, max-file: "3"}}
 
   # Держит MTProto-сессию. Строго один экземпляр: две копии с одной сессией
   # получают от Telegram AuthKeyDuplicated и роняют друг друга.
@@ -39,6 +58,7 @@ services:
     <<: *app
     container_name: sniffer-collector
     command: python -m sniffer.collector
+    mem_limit: ${SNIFFER_MEM_COLLECTOR:-320m}
 
   # Воронка: гейт → prefilter → извлечение → матчинг. Перезапускается без
   # потерь, состояние живёт в таблице jobs.
@@ -46,11 +66,13 @@ services:
     <<: *app
     container_name: sniffer-worker
     command: python -m sniffer.worker
+    mem_limit: ${SNIFFER_MEM_WORKER:-384m}
 
   bot:
     <<: *app
     container_name: sniffer-bot
     command: python -m sniffer.bot
+    mem_limit: ${SNIFFER_MEM_BOT:-256m}
 
   # Отдельно от бота: доставка обязана переживать рестарт диалогового
   # процесса, поэтому очередь лежит в outbox, а не в памяти.
@@ -58,6 +80,7 @@ services:
     <<: *app
     container_name: sniffer-notifier
     command: python -m sniffer.notifier
+    mem_limit: ${SNIFFER_MEM_NOTIFIER:-192m}
 
 volumes:
   sniffer_pgdata:

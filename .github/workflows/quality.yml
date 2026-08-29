@@ -1,0 +1,124 @@
+name: quality
+
+# Ворота качества из Definition of Done (CLAUDE.md): ruff, ruff format, mypy,
+# pytest. Красный quality означает, что задача не сделана, — деплой к нему
+# прицеплен через `needs`.
+#
+# На `master` этот файл сам по себе НЕ запускается: там его вызывает deploy.yml
+# как reusable workflow (`workflow_call`). Иначе на каждый merge в master
+# крутились бы два одинаковых прогона — один свой, второй внутри деплоя.
+
+on:
+  push:
+    branches-ignore: [master]
+  pull_request:
+  workflow_call:
+
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: ruff · mypy · pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Кэш зависимостей: ключ по uv.lock, поэтому пересобирается он только
+      # когда реально поменялся замок, а не на каждый пуш.
+      - name: uv (+ кэш зависимостей)
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      # --frozen: ставим ровно то, что в uv.lock. Молчаливое обновление
+      # замка в CI означало бы, что локально и в проде разные версии.
+      - name: Установка зависимостей
+        run: uv sync --frozen --extra dev
+
+      - name: ruff check
+        run: uv run ruff check --output-format=github .
+
+      - name: ruff format --check
+        run: uv run ruff format --check .
+
+      - name: mypy
+        run: uv run mypy src tests
+
+      - name: pytest
+        run: uv run pytest
+
+  # DoD, пункт 5: «Секретов в диффе нет». Проверка узкая и по изменённым
+  # файлам — она обязана ловить .env и приватные ключи, а не подсвечивать
+  # каждое слово «token» в документации.
+  secrets:
+    name: секретов в диффе нет
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Сканировать дифф
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+            HEAD="${{ github.event.pull_request.head.sha }}"
+          else
+            BASE="${{ github.event.before }}"
+            HEAD="${{ github.sha }}"
+          fi
+
+          # Первый пуш в ветку и force-push дают пустой или несуществующий
+          # BASE — тогда сравниваем с родителем HEAD, иначе шаг падал бы на
+          # ровном месте.
+          if [ -z "${BASE:-}" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            BASE="$(git rev-parse "${HEAD}~1" 2>/dev/null || echo "$HEAD")"
+          fi
+
+          FILES="$(git diff --name-only --diff-filter=ACMR "$BASE" "$HEAD" || true)"
+          [ -n "$FILES" ] || { echo "дифф пуст"; exit 0; }
+
+          fail=0
+
+          BAD_NAMES="$(echo "$FILES" | grep -E '(^|/)\.env$|(^|/)\.env\.(local|prod|production)$|\.session$|\.session-journal$|(^|/)id_(rsa|ed25519)$' || true)"
+          if [ -n "$BAD_NAMES" ]; then
+            echo "::error::в дифф попали файлы, которых в репозитории быть не должно:"
+            echo "$BAD_NAMES"
+            fail=1
+          fi
+
+          # Шаблоны намеренно конкретные: заголовок приватного ключа, ключ
+          # Google, токен бота Telegram, ключ OpenAI-подобного вида.
+          PATTERNS='BEGIN (RSA|OPENSSH|EC|DSA|PGP) PRIVATE KEY|AIza[0-9A-Za-z_-]{35}|[0-9]{8,10}:AA[0-9A-Za-z_-]{33}|sk-[A-Za-z0-9]{32,}'
+
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            [ -f "$f" ] || continue
+            case "$f" in .github/workflows/*) continue;; esac
+            if git diff -U0 "$BASE" "$HEAD" -- "$f" | grep -E "^\+" | grep -Eq "$PATTERNS"; then
+              echo "::error file=$f::похоже на секрет в добавленных строках"
+              fail=1
+            fi
+          done <<< "$FILES"
+
+          if [ "$fail" -ne 0 ]; then
+            echo "Секрет из истории не удаляется через git rm — его надо ротировать."
+            exit 1
+          fi
+          echo "секретов не нашёл"
