@@ -188,3 +188,15 @@ def test_every_compose_command_has_an_entry_point() -> None:
 
     for process in ("bot", "collector", "worker", "notifier"):
         assert find_spec(f"sniffer.{process}.__main__") is not None
+
+
+def test_empty_env_int_does_not_crash(monkeypatch: object) -> None:
+    """Пустая переменная окружения — это «не заведено», а не ошибка типа.
+
+    Прод падал именно здесь: TG_API_ID= в .env валил pydantic на int_parsing
+    ещё до того, как runtime успевал сказать «жду конфигурации».
+    """
+    from sniffer.config import Settings
+
+    settings = Settings(_env_file=None, TG_API_ID="")  # type: ignore[call-arg]
+    assert settings.tg_api_id == 0

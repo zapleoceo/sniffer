@@ -3,8 +3,17 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Annotated
 
+from pydantic import BeforeValidator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _empty_to_zero(v: object) -> object:
+    """Пустое значение переменной окружения приводим к нулю."""
+    if isinstance(v, str) and not v.strip():
+        return 0
+    return v
 
 
 class Settings(BaseSettings):
@@ -14,7 +23,10 @@ class Settings(BaseSettings):
     bot_token: str = ""
 
     # Telegram — юзербот (чтение сообществ)
-    tg_api_id: int = 0
+    # Пустая строка в .env — это "не заведено", а не ошибка типа. Без
+    # приведения pydantic валится на TG_API_ID= с int_parsing и роняет процесс
+    # ещё до того, как runtime успеет сказать "жду конфигурации".
+    tg_api_id: Annotated[int, BeforeValidator(_empty_to_zero)] = 0
     tg_api_hash: str = ""
     tg_phone: str = ""
     tg_session: str = ""
