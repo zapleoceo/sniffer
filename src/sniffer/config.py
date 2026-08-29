@@ -49,3 +49,14 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def reload_settings() -> Settings:
+    """Перечитать окружение заново.
+
+    Нужно процессу, который стартовал без обязательного секрета и ждёт, пока
+    его заведут: без сброса кэша он до конца жизни контейнера видел бы пустой
+    токен и ждал бы вечно, даже когда `.env` уже поправлен.
+    """
+    get_settings.cache_clear()
+    return get_settings()

@@ -61,6 +61,15 @@ class Source(ABC):
         # Клиент этого не замечает — выдача собирается из остальных.
         self.degraded = False
 
+    async def aclose(self) -> None:
+        """Освободить ресурсы адаптера. По умолчанию их нет.
+
+        Объявлено в базе, чтобы исполнитель плана закрывал источники, ничего о
+        них не зная: адаптер с http-клиентом переопределит, адаптер без него
+        не заметит.
+        """
+        return None
+
     @abstractmethod
     async def search(self, query: str, params: dict[str, Any]) -> list[RawItem]:
         """Контракт: наружу не бросает.
