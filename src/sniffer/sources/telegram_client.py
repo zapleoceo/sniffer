@@ -1,33 +1,15 @@
-"""Откуда адаптер `telegram_groups` берёт свои зависимости.
+"""Как создаётся Telethon-клиент для адаптера `telegram_groups`.
 
 Отделено от самого поиска намеренно: «как создать клиента и что делать, если
 настроек нет» — это не то же самое, что «как искать по чатам», и меняются эти
-две вещи по разным поводам.
+две вещи по разным поводам. Реестр чатов живёт по соседству, в
+`chat_directory.py`.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-
-import structlog
-
 from sniffer.config import Settings
-from sniffer.sources.telegram_reference import ChatRef, TelegramReader
-
-log = structlog.get_logger(__name__)
-
-
-class EmptyChatDirectory:
-    """Заглушка на время, пока слой `db` не написан: чатов нет.
-
-    Пустой реестр — это «искать негде», а не поломка, поэтому источник молча
-    отдаёт пустой список и остаётся в плане. Подменяется одной строкой при
-    сборке адаптера, когда появится репозиторий чатов.
-    """
-
-    async def active_chats(self, city: str, limit: int) -> Sequence[ChatRef]:
-        log.warning("telegram.no_chat_directory", city=city)
-        return []
+from sniffer.sources.telegram_reference import TelegramReader
 
 
 def new_reader(settings: Settings) -> TelegramReader:

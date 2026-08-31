@@ -1,8 +1,8 @@
 """Контракт адаптера telegram_groups: константы, протоколы, ссылка на пост.
 
 Отдельно от адаптера по двум причинам. Первая — протоколы здесь нужны трём
-сторонам сразу: адаптеру, слою БД (он отдаёт реестр чатов) и тестам. Вторая —
-`ChatDirectory` объявлен как протокол намеренно: реестр чатов живёт в таблице
+сторонам сразу: адаптеру, обёртке над репозиторием чатов и тестам. Вторая —
+`ChatDirectory` объявлен протоколом намеренно: реестр чатов живёт в таблице
 `chats`, но адаптер не имеет права ни знать про SQL, ни ждать, пока слой `db`
 будет написан. Реализация подставляется снаружи, структурная типизация не
 требует от `db` импортировать этот модуль — обратной зависимости не возникает.
@@ -32,8 +32,9 @@ MAX_CHATS_PER_SEARCH = 10
 DEFAULT_MESSAGES_PER_CHAT = 30
 MAX_MESSAGES_PER_CHAT = 100
 
-# Своя доля от 90 с на весь план (spec-v2, 2.3): у telegram_groups может быть
-# несколько задач, и первая же не должна съедать бюджет остальных источников.
+# Доля источника от 90 с на весь план (spec-v2, 2.3) — на ВСЕ его задачи, а не
+# на каждую: планировщик вправе поставить до пяти задач на источник, и по 40 с
+# на каждую они съели бы бюджет остальных источников целиком.
 SEARCH_BUDGET_S = 40.0
 
 # Пауза после FloodWait растёт: Telegram называет минимум, а повтор подряд
@@ -45,36 +46,73 @@ MAX_ATTEMPTS_PER_CHAT = 2
 CHANNEL_ID_PREFIX = "100"
 
 
-@dataclass(slots=True, frozen=True)
-class ChatRef:
-    """Чат из реестра — ровно то, что адаптеру нужно для запроса и ссылки.
+class ChatLike(Protocol):
+    """Чат из реестра в той части, которой пользуется адаптер.
 
-    `tg_id` хранится в размеченной форме, той самой, что отдаёт Telethon в
+    Протокол, а не наш класс: репозиторий отдаёт `sniffer.domain.records.Chat`
+    с дюжиной полей, и требовать от него преобразования в чужой тип значило бы
+    править ветку слоя `db`.
+
+    `tg_id` — размеченная форма, та самая, что отдаёт Telethon в
     `message.chat_id`: у супергруппы это `-100` + внутренний id. Форма важна:
-    голое положительное число Telethon примет за id пользователя.
+    голое положительное число Telethon примет за id пользователя, поэтому
+    адаптер такую запись реестра отвергает, а не «пробует».
 
-    `search_rank` — порядок обхода, **меньший идёт раньше** (в таблице
-    `chats` это колонка со значением по умолчанию 100, то есть новый чат
-    становится за курируемыми). Обходим не весь реестр, а первые
+    `search_rank` — порядок обхода, **меньший идёт раньше** (так и сортирует
+    `ChatRepository.list_active`). Обходим не весь реестр, а первые
     `MAX_CHATS_PER_SEARCH`, поэтому порядок решает, что клиент вообще увидит.
     """
 
+    @property
+    def tg_id(self) -> int: ...
+
+    @property
+    def title(self) -> str: ...
+
+    @property
+    def username(self) -> str | None: ...
+
+    @property
+    def search_rank(self) -> int: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ChatRef:
+    """Минимальный чат: фикстуры, тесты и всё, что живёт без базы."""
+
     tg_id: int
     title: str = ""
-    username: str = ""
+    username: str | None = None
     search_rank: int = 100
 
 
 class ChatDirectory(Protocol):
     """Реестр чатов: откуда адаптер узнаёт, где искать.
 
-    Реализуется слоем `db` поверх таблицы `chats`; фильтрация по городу,
-    `is_active` и порядок по `search_rank` — его работа. Адаптер всё равно
-    обрежет список до бюджета сам: реализация, забывшая про `limit`, не
-    должна превращаться во FloodWait.
+    Форма повторяет `ChatRepository.list_active` из слоя `db` — то же имя, тот
+    же ключевой `limit`, тот же тип записей. Отличие ровно одно: город.
+    Репозиторий фильтра по городу не имеет и отдаёт активные чаты всех
+    городов сразу, поэтому город отрезается в обёртке
+    (`sources/chat_directory.py`), а не выдумывается здесь.
+
+    Адаптер всё равно обрежет список до бюджета сам: реализация, забывшая про
+    `limit`, не должна превращаться во FloodWait.
     """
 
-    async def active_chats(self, city: str, limit: int) -> Sequence[ChatRef]: ...
+    async def list_active(self, *, city: str, limit: int) -> Sequence[ChatLike]: ...
+
+
+class ReplyHeaderLike(Protocol):
+    """`message.reply_to` в той части, по которой опознаётся тема форума."""
+
+    @property
+    def forum_topic(self) -> bool: ...
+
+    @property
+    def reply_to_msg_id(self) -> int | None: ...
+
+    @property
+    def reply_to_top_id(self) -> int | None: ...
 
 
 class MessageLike(Protocol):
@@ -95,6 +133,12 @@ class MessageLike(Protocol):
 
     @property
     def media(self) -> object | None: ...
+
+    @property
+    def grouped_id(self) -> int | None: ...
+
+    @property
+    def reply_to(self) -> ReplyHeaderLike | None: ...
 
 
 class TelegramReader(Protocol):
@@ -124,7 +168,8 @@ def internal_chat_id(tg_id: int) -> int:
     Telethon отдаёт id супергруппы размеченным: `-1001234567890`. Ссылка
     открывается только по внутреннему числу — `1234567890`. Префикс снимается
     исключительно у отрицательных id: положительное число уже внутренняя
-    форма, а начинаться со `100` оно вправе само по себе.
+    форма, а начинаться со `100` оно вправе само по себе. Из реестра чатов
+    положительный id до сюда не доходит — адаптер отвергает такую запись.
     """
     if tg_id >= 0:
         return tg_id
@@ -137,15 +182,33 @@ def internal_chat_id(tg_id: int) -> int:
     return -tg_id
 
 
-def message_link(chat: ChatRef, msg_id: int) -> str:
+def topic_id(message: MessageLike) -> int | None:
+    """Тема форума, в которой лежит сообщение, или `None`.
+
+    Барахолки часто включают темы, и тогда ссылка без номера темы ведёт в
+    никуда. Telegram помечает такое сообщение как ответ: `forum_topic`
+    поднят, а сама тема — это `reply_to_top_id`, либо `reply_to_msg_id`, если
+    сообщение отвечает прямо на корень темы (тогда `top_id` пуст).
+    """
+    reply = message.reply_to
+    if reply is None or not reply.forum_topic:
+        return None
+    return reply.reply_to_top_id or reply.reply_to_msg_id
+
+
+def message_link(chat: ChatLike, msg_id: int, topic: int | None = None) -> str:
     """Ссылка на оригинал поста.
 
     У публичной группы с username это `t.me/<username>/<id>` — открывается у
     кого угодно, в том числе у клиента, который в группе не состоит. Форма
     `t.me/c/<id>/<msg>` работает только для участников, поэтому она запасная,
     а не основная: карточка со ссылкой, которую клиент не может открыть, —
-    это карточка без ссылки.
+    это карточка без ссылки. В форуме между чатом и сообщением встаёт третий
+    сегмент — номер темы.
     """
-    if chat.username:
-        return f"https://t.me/{chat.username.lstrip('@')}/{msg_id}"
-    return f"https://t.me/c/{internal_chat_id(chat.tg_id)}/{msg_id}"
+    root = f"https://t.me/{chat.username.lstrip('@')}" if chat.username else None
+    if root is None:
+        root = f"https://t.me/c/{internal_chat_id(chat.tg_id)}"
+    if topic is not None:
+        return f"{root}/{topic}/{msg_id}"
+    return f"{root}/{msg_id}"

@@ -7,7 +7,7 @@ Telegram, проверяет не адаптер, а связь — и заод�
 
 Фикстура `fixtures/telegram_group_messages.json` — сообщения в том объёме,
 который читает адаптер, с крайними случаями: пост без текста, пост без даты,
-чат без username.
+альбом из двух фото, сообщение в теме форума, чат без username.
 """
 
 from __future__ import annotations
@@ -15,17 +15,17 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from collections.abc import Awaitable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
-from telethon.errors import FloodWaitError
+from telethon.errors import AuthKeyUnregisteredError, FloodWaitError, SessionRevokedError
 
 from sniffer.config import Settings
-from sniffer.sources import telegram_client, telegram_groups, telegram_reference
+from sniffer.sources import chat_directory, telegram_client, telegram_groups, telegram_reference
 from sniffer.sources.base import get_source, registered_sources
 from sniffer.sources.telegram_groups import TelegramGroupsSource
 from sniffer.sources.telegram_reference import (
@@ -38,12 +38,20 @@ from sniffer.sources.telegram_reference import (
 
 FIXTURE = Path(__file__).parent / "fixtures" / "telegram_group_messages.json"
 
-# Методы, которых у юзербота быть не должно (spec-v2, 6.1). Ищем именно вызов,
-# а не упоминание: имена методов в документации запрещать глупо.
+# Методы, которых у юзербота быть не должно. Вступление в группу и беззвучный
+# режим разрешены владельцем (CLAUDE.md), но не этому источнику: он читает.
+# Ищем именно вызов, а не упоминание — запрещать имена в документации глупо.
 OUTGOING_CALL = re.compile(
     r"\.(send_\w+|forward_\w+|delete_\w+|edit_\w+|join_\w+|mark_read|pin_\w+|"
     r"iter_dialogs|get_dialogs)\s*\("
 )
+
+
+@dataclass(frozen=True, slots=True)
+class FakeReplyHeader:
+    forum_topic: bool
+    reply_to_msg_id: int | None
+    reply_to_top_id: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +62,8 @@ class FakeMessage:
     message: str | None
     date: datetime | None
     media: object | None = None
+    grouped_id: int | None = None
+    reply_to: FakeReplyHeader | None = None
 
 
 @dataclass
@@ -68,6 +78,7 @@ class FakeTelegram:
     replies: dict[object, list[FakeMessage]] = field(default_factory=dict)
     floods: list[int] = field(default_factory=list)
     fails: set[object] = field(default_factory=set)
+    raises: BaseException | None = None
     calls: list[str] = field(default_factory=list)
     queried: list[object] = field(default_factory=list)
     limits: list[int] = field(default_factory=list)
@@ -94,6 +105,8 @@ class FakeTelegram:
         await asyncio.sleep(0)
         if self.floods and (seconds := self.floods.pop(0)):
             raise FloodWaitError(request=None, capture=seconds)
+        if self.raises is not None:
+            raise self.raises
         if entity in self.fails:
             raise ValueError(f"чат {entity} недоступен")
         self.events.append(f"end:{entity}")
@@ -110,13 +123,13 @@ class FakeDirectory:
     chats: Sequence[ChatRef]
     asked: list[tuple[str, int]] = field(default_factory=list)
 
-    async def active_chats(self, city: str, limit: int) -> Sequence[ChatRef]:
+    async def list_active(self, *, city: str, limit: int) -> Sequence[ChatRef]:
         self.asked.append((city, limit))
         return self.chats
 
 
 class BrokenDirectory:
-    async def active_chats(self, city: str, limit: int) -> Sequence[ChatRef]:
+    async def list_active(self, *, city: str, limit: int) -> Sequence[ChatRef]:
         raise RuntimeError("нет соединения с базой")
 
 
@@ -131,6 +144,19 @@ class Sleeps:
         return asyncio.sleep(0)
 
 
+class FakeClock:
+    """Часы, которые двигает тест. Иначе бюджет не проверить без ожидания."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
 def fixture() -> dict[str, Any]:
     data: dict[str, Any] = json.loads(FIXTURE.read_text(encoding="utf-8"))
     return data
@@ -140,22 +166,25 @@ def fixture_chats() -> list[ChatRef]:
     return [ChatRef(**chat) for chat in fixture()["chats"]]
 
 
+def _message(raw: dict[str, Any]) -> FakeMessage:
+    reply = raw["reply_to"]
+    return FakeMessage(
+        id=raw["id"],
+        message=raw["message"],
+        date=None if raw["date"] is None else datetime.fromisoformat(raw["date"]),
+        media=raw["media"],
+        grouped_id=raw["grouped_id"],
+        reply_to=None if reply is None else FakeReplyHeader(**reply),
+    )
+
+
 def fixture_replies() -> dict[object, list[FakeMessage]]:
     """Ключ — то, чем адаптер адресует чат: username, а при его отсутствии id."""
     by_id = {chat.tg_id: chat for chat in fixture_chats()}
-    replies: dict[object, list[FakeMessage]] = {}
-    for raw_id, messages in fixture()["messages"].items():
-        chat = by_id[int(raw_id)]
-        replies[chat.username or chat.tg_id] = [
-            FakeMessage(
-                id=message["id"],
-                message=message["message"],
-                date=None if message["date"] is None else datetime.fromisoformat(message["date"]),
-                media=message["media"],
-            )
-            for message in messages
-        ]
-    return replies
+    return {
+        by_id[int(raw_id)].username or by_id[int(raw_id)].tg_id: [_message(raw) for raw in messages]
+        for raw_id, messages in fixture()["messages"].items()
+    }
 
 
 def adapter(
@@ -164,23 +193,26 @@ def adapter(
     *,
     budget_s: float = 40.0,
     sleep: Sleeps | None = None,
+    clock: FakeClock | None = None,
 ) -> TelegramGroupsSource:
     return TelegramGroupsSource(
         directory=FakeDirectory(fixture_chats() if chats is None else chats),
         client=client,
         budget_s=budget_s,
         sleep=sleep or Sleeps(),
+        clock=clock or FakeClock(),
     )
 
 
 async def test_search_maps_messages_to_items() -> None:
-    """Обычная выдача: два чата, четыре текстовых поста, один пропущен."""
+    """Обычная выдача: два чата, тексты, ссылки, даты."""
     client = FakeTelegram(replies=fixture_replies())
     items = await adapter(client).search("байк", {"city": "nha_trang"})
 
     assert [item.external_id for item in items] == [
         "-1001657234891:55120",
         "-1001657234891:55148",
+        "-1001657234891:55160",
         "-1001902334455:4471",
     ]
     first = items[0]
@@ -195,9 +227,9 @@ async def test_search_maps_messages_to_items() -> None:
 async def test_fields_absent_in_telegram_stay_empty() -> None:
     """Автора поста в группе API не отдаёт (spec-v2, 7) — не выдумываем его."""
     items = await adapter(FakeTelegram(replies=fixture_replies())).search("байк", {})
-    assert [item.seller_name for item in items] == ["", "", ""]
-    assert [item.title for item in items] == ["", "", ""]
-    assert [item.price_raw for item in items] == ["", "", ""]
+    assert [item.seller_name for item in items] == [""] * 4
+    assert [item.title for item in items] == [""] * 4
+    assert [item.price_raw for item in items] == [""] * 4
     assert all(item.price_vnd is None for item in items)
     assert all(item.images == [] for item in items)
 
@@ -226,6 +258,38 @@ async def test_message_without_text_is_skipped() -> None:
     assert skipped.isdisjoint({item.external_id for item in items})
 
 
+async def test_album_becomes_one_item_not_five() -> None:
+    """Пять фото с одной подписью — одно объявление, а не пять карточек."""
+    items = await adapter(FakeTelegram(replies=fixture_replies())).search("байк", {})
+    album = [item for item in items if item.raw["grouped_id"] == 13377766655]
+    assert [item.external_id for item in album] == ["-1001657234891:55160"]
+
+
+async def test_album_is_not_repeated_by_the_next_task_of_the_plan() -> None:
+    """План ставит до пяти задач на источник — альбом не должен всплыть дважды."""
+    source = adapter(FakeTelegram(replies=fixture_replies()))
+    first = await source.search("байк", {})
+    second = await source.search("скутер", {})
+    assert any(item.raw["grouped_id"] == 13377766655 for item in first)
+    assert all(item.raw["grouped_id"] != 13377766655 for item in second)
+
+
+async def test_link_into_a_forum_topic_has_three_segments() -> None:
+    """В форумной супергруппе ссылка без номера темы ведёт в никуда."""
+    items = await adapter(FakeTelegram(replies=fixture_replies())).search("байк", {})
+    forum = next(item for item in items if item.external_id == "-1001902334455:4471")
+    assert forum.url == "https://t.me/c/1902334455/4400/4471"
+    assert forum.raw["topic_id"] == 4400
+
+
+async def test_plain_reply_is_not_a_topic() -> None:
+    """Ответ на сообщение в обычной группе номера темы не добавляет."""
+    items = await adapter(FakeTelegram(replies=fixture_replies())).search("байк", {})
+    reply = next(item for item in items if item.external_id == "-1001657234891:55148")
+    assert reply.url == "https://t.me/nhatrang_baraholka/55148"
+    assert reply.raw["topic_id"] is None
+
+
 async def test_flood_wait_within_budget_is_waited_out() -> None:
     """Telegram попросил подождать — ждём и повторяем, источник живой."""
     client = FakeTelegram(replies=fixture_replies(), floods=[7])
@@ -235,7 +299,7 @@ async def test_flood_wait_within_budget_is_waited_out() -> None:
 
     assert sleeps.pauses == [7.0]
     assert source.degraded is False
-    assert len(items) == 3
+    assert len(items) == 4
 
 
 async def test_flood_pause_grows_with_each_hit() -> None:
@@ -260,6 +324,47 @@ async def test_flood_wait_over_budget_degrades_source() -> None:
     assert client.calls.count("get_messages") == 1
 
 
+async def test_budget_is_shared_by_all_tasks_of_the_source() -> None:
+    """40 с — доля источника в плане, а не подарок каждой его задаче.
+
+    Иначе две задачи `telegram_groups` съедали бы 80 с из 90 с плана и
+    остальные источники не успевали бы вовсе.
+    """
+    clock = FakeClock()
+    client = FakeTelegram(replies=fixture_replies(), floods=[])
+    sleeps = Sleeps()
+    source = adapter(client, budget_s=40.0, sleep=sleeps, clock=clock)
+
+    await source.search("байк", {})
+    clock.advance(35.0)
+    # На вторую задачу осталось 5 с, и пауза в 20 с в них не помещается.
+    client.floods.append(20)
+    await source.search("скутер", {})
+
+    assert sleeps.pauses == []
+    assert source.degraded is True
+
+
+async def test_exhausted_budget_stops_the_walk() -> None:
+    """Кончились свои 40 с — источник больше не ходит в Telegram.
+
+    Отсчёт начинается с первой задачи источника, а не с создания адаптера:
+    план мог простоять в очереди за другими источниками.
+    """
+    clock = FakeClock()
+    client = FakeTelegram(replies=fixture_replies())
+    source = adapter(client, budget_s=10.0, clock=clock)
+
+    assert await source.search("байк", {}) != []
+    clock.advance(11.0)
+    queried_before = client.calls.count("get_messages")
+
+    assert await source.search("скутер", {}) == []
+    assert client.calls.count("get_messages") == queried_before
+    # Бюджет — не поломка: источник остаётся в плане.
+    assert source.degraded is False
+
+
 async def test_chat_that_floods_twice_is_left_alone() -> None:
     """Две попытки на чат — потолок. Ретрая в цикле нет."""
     client = FakeTelegram(replies=fixture_replies(), floods=[3, 3, 0])
@@ -269,6 +374,20 @@ async def test_chat_that_floods_twice_is_left_alone() -> None:
     assert client.queried == ["nhatrang_baraholka", "nhatrang_baraholka", -1001902334455]
     assert source.degraded is False
     assert [item.external_id for item in items] == ["-1001902334455:4471"]
+
+
+@pytest.mark.parametrize("dead", [AuthKeyUnregisteredError, SessionRevokedError])
+async def test_dead_session_stops_on_the_first_chat(dead: Callable[..., BaseException]) -> None:
+    """Сессию чинит владелец, а не девять одинаковых отказов подряд."""
+    many = [
+        ChatRef(tg_id=-1000000000000 - n, username=f"chat{n}", search_rank=n) for n in range(10)
+    ]
+    client = FakeTelegram(raises=dead(request=None))
+    source = adapter(client, many)
+
+    assert await source.search("байк", {}) == []
+    assert source.degraded is True
+    assert client.calls.count("get_messages") == 1
 
 
 async def test_no_more_than_ten_chats_per_search() -> None:
@@ -287,6 +406,17 @@ async def test_no_more_than_ten_chats_per_search() -> None:
     assert directory.asked == [("nha_trang", MAX_CHATS_PER_SEARCH)]
 
 
+async def test_positive_chat_id_is_refused_loudly() -> None:
+    """Положительный id — это ПОЛЬЗОВАТЕЛЬ. Молча искать не там нельзя."""
+    broken = ChatRef(tg_id=1657234891, title="битая строка реестра", search_rank=1)
+    good = ChatRef(tg_id=-1001902334455, username="ok_chat", search_rank=2)
+    client = FakeTelegram(replies={"ok_chat": []})
+    source = adapter(client, [broken, good])
+
+    await source.search("байк", {})
+    assert client.queried == ["ok_chat"]
+
+
 async def test_chats_are_queried_one_after_another() -> None:
     """Параллелить обращения к одному хосту значит выглядеть как атака."""
     client = FakeTelegram(replies=fixture_replies())
@@ -300,7 +430,11 @@ async def test_chats_are_queried_one_after_another() -> None:
 
 
 async def test_only_read_methods_are_called() -> None:
-    """Юзербот молчит: наружу уходит только чтение."""
+    """Юзербот молчит: наружу уходит только чтение.
+
+    Вступление в группу и беззвучный режим владелец разрешил (CLAUDE.md), но
+    не этому источнику — он ходит по чатам, в которых бот уже состоит.
+    """
     client = FakeTelegram(replies=fixture_replies())
     source = adapter(client)
     await source.search("байк", {})
@@ -314,7 +448,7 @@ async def test_only_read_methods_are_called() -> None:
 
 def test_adapter_never_calls_an_outgoing_method() -> None:
     """Страховка от будущей правки: запрет держится кодом, а не памятью."""
-    for module in (telegram_groups, telegram_reference, telegram_client):
+    for module in (telegram_groups, telegram_reference, telegram_client, chat_directory):
         path = Path(str(module.__file__))
         assert not OUTGOING_CALL.search(path.read_text(encoding="utf-8")), path.name
 
@@ -331,6 +465,7 @@ async def test_injected_client_is_not_disconnected() -> None:
 def test_public_chat_link_opens_for_everyone() -> None:
     chat = ChatRef(tg_id=-1001657234891, username="nhatrang_baraholka")
     assert message_link(chat, 55120) == "https://t.me/nhatrang_baraholka/55120"
+    assert message_link(chat, 55120, 900) == "https://t.me/nhatrang_baraholka/900/55120"
 
 
 def test_private_chat_link_drops_the_service_prefix() -> None:
@@ -410,7 +545,7 @@ def test_registry_knows_the_source() -> None:
 
 
 async def test_source_without_chat_registry_stays_quiet() -> None:
-    """Пока слоя `db` нет, источник просто ничего не находит."""
+    """Пока реестр не подключён, источник просто ничего не находит."""
     source = get_source(SOURCE_NAME)
     assert await source.search("байк", {}) == []
     assert source.degraded is False
