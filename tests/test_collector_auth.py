@@ -1201,3 +1201,278 @@ def test_extra_arguments_to_auth_are_an_error_not_a_silent_drop(
 
 def test_the_usage_hint_names_the_only_subcommand() -> None:
     assert "auth" in collector_main.USAGE
+
+
+# --- Четвёртое поколение rc=1: полнота по построению, а не по списку типов ----
+#
+# Первые три поколения ловились перечислением: необработанный `Exception` от
+# MTProto (rc=7), испорченный `TG_API_ID` (rc=2), `Path.exists()` вне `try`
+# (rc=5). Каждый раз набор объявлялся полным — и каждый раз находился путь
+# мимо списка. Четвёртый круг дал сразу два: `ValueError` от нулевого байта в
+# пути (падал в `write_session`, то есть УЖЕ ПОСЛЕ созданной авторизации) и
+# `PermissionError` на нечитаемом `.env` (падал в pydantic мимо
+# `ValidationError`). Поэтому тесты ниже целятся не в эти два класса, а в саму
+# привычку: они бросают тип, о котором код не знает, и требуют код из таблицы.
+
+# Вся таблица `docs/deploy.md`, 3.5. rc=1 в ней описан как «наш баг» — ни один
+# сценарий команды не вправе его вернуть.
+DOCUMENTED_EXIT_CODES = frozenset(
+    {
+        EXIT_OK,
+        EXIT_NOT_CONFIGURED,
+        EXIT_TELEGRAM_REFUSED,
+        EXIT_NETWORK,
+        EXIT_NO_OUTPUT_FILE,
+        EXIT_NO_TERMINAL,
+        EXIT_PROTOCOL,
+        EXIT_NOT_SIGNED_IN,
+        EXIT_USAGE,
+        EXIT_INTERRUPTED,
+    }
+)
+
+
+class Boom(Exception):
+    """Тип, о котором `auth.py` не знает и знать не может.
+
+    Смысл именно в незнании: список `except (OSError, ValueError)` доказывает
+    только то, что вспомнили при написании, а тест с чужим типом — что шаг
+    охраняется по построению. Такой тест не устареет от новой версии Telethon
+    или pydantic с новым классом исключения.
+    """
+
+
+def _boom(*_args: object, **_kwargs: object) -> object:
+    raise Boom("что-то, чего никто не перечислял")
+
+
+def test_a_null_byte_in_the_path_is_named_not_swallowed(tmp_path: Path) -> None:
+    """Нулевой байт проходил ворота насквозь: `Path` отвечает «пусто», не «не знаю».
+
+    `is_symlink`, `exists` и `is_dir` глотают `ValueError` из конвертера
+    аргументов ровно так же, как ENOENT, поэтому `why_cannot_write` возвращала
+    пустую строку («писать можно»), а отказ приходил из `os.open` в
+    `write_session` — когда авторизация на аккаунте уже создана.
+    """
+    path = tmp_path / "tg\x00session.txt"
+
+    assert path.parent.is_dir(), "родитель настоящий — врёт не он"
+    assert path.is_symlink() is False, "вот оно: не «не знаю», а уверенное «нет»"
+    assert path.exists() is False
+
+    reason = why_cannot_write(path)
+
+    assert "нулевой байт" in reason, "молчание тут означало бы «писать можно»"
+
+
+def test_a_null_byte_in_the_parent_is_reported_too(tmp_path: Path) -> None:
+    """Нулевой байт в имени каталога — тот же отказ, а не «каталога нет»."""
+    assert "нулевой байт" in why_cannot_write(tmp_path / "се\x00креты" / "tg_session.txt")
+
+
+def test_a_null_byte_in_the_path_never_reaches_telegram(tmp_path: Path) -> None:
+    """Главное в этом баге — не код возврата, а МОМЕНТ отказа.
+
+    Из оболочки такой путь не придёт (`execve` не пропускает нулевой байт в
+    argv), но `run_auth(out_path=…)` — библиотечный вызов, и через него
+    приходил. `client=None` в `_run` роняет тест, если фабрику всё-таки
+    позвали: отказ обязан прийти ДО отправки кода, а не после входа.
+    """
+    recorder = Recorder()
+
+    code, _ = _run(tmp_path, None, recorder, name="tg\x00session.txt")
+
+    assert code == EXIT_NO_OUTPUT_FILE, "раньше здесь был ValueError и rc=1 с трейсбеком"
+    assert code in DOCUMENTED_EXIT_CODES
+    assert "нулевой байт" in recorder.transcript
+    assert not list(tmp_path.iterdir()), "ни файла, ни огрызка"
+
+
+def test_write_session_cleans_up_after_a_non_oserror_too(tmp_path: Path) -> None:
+    """Огрызок убирается по любой причине отказа, а не только по `OSError`.
+
+    Повтор команды упёрся бы в собственный `O_EXCL` («уже существует»), хотя
+    вторая авторизация на аккаунте к тому моменту уже создана.
+    """
+    out = tmp_path / "tg_session.txt"
+
+    class Unformattable:
+        def __str__(self) -> str:
+            raise Boom("сломались на форматировании самой строки")
+
+    with pytest.raises(Boom):
+        write_session(out, Unformattable())  # type: ignore[arg-type]
+
+    assert not out.exists(), "огрызок заблокировал бы повтор"
+
+
+def test_unreadable_env_is_a_documented_code_not_a_pydantic_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Нечитаемый `.env` — не экзотика, а нормальное состояние сервера.
+
+    В `/var/www/sniffer` файл лежит `-rw------- root root`, а процесс в образе
+    идёт под uid 1000: любой запуск с примонтированным репозиторием получал
+    `PermissionError` изнутри pydantic — мимо `ValidationError` — и rc=1.
+    """
+
+    def unreadable_env() -> Settings:
+        raise PermissionError(13, "Permission denied", ".env")
+
+    monkeypatch.setattr(collector_auth, "get_settings", unreadable_env)
+    recorder = Recorder()
+
+    code = run_auth(
+        None,
+        recorder.console,
+        out_path=tmp_path / "tg_session.txt",
+        client_factory=lambda _i, _h: FakeClient(),
+    )
+
+    assert code == EXIT_NOT_CONFIGURED, "настройки не прочитаны — это код 2, как у пустых"
+    assert "Permission denied" in recorder.transcript
+    assert ".env" in recorder.transcript, "владельцу нужно знать, какой файл починить"
+    assert not (tmp_path / "tg_session.txt").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="прав POSIX на Windows нет, прод — Linux")
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root читает файл 0o000 — воспроизводить нечего",
+)
+def test_pydantic_really_raises_permissionerror_on_an_unreadable_env(tmp_path: Path) -> None:
+    """Тот же случай без подмен: настоящий файл 0o000 и настоящий pydantic.
+
+    Тест удерживает не наш код, а факт о библиотеке, на котором построен
+    предыдущий: `PermissionError` действительно проходит мимо
+    `ValidationError`. Разойдись это с реальностью — узнать надо здесь.
+    """
+    env = tmp_path / ".env"
+    env.write_text("TG_API_ID=42\n", encoding="utf-8")
+    env.chmod(0o000)
+    try:
+        with pytest.raises(PermissionError):
+            Settings(_env_file=str(env))  # type: ignore[call-arg]
+    finally:
+        env.chmod(0o600)
+
+
+def _run_with_boom_at(
+    step: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> int:
+    """Подкладывает `Boom` в один шаг команды и возвращает её код выхода."""
+
+    def has_terminal() -> bool:
+        return True
+
+    settings: Settings | None = _ready_settings()
+    interactive: Callable[[], bool] = has_terminal
+
+    if step == "settings":
+        settings = None
+        monkeypatch.setattr(collector_auth, "get_settings", _boom)
+    elif step == "terminal":
+        interactive = _boom  # type: ignore[assignment]
+    elif step == "path":
+        monkeypatch.setattr(collector_auth, "why_cannot_write", _boom)
+    elif step == "write":
+        monkeypatch.setattr(collector_auth, "write_session", _boom)
+    elif step != "telegram":
+        raise AssertionError(f"неизвестный шаг {step}")
+
+    def factory(_api_id: int, _api_hash: str) -> FakeClient:
+        if step == "telegram":
+            raise Boom("шаг «диалог с Telegram»")
+        return FakeClient()
+
+    return run_auth(
+        settings,
+        _console_with(is_interactive=interactive),
+        out_path=tmp_path / "tg_session.txt",
+        client_factory=factory,
+    )
+
+
+def _console_with(*, is_interactive: Callable[[], bool]) -> Console:
+    return Console(
+        say=lambda _t: None,
+        ask=lambda _p: "12345",
+        ask_secret=lambda _p: "секрет",
+        is_interactive=is_interactive,
+    )
+
+
+@pytest.mark.parametrize(
+    ("step", "expected"),
+    [
+        ("settings", EXIT_NOT_CONFIGURED),
+        ("terminal", EXIT_NO_TERMINAL),
+        ("path", EXIT_NO_OUTPUT_FILE),
+        ("telegram", EXIT_PROTOCOL),
+        ("write", EXIT_NO_OUTPUT_FILE),
+    ],
+)
+def test_every_step_answers_with_a_documented_code_for_an_unknown_failure(
+    step: str,
+    expected: int,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Вот чем закрывается набор кодов — и почему пятого круга быть не должно.
+
+    Каждый шаг команды получает исключение ТИПА, КОТОРОГО КОД НЕ ЗНАЕТ, и
+    обязан ответить кодом из таблицы `deploy.md`, 3.5. Пройти этот тест
+    списком ожидаемых классов нельзя — только охраной по построению
+    (`except Exception` последним в каждом шаге). Добавится шаг — добавится
+    строка сюда; появится в библиотеке новый класс исключения — тест уже его
+    покрывает.
+    """
+    code = _run_with_boom_at(step, tmp_path, monkeypatch)
+
+    assert code == expected
+    assert code in DOCUMENTED_EXIT_CODES
+    assert code != 1, "rc=1 в таблице описан как наш баг: ни один сценарий сюда не ведёт"
+    assert not (tmp_path / "tg_session.txt").exists(), "ни сессии, ни огрызка"
+
+
+def test_a_cancelled_dialog_is_an_interrupt_not_a_traceback(tmp_path: Path) -> None:
+    """`CancelledError` от `BaseException`, то есть мимо `except Exception`.
+
+    Единственный путь в необработанную ошибку, который не закрывается охраной
+    от `Exception`: `asyncio.run` отдаёт её наружу, когда задачу сняли. Исход
+    ровно как у Ctrl+C — команду прервали.
+    """
+    recorder = Recorder()
+
+    def cancelled(_api_id: int, _api_hash: str) -> FakeClient:
+        raise asyncio.CancelledError
+
+    code = run_auth(
+        _ready_settings(),
+        recorder.console,
+        out_path=tmp_path / "tg_session.txt",
+        client_factory=cancelled,
+    )
+
+    assert code == EXIT_INTERRUPTED
+    assert code in DOCUMENTED_EXIT_CODES
+    assert not (tmp_path / "tg_session.txt").exists()
+
+
+def test_the_documented_codes_are_exactly_the_modules_constants() -> None:
+    """Список выше — не отдельная память, а те же константы модуля.
+
+    Появится новый код возврата, не попавший в `DOCUMENTED_EXIT_CODES` (а
+    значит и в таблицу `deploy.md`) — падать надо здесь, а не у владельца.
+    """
+    constants = {
+        value
+        for name, value in vars(collector_auth).items()
+        if name.startswith("EXIT_") and isinstance(value, int)
+    }
+
+    assert constants == set(DOCUMENTED_EXIT_CODES)
+    assert 1 not in constants
