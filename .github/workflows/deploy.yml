@@ -50,7 +50,9 @@ jobs:
           echo "== изменённые файлы =="
           echo "$CHANGED"
 
-          CODE="$(echo "$CHANGED" | grep -E '^src/sniffer/(sources|search|verifier|pipeline)/' || true)"
+          # dashboard/ в списке наравне с воронкой: страница владельца — это
+          # тоже поведение системы, и её модель угроз обязана быть описана.
+          CODE="$(echo "$CHANGED" | grep -E '^src/sniffer/(sources|search|verifier|pipeline|dashboard)/' || true)"
           DOCS="$(echo "$CHANGED" | grep -E '^docs/.*\.md$' || true)"
 
           if [ -n "$CODE" ] && [ -z "$DOCS" ]; then
@@ -65,8 +67,8 @@ jobs:
             echo "ей верят."
             echo
             echo "Что обновить: docs/spec-v2.md (источники, планировщик, verifier),"
-            echo "docs/architecture.md (воронка), docs/deploy.md (если изменился"
-            echo "состав сервисов)."
+            echo "docs/architecture.md (воронка), docs/dashboard.md (интерфейс"
+            echo "владельца), docs/deploy.md (если изменился состав сервисов)."
             exit 1
           fi
 

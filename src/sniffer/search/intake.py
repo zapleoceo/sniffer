@@ -29,8 +29,8 @@ from sniffer.domain.passport import (
     PricePeriod,
 )
 from sniffer.search.intake_rules import parse_query
+from sniffer.search.market_terms import ALL_CITY_NAMES
 from sniffer.search.planner import StructuredCaller
-from sniffer.search.vocabulary import ALL_CITY_NAMES
 
 log = structlog.get_logger(__name__)
 

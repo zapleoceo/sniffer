@@ -19,7 +19,8 @@ from typing import Any
 
 from sniffer.domain.passport import Category, Intent, Passport, PassportStatus
 from sniffer.search.budget_rules import parse_budget
-from sniffer.search.vocabulary import ALL_CITY_NAMES, city_variants
+from sniffer.search.market_terms import ALL_CITY_NAMES
+from sniffer.search.vocabulary import city_variants
 
 # Порядок значим: побеждает первое совпадение. «Ищу квартиру в аренду» — это
 # аренда, а не покупка, поэтому глаголы сделки идут раньше общего «ищу».

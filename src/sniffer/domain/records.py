@@ -150,3 +150,87 @@ class Job:
     payload: dict[str, Any] = field(default_factory=dict)
     attempts: int = 0
     run_after: datetime | None = None
+
+
+REQUEST_RUNNING = "running"
+REQUEST_DONE = "done"
+REQUEST_FAILED = "failed"
+
+DIRECTION_IN = "in"
+DIRECTION_OUT = "out"
+
+
+@dataclass(frozen=True, slots=True)
+class ClientRequest:
+    """Запрос клиента как единица наблюдения.
+
+    К нему привязываются и расходы, и замеры времени: без общего ключа связать
+    «спросил про байк» и «потрачено N токенов» можно только по времени, а при
+    двух параллельных запросах время врёт.
+    """
+
+    id: int
+    user_id: int
+    raw_query: str
+    status: str = REQUEST_RUNNING
+    passport_id: int | None = None
+    stages: dict[str, int] = field(default_factory=dict)
+    plan_fallback: bool = False
+    sources: list[str] = field(default_factory=list)
+    result_count: int = 0
+    error: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    duration_ms: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DialogMessage:
+    """Реплика переписки: `in` — от клиента, `out` — от бота."""
+
+    id: int
+    user_id: int
+    direction: str
+    text: str
+    request_id: int | None = None
+    created_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BrokerCall:
+    """Один вызов LLM: что просили, кто ответил, сколько стоило.
+
+    `broker_request_id` — идентификатор строки в `usage_log` брокера. Его
+    отсутствие означает, что брокер до учёта не дошёл, а не что вызов был
+    бесплатным.
+    """
+
+    capability: str
+    request_id: int | None = None
+    broker_request_id: int | None = None
+    provider: str | None = None
+    model: str | None = None
+    tokens_in: int = 0
+    tokens_out: int = 0
+    cost_usd: Decimal = Decimal(0)
+    latency_ms: int | None = None
+    created_at: datetime | None = None
+    id: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SessionState:
+    """Состояние сессии юзербота — без самой строки сессии.
+
+    Строку наружу не отдаём принципиально: она нужна только коллектору, а
+    дашборд обязан уметь показать состояние, ничего не расшифровывая.
+    """
+
+    phone: str
+    is_active: bool
+    id: int | None = None
+    last_ok_at: datetime | None = None
+    last_error: str | None = None
+    last_error_at: datetime | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None

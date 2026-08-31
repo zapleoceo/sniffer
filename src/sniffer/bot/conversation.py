@@ -13,12 +13,14 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Protocol, cast
 
 import structlog
 
+from sniffer.bot import journal
 from sniffer.bot.cards import render_cards
 from sniffer.bot.store import Client, Dialogue, DialogueStore
+from sniffer.broker.usage import request_scope
 from sniffer.domain.dialogue import (
     EVENT_FEEDBACK,
     EVENT_MANUAL_EDIT,
@@ -76,16 +78,115 @@ class Parser(Protocol):
     async def parse(self, text: str) -> Passport: ...
 
 
+@dataclass(frozen=True, slots=True)
+class Found:
+    """Что нашлось и чем искали.
+
+    План возвращается наружу не для красоты: дашборд показывает долю запросов,
+    ушедших в фолбэк, и считает её по этому полю. Отдать одни объявления значило
+    бы уронить этот столбец в тишине — а по нему видно, что брокер лежит.
+
+    `stages` заполняет сам искатель: «запрос шёл сорок секунд» не отвечает, кто
+    их съел — планировщик или источники, а от ответа зависит, что править.
+    """
+
+    items: list[RawItem]
+    fallback: bool = False
+    sources: tuple[str, ...] = ()
+    stages: dict[str, int] = field(default_factory=dict)
+
+
+class Recorder(Protocol):
+    """Куда пишется ход диалога. Реализация по умолчанию — `bot.journal`.
+
+    Зависимость явная, а не импорт модуля внутри метода, по двум причинам.
+    Первая — та же, что у разбора и поиска: подставить в тесте нечего, кроме
+    подмены чужого модуля, а подмена «на всякий случай» забывается ровно в том
+    тесте, где она нужна. Вторая дороже: журнал ходит в Postgres, и разговор
+    без подставленного журнала тянет соединение к базе из каждого теста — сам
+    журнал ошибку проглотит, но ожидание соединения останется.
+    """
+
+    async def open_request(
+        self, tg_user_id: int, text: str, *, username: str | None = None
+    ) -> journal.OpenRequest | None: ...
+
+    async def log_answer(self, opened: journal.OpenRequest | None, text: str) -> None: ...
+
+    async def close_request(
+        self,
+        opened: journal.OpenRequest | None,
+        *,
+        stages: dict[str, int],
+        result_count: int = 0,
+        plan_fallback: bool = False,
+        sources: list[str] | None = None,
+        error: str | None = None,
+    ) -> None: ...
+
+
 Send = Callable[[Reply], Awaitable[None]]
-Finder = Callable[[Passport], Awaitable[list[RawItem]]]
+Finder = Callable[[Passport], Awaitable["Found"]]
 Intake = Callable[[], Parser]
 
 
-async def find_live(passport: Passport) -> list[RawItem]:
+async def find_live(passport: Passport) -> Found:
+    watch = journal.Stopwatch()
     sources = sorted(registered_sources())
     plan = await SearchPlanner().plan(passport, sources)
+    watch.lap("plan_ms")
     log.info("bot.plan", tasks=len(plan.tasks), fallback=plan.is_fallback, sources=plan.sources())
-    return await run_plan(plan)
+    items = await run_plan(plan)
+    watch.lap("search_ms")
+    return Found(
+        items=items,
+        fallback=plan.is_fallback,
+        sources=tuple(plan.sources()),
+        stages=watch.stages,
+    )
+
+
+@dataclass(slots=True)
+class _Turn:
+    """Один ход диалога для журнала: сколько заняло, чем кончилось.
+
+    Существует потому, что закрыть запись обязан тот, кто начал ход, а знает
+    итог тот, кто дошёл до поиска. Передавать между ними наружу нечего —
+    поэтому один объект едет по ходу и собирает факты по дороге.
+
+    Ошибка журнала ход не роняет: недоступная база означает пустой дашборд, а
+    не «бот не ответил» (см. `journal`).
+    """
+
+    recorder: Recorder
+    opened: journal.OpenRequest | None
+    watch: journal.Stopwatch = field(default_factory=journal.Stopwatch)
+    found: Found | None = None
+    failed: str | None = None
+
+    def recording(self, send: Send) -> Send:
+        """Тот же отправитель, но каждый ответ попадает и в журнал.
+
+        Сначала человек, потом лог: сломанный журнал не должен задерживать
+        ответ, а порядок «сначала записать» ровно это и делал бы.
+        """
+
+        async def recorded(reply: Reply) -> None:
+            await send(reply)
+            await self.recorder.log_answer(self.opened, reply.text)
+
+        return recorded
+
+    async def close(self, *, error: str | None = None) -> None:
+        reason = error or self.failed
+        await self.recorder.close_request(
+            self.opened,
+            stages={**self.watch.stages, **(self.found.stages if self.found else {})},
+            result_count=len(self.found.items) if self.found else 0,
+            plan_fallback=bool(self.found and self.found.fallback),
+            sources=list(self.found.sources) if self.found else [],
+            error=reason,
+        )
 
 
 class Conversation:
@@ -95,16 +196,47 @@ class Conversation:
         *,
         intake: Intake = QueryIntake,
         finder: Finder = find_live,
+        recorder: Recorder | None = None,
     ) -> None:
         self._store = store
         self._intake = intake
         self._finder = finder
+        # По умолчанию — настоящий журнал: разговор создаётся хендлером без
+        # аргументов, и всё, что не подставлено здесь, на боевом пути не
+        # появится никогда.
+        # `cast`, потому что модуль под протокол подходит по существу, но не по
+        # типу: mypy видит `Module`, а не класс с тремя методами. Проверяет
+        # соответствие тест `test_the_real_journal_fits_the_recorder_protocol` —
+        # иначе расхождение вылезло бы в проде, где подставлен именно модуль.
+        self._recorder: Recorder = recorder or cast(Recorder, journal)
 
     async def on_text(self, client: Client, text: str, send: Send) -> None:
         message = text.strip()
         if not message:
             return
 
+        # Ход журналируется целиком, и журнал живёт здесь, а не в хендлере:
+        # границу единицы работы ставит тот, кто владеет ходом, а хендлер о
+        # разборе, вопросах и поиске не знает ничего (architecture.md, 5.1).
+        opened = await self._recorder.open_request(
+            client.tg_user_id, message, username=client.username
+        )
+        turn = _Turn(recorder=self._recorder, opened=opened)
+        # Расходы на модель принадлежат ЭТОМУ запросу: contextvar доносит его id
+        # до клиента брокера через слои, которым он не нужен, и не путается
+        # между двумя клиентами, отвечающими одновременно.
+        with request_scope(opened.request_id if opened else None):
+            try:
+                await self._turn(client, message, turn.recording(send), turn)
+            except Exception as exc:
+                # Ход обязан закрыться в журнале даже сломанным: иначе в
+                # дашборде видны только удачные запросы, то есть картина ровно
+                # обратная той, ради которой журнал заведён.
+                await turn.close(error=f"{type(exc).__name__}: {exc}")
+                raise
+            await turn.close()
+
+    async def _turn(self, client: Client, message: str, send: Send, turn: _Turn) -> None:
         dialogue = await self._store.load(client)
         current = dialogue.passport
         if dialogue.state.pending and current is not None:
@@ -113,6 +245,7 @@ class Conversation:
                 return
 
         passport = await self._intake().parse(message)
+        turn.watch.lap("intake_ms")
         if current is not None and restates(current.passport, passport):
             # Та же просьба другими словами — не новый запрос. Начни здесь
             # цепочка заново, и повтор фразы обнулял бы собранные ответы вместе
@@ -120,7 +253,7 @@ class Conversation:
             await self._restated(dialogue, send)
             return
         dialogue = await self._store.start(dialogue, passport)
-        await self._ask_or_search(dialogue, send)
+        await self._ask_or_search(dialogue, send, turn)
 
     async def on_answer(self, client: Client, code: str, value: str, send: Send) -> None:
         """Клиент нажал кнопку под вопросом."""
@@ -219,7 +352,9 @@ class Conversation:
             payload={"field": field_name, "skipped": True},
         )
 
-    async def _ask_or_search(self, dialogue: Dialogue, send: Send) -> None:
+    async def _ask_or_search(
+        self, dialogue: Dialogue, send: Send, turn: _Turn | None = None
+    ) -> None:
         if dialogue.passport is None:  # pragma: no cover — сюда приходят с паспортом
             return
         passport = dialogue.passport.passport
@@ -232,7 +367,7 @@ class Conversation:
             return
         question = next_question(passport, dialogue.state.asked)
         if question is None:
-            await self._search(dialogue, send)
+            await self._search(dialogue, send, turn)
             return
         await self._ask(dialogue, question, send)
 
@@ -251,25 +386,29 @@ class Conversation:
         )
         await send(Reply(question.text, question=question))
 
-    async def _search(self, dialogue: Dialogue, send: Send) -> None:
+    async def _search(self, dialogue: Dialogue, send: Send, turn: _Turn | None = None) -> None:
         if dialogue.passport is None:  # pragma: no cover — сюда приходят с паспортом
             return
         passport = dialogue.passport.passport
         await send(Reply(_accepted(passport)))
 
         try:
-            items = await self._finder(passport)
-        except Exception:
+            found = await self._finder(passport)
+        except Exception as exc:
             # Граница запроса: неожиданная ошибка внутри поиска не должна
             # оставлять клиента без ответа. Трейсбек уходит в лог целиком.
             log.exception("bot.search_failed", passport_id=dialogue.passport.id)
             await send(Reply(SEARCH_FAILED))
+            if turn is not None:
+                turn.failed = f"{type(exc).__name__}: {exc}"
             return
 
-        if not items:
+        if turn is not None:
+            turn.found = found
+        if not found.items:
             await send(Reply(NOTHING_FOUND))
             return
-        await send(Reply(render_cards(items), feedback=feedback_buttons(passport)))
+        await send(Reply(render_cards(found.items), feedback=feedback_buttons(passport)))
 
 
 def _unserved(city: str | None) -> str:

@@ -8,6 +8,7 @@ Telegram, сеть и модель заменены заглушками: про
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -16,17 +17,20 @@ import pytest
 from aiogram.types import Message
 
 from sniffer.bot import app as bot_app
+from sniffer.bot import journal
 from sniffer.bot.conversation import (
     NO_REQUEST_YET,
     NOTHING_FOUND,
     NOTHING_TO_REFINE,
     SEARCH_FAILED,
     Conversation,
+    Found,
     Reply,
 )
 from sniffer.bot.handlers import search as handler
 from sniffer.bot.keyboards import AnswerCallback, FeedbackCallback, markup
 from sniffer.bot.store import Client, Dialogue
+from sniffer.broker import usage
 from sniffer.domain.dialogue import (
     EVENT_USER_MESSAGE,
     SKIP,
@@ -191,8 +195,8 @@ def filled() -> Passport:
     )
 
 
-async def nothing(_passport: Passport) -> list[RawItem]:
-    return []
+async def nothing(_passport: Passport) -> Found:
+    return Found(items=[])
 
 
 def talk(
@@ -201,11 +205,20 @@ def talk(
     *,
     items: list[RawItem] | None = None,
     finder: Any = None,
+    recorder: Any = None,
 ) -> Conversation:
-    async def find(_passport: Passport) -> list[RawItem]:
-        return items if items is not None else [found("1")]
+    async def find(_passport: Passport) -> Found:
+        return Found(items=items if items is not None else [found("1")])
 
-    return Conversation(store, intake=lambda: FakeIntake(passport), finder=finder or find)
+    # Журнал подставляется ВСЕГДА, даже когда тест о нём не спрашивает: без
+    # подстановки разговор тянет соединение к настоящему Postgres, и тест либо
+    # ждёт таймаут, либо зависит от того, поднята ли база рядом.
+    return Conversation(
+        store,
+        intake=lambda: FakeIntake(passport),
+        finder=finder or find,
+        recorder=recorder or FakeJournal(),
+    )
 
 
 # ── выдача без вопросов ─────────────────────────────────────────────────────
@@ -468,7 +481,7 @@ async def test_another_city_gets_an_answer_and_not_the_old_question(
     молча переспрашивал бюджет, будто клиент повторился.
     """
     store = MemoryStore()
-    talker = Conversation(store, intake=RulesIntake, finder=nothing)
+    talker = Conversation(store, intake=RulesIntake, finder=nothing, recorder=FakeJournal())
     await talker.on_text(CLIENT, "ищу скутер в нячанге", Replies())
 
     replies = Replies()
@@ -491,7 +504,7 @@ async def test_a_city_outside_the_dictionary_is_not_a_repeat_either() -> None:
     пороге; теперь порога нет — есть слово, которого в прежней фразе не было.
     """
     store = MemoryStore()
-    talker = Conversation(store, intake=RulesIntake, finder=nothing)
+    talker = Conversation(store, intake=RulesIntake, finder=nothing, recorder=FakeJournal())
     await talker.on_text(CLIENT, "ищу скутер в нячанге", Replies())
 
     replies = Replies()
@@ -770,3 +783,154 @@ async def test_appending_a_word_does_not_buy_three_more_questions() -> None:
             asked += sum(1 for reply in skipped.sent if reply.question is not None)
 
     assert asked <= 3, f"задано {asked} вопросов — лимит обойден дописыванием слова"
+
+
+# ── журнал и учёт расходов: ход целиком ─────────────────────────────────────
+#
+# Раньше эти тесты шли через хендлер: журнал жил там. Ход теперь принадлежит
+# разговору (хендлер не знает ни разбора, ни вопросов, ни поиска), поэтому и
+# проверяются они здесь — на том же уровне, где журнал открывается и закрывается.
+
+
+class FakeJournal:
+    """Журнал без базы: помнит, что бот записал бы о диалоге.
+
+    Подменяется целиком, потому что настоящий пошёл бы в Postgres. Проверять
+    здесь надо диалог, а запись в базу проверяют тесты репозиториев.
+    """
+
+    def __init__(self) -> None:
+        self.opened: list[tuple[int, str]] = []
+        self.answers: list[str] = []
+        self.closed: list[dict[str, Any]] = []
+
+    async def open_request(
+        self, tg_user_id: int, text: str, *, username: str | None = None
+    ) -> journal.OpenRequest:
+        self.opened.append((tg_user_id, text))
+        return journal.OpenRequest(user_id=1, request_id=len(self.opened))
+
+    async def log_answer(self, opened: journal.OpenRequest | None, text: str) -> None:
+        self.answers.append(text)
+
+    async def close_request(self, opened: journal.OpenRequest | None, **kwargs: Any) -> None:
+        self.closed.append({"request_id": None if opened is None else opened.request_id, **kwargs})
+
+
+@pytest.fixture
+def recorded() -> FakeJournal:
+    """Журнал без базы — его же подставляем разговору явно."""
+    return FakeJournal()
+
+
+async def test_journal_records_the_whole_turn(recorded: FakeJournal) -> None:
+    """Дашборд показывает и вопрос, и ответы, и время по этапам."""
+    replies = Replies()
+
+    await talk(MemoryStore(), filled(), recorder=recorded).on_text(CLIENT, "ищу скутер", replies)
+
+    assert recorded.opened == [(CLIENT.tg_user_id, "ищу скутер")]
+    assert recorded.answers == [reply.text for reply in replies.sent]
+    closed = recorded.closed[0]
+    assert closed["result_count"] == 1
+    assert closed.get("error") is None
+    assert "intake_ms" in closed["stages"]
+
+
+async def test_a_failed_search_is_closed_with_the_reason(recorded: FakeJournal) -> None:
+    """Упавший запрос обязан остаться в журнале — иначе видно только удачные."""
+
+    async def boom(_passport: Passport) -> Found:
+        raise RuntimeError("источник отдал не то")
+
+    await talk(MemoryStore(), filled(), finder=boom, recorder=recorded).on_text(
+        CLIENT, "ищу скутер", Replies()
+    )
+
+    assert "RuntimeError" in recorded.closed[0]["error"]
+    assert recorded.closed[0]["result_count"] == 0
+
+
+async def test_a_broken_turn_is_still_closed(recorded: FakeJournal) -> None:
+    """Ошибка ВНЕ поиска тоже закрывает запись, и причина в ней названа.
+
+    Иначе в дашборде остаётся вечно открытый запрос, и статистика показывает
+    ровно обратную картину: видны только те ходы, которые дошли до конца.
+    """
+
+    class BrokenStore(MemoryStore):
+        async def start(self, dialogue: Any, passport: Passport) -> Any:
+            raise RuntimeError("база отвалилась на записи паспорта")
+
+    talker = talk(BrokenStore(), filled(), recorder=recorded)
+
+    with pytest.raises(RuntimeError):
+        await talker.on_text(CLIENT, "ищу скутер", Replies())
+
+    assert "RuntimeError" in recorded.closed[0]["error"]
+
+
+async def test_the_plan_reaches_the_journal(recorded: FakeJournal) -> None:
+    """Доля фолбэков считается по этому полю — потерять его нельзя.
+
+    Искатель отчитывается о плане именно поэтому: разговор о плане не знает, а
+    дашборд по нему видит, что брокер лежит.
+    """
+
+    async def fallback_found(_passport: Passport) -> Found:
+        return Found(items=[found("1")], fallback=True, sources=("chotot",), stages={"plan_ms": 1})
+
+    await talk(MemoryStore(), filled(), finder=fallback_found, recorder=recorded).on_text(
+        CLIENT, "ищу скутер", Replies()
+    )
+
+    closed = recorded.closed[0]
+    assert closed["plan_fallback"] is True
+    assert closed["sources"] == ["chotot"]
+    assert closed["stages"]["plan_ms"] == 1
+
+
+async def test_broker_calls_are_scoped_to_the_request(recorded: FakeJournal) -> None:
+    """Расход, записанный во время поиска, принадлежит этому запросу."""
+    seen: list[int | None] = []
+
+    async def watching(_passport: Passport) -> Found:
+        seen.append(usage.current_request_id())
+        return Found(items=[])
+
+    await talk(MemoryStore(), filled(), finder=watching, recorder=recorded).on_text(
+        CLIENT, "ищу скутер", Replies()
+    )
+
+    assert seen == [1]
+    # За пределами хода область снимается: следующий вызов брокера не должен
+    # приписаться прошлому клиенту.
+    assert usage.current_request_id() is None
+
+
+def test_the_real_journal_fits_the_recorder_protocol() -> None:
+    """Настоящий журнал подходит разговору по всем трём методам.
+
+    Разговор берёт модуль `journal` через `cast`: mypy видит `Module`, а не
+    класс, и соответствие протоколу на боевом пути не проверяет никто. Разойдись
+    подпись — сломался бы прод, где подставлен именно модуль, а не заглушка.
+    """
+    for name in ("open_request", "log_answer", "close_request"):
+        assert callable(getattr(journal, name)), f"журнал не умеет {name}"
+
+    assert set(inspect.signature(journal.open_request).parameters) == {
+        "tg_user_id",
+        "text",
+        "username",
+    }
+    assert set(inspect.signature(journal.log_answer).parameters) == {"opened", "text"}
+    # Поля закрытия сверяются поимённо: разговор передаёт их именованно, и
+    # переименованное поле сломало бы прод молча — заглушка-то принимает всё.
+    assert set(inspect.signature(journal.close_request).parameters) == {
+        "opened",
+        "stages",
+        "result_count",
+        "plan_fallback",
+        "sources",
+        "error",
+    }
