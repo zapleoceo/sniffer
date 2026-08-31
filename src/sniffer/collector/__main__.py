@@ -12,15 +12,23 @@ live-подписка приходят на P1 — их место в `_tick`.
 from __future__ import annotations
 
 import asyncio
+import sys
+from collections.abc import Sequence
 
 import structlog
 
+from sniffer.collector.auth import run_auth
 from sniffer.config import Settings
 from sniffer.runtime.service import Service, idle_loop, run_service
 
 log = structlog.get_logger(__name__)
 
 NAME = "collector"
+
+# Разовая ручная операция живёт подкомандой того же модуля, а не отдельным
+# скриптом: авторизация нужна ровно тому образу, в котором потом крутится
+# коллектор, и версия Telethon у них обязана быть одна.
+AUTH_COMMAND = "auth"
 
 # Интервал опроса больше, чем у воркера: Telegram не любит частых обращений, а
 # новые сообщения приходят подпиской, а не поллингом.
@@ -30,8 +38,9 @@ POLL_INTERVAL_S = 15.0
 def missing_settings(settings: Settings) -> list[str]:
     """Без строки сессии авторизоваться в контейнере всё равно негде.
 
-    Интерактивный ввод кода из SMS в фоновом процессе невозможен, поэтому
-    `TG_SESSION` такое же обязательное требование, как ключи приложения.
+    Интерактивный ввод кода подтверждения в фоновом процессе невозможен,
+    поэтому `TG_SESSION` такое же обязательное требование, как ключи
+    приложения. Строку выдаёт подкоманда `auth` — разовая ручная операция.
     """
     required = {
         "TG_API_ID": bool(settings.tg_api_id),
@@ -53,5 +62,14 @@ async def _tick() -> int:
 
 SERVICE = Service(name=NAME, requires=missing_settings, run=run)
 
-if __name__ == "__main__":
+
+def main(argv: Sequence[str]) -> int:
+    """Без аргументов — обычный процесс; `auth` — разовая авторизация."""
+    if argv and argv[0] == AUTH_COMMAND:
+        return run_auth()
     run_service(SERVICE)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

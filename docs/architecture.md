@@ -137,7 +137,7 @@ python -m sniffer.notifier    доставка из outbox
 |---|---|
 | `bot` | `BOT_TOKEN` |
 | `notifier` | `BOT_TOKEN` — доставка идёт тем же Bot API |
-| `collector` | `TG_API_ID`, `TG_API_HASH`, `TG_SESSION`; ввести код из SMS в фоновом контейнере негде, поэтому строка сессии обязательна |
+| `collector` | `TG_API_ID`, `TG_API_HASH`, `TG_SESSION`; код подтверждения в фоновом контейнере ввести негде, поэтому строка сессии обязательна — её выдаёт `python -m sniffer.collector auth` ([deploy.md, 3.5](deploy.md#35-авторизация-юзербота)) |
 | `worker` | ничего: без базы он просто не найдёт задач |
 
 **SIGTERM останавливает, а не убивает.** `docker compose stop` даёт десять

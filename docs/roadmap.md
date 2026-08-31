@@ -59,7 +59,7 @@ merge в master → CI: quality → docs-gate → deploy
 | `pipeline/gate.py` | мультиязычный regex-гейт |
 | CI | `quality.yml`, `deploy.yml` |
 
-123 теста зелёные.
+130 тестов, все зелёные.
 
 ### Не сделано
 
@@ -128,7 +128,7 @@ merge в master → CI: quality → docs-gate → deploy
 ## 4. Развёртывание — отдельная задача, не фича
 
 На `195.201.31.49` проекта нет: нужен каталог, deploy-ключи, `.env`, первый
-`docker compose up`, авторизация юзербота с кодом из SMS. Процедура —
+`docker compose up`, авторизация юзербота подкомандой `auth`. Процедура —
 [deploy.md, раздел 3](deploy.md#3-первичная-установка--один-раз-руками).
 
 Секреты GitHub (`SSH_HOST`) указывают на удалённую машину — до их обновления
