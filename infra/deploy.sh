@@ -274,10 +274,36 @@ fi
 
 # 3. Образ рабочий: код импортируется. Ловит битую сборку и сломанные
 #    зависимости до того, как их поймает клиент.
-if docker compose run --rm --no-deps -T bot python -c "import sniffer, sniffer.search.planner, sniffer.sources.base" >/dev/null 2>&1; then
+if docker compose run --rm --no-deps -T bot python -c "import sniffer, sniffer.search.planner, sniffer.sources.base, sniffer.dashboard.app" >/dev/null 2>&1; then
   info "импорт модулей: ок"
 else
   echo "   образ собран, но модули не импортируются" >&2
+  FAIL=1
+fi
+
+# 4. Интерфейс отвечает по HTTP. Контейнер в состоянии running ничего не
+#    доказывает: uvicorn мог не подняться, а порт мог не опубликоваться.
+#    Спрашиваем /healthz на loopback — снаружи порт закрыт, снаружи ходит nginx.
+#    Пробуем до 10 раз: процесс мог ещё догружать зависимости.
+DASHBOARD_URL="${DASHBOARD_URL:-http://127.0.0.1:8005/healthz}"
+DASHBOARD_OK=0
+for _ in $(seq 1 10); do
+  if HEALTH_BODY="$(curl -fsS --max-time 5 "$DASHBOARD_URL" 2>/dev/null)"; then
+    DASHBOARD_OK=1
+    break
+  fi
+  sleep 3
+done
+if [ "$DASHBOARD_OK" -eq 1 ]; then
+  info "интерфейс отвечает: ${HEALTH_BODY}"
+  # `missing` в ответе — это незаполненный .env, а не поломка сборки: процесс
+  # ждёт конфигурации и не падает. Деплой не роняем, но говорим об этом громко.
+  case "$HEALTH_BODY" in
+    *'"missing":[]'*|*'"missing": []'*) : ;;
+    *) echo "   ВНИМАНИЕ: интерфейс поднят, но не настроен — ${HEALTH_BODY}" >&2 ;;
+  esac
+else
+  echo "   интерфейс не ответил на ${DASHBOARD_URL}" >&2
   FAIL=1
 fi
 
