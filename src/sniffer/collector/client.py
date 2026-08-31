@@ -4,7 +4,9 @@
 
 **Как аккаунт выглядит в Telegram → Настройки → Устройства.** Без явных
 `device_model` / `system_version` / `app_version` там висит безымянный клиент,
-и владелец не отличит наш сеанс от чужого, когда решает, какой отозвать.
+и владелец не отличит наш сеанс от чужого, когда решает, какой отозвать. Сами
+значения живут в `sniffer.telegram_identity`: их обязан повторить и боевой
+читатель сессии, а он в другом слое.
 
 **Чем нам можно пользоваться.** `TelegramLike` — граница для проверки типов, а
 не песочница: настоящий объект остаётся полноценным `TelegramClient` и в
@@ -18,11 +20,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Protocol
 
-DEVICE_MODEL = "SnifferBot collector"
-SYSTEM_VERSION = "docker"
-# Значения обязан повторить и сам коллектор, когда получит тело: другой
-# device_model — другая строка в списке устройств, как будто вошли заново.
-APP_VERSION = "0.1"
+from sniffer.telegram_identity import IDENTITY
 
 
 class SessionLike(Protocol):
@@ -71,8 +69,6 @@ def new_client(api_id: int, api_hash: str) -> TelegramLike:
         StringSession(),
         api_id,
         api_hash,
-        device_model=DEVICE_MODEL,
-        system_version=SYSTEM_VERSION,
-        app_version=APP_VERSION,
+        **IDENTITY,
     )
     return client

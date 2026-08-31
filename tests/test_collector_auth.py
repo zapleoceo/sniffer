@@ -8,6 +8,11 @@
 Вторая по важности проверка — что уже полученную сессию нельзя потерять:
 ни на обрыве соединения при закрытии, ни на трейсбеке.
 
+Третья — что **ни один код возврата не приходит трейсбеком**. Каждый исход
+команды описан в таблице `docs/deploy.md`, 3.5; rc=1 в той таблице значится
+как «наш баг», и тесты в конце файла держат его недостижимым: диагностика не
+вправе упасть ни на проверке пути, ни на выводе сообщения.
+
 Живой сети тут нет: Telethon-клиент подменён фейком, который записывает,
 какие методы дёрнули. Заодно это показывает, что юзербот ничего не отправляет.
 """
@@ -36,6 +41,7 @@ from telethon.errors import (
 
 from sniffer.collector import __main__ as collector_main
 from sniffer.collector import auth as collector_auth
+from sniffer.collector import console as console_module
 from sniffer.collector.auth import (
     EXIT_INTERRUPTED,
     EXIT_NETWORK,
@@ -46,6 +52,7 @@ from sniffer.collector.auth import (
     EXIT_OK,
     EXIT_PROTOCOL,
     EXIT_TELEGRAM_REFUSED,
+    EXIT_USAGE,
     run_auth,
 )
 from sniffer.collector.console import Console, NoTerminalError
@@ -530,6 +537,7 @@ def test_client_introduces_itself_in_the_devices_list(monkeypatch: pytest.Monkey
     """Безымянный клиент в «Устройствах» не отличить от чужого, когда его отзывают."""
     import telethon
 
+    from sniffer import telegram_identity as identity
     from sniffer.collector import client as client_module
 
     seen: dict[str, object] = {}
@@ -543,10 +551,10 @@ def test_client_introduces_itself_in_the_devices_list(monkeypatch: pytest.Monkey
     client_module.new_client(42, "hash")
 
     assert seen["api_id"] == 42
-    assert seen["device_model"] == client_module.DEVICE_MODEL
-    assert seen["system_version"] == client_module.SYSTEM_VERSION
-    assert seen["app_version"] == client_module.APP_VERSION
-    assert "SnifferBot" in client_module.DEVICE_MODEL
+    assert seen["device_model"] == identity.DEVICE_MODEL
+    assert seen["system_version"] == identity.SYSTEM_VERSION
+    assert seen["app_version"] == identity.APP_VERSION
+    assert "SnifferBot" in identity.DEVICE_MODEL
 
 
 @pytest.mark.parametrize(
@@ -784,3 +792,412 @@ def test_closed_stdout_does_not_turn_success_into_a_traceback(
 
     assert code == EXIT_OK
     assert out.read_text(encoding="utf-8").strip() == SESSION
+
+
+def _console(
+    *,
+    say: Callable[[str], None] = lambda _t: None,
+    ask: Callable[[str], str] = lambda _p: "12345",
+    ask_secret: Callable[[str], str] = lambda _p: "секрет",
+) -> Console:
+    """Консоль с уже пройденной предпроверкой: тест целится в другое место."""
+    return Console(say=say, ask=ask, ask_secret=ask_secret, is_interactive=lambda: True)
+
+
+# --- Третье поколение rc=1: путь, на котором диагностика не доходила ---------
+#
+# Первые два поколения — необработанный `Exception` от MTProto (rc=7) и
+# испорченный `TG_API_ID` (rc=2). Третье — исключение ИЗ САМОЙ ДИАГНОСТИКИ:
+# проверка «куда писать» стоит вне `try`, а вывод сообщения об ошибке идёт
+# внутри обработчика этой же ошибки. Оба способны бросить, и тогда наружу
+# летит rc=1 с трейсбеком — код, которого в таблице `deploy.md` 3.5 не было.
+
+
+class UnprobeablePath(Path):
+    """Путь, который на вопрос о своём существовании отвечает EACCES.
+
+    Так ведёт себя файл внутри каталога без права обхода — того самого, что
+    получается из `install -d -m 700 secrets` без `-o 1000 -g 1000`. Подмена
+    сделана подклассом, а не патчем `Path.exists`: `exists()` зовёт и сам
+    pytest, когда печатает отчёт, и глобальный патч ломал бы прогон.
+    """
+
+    def exists(self, *, follow_symlinks: bool = True) -> bool:
+        raise PermissionError(13, "Permission denied")
+
+
+def test_unprobeable_path_is_a_reason_not_a_traceback(tmp_path: Path) -> None:
+    """`why_cannot_write` зовут ВНЕ `try` — бросить оттуда значит отдать rc=1.
+
+    `Path.exists()` в 3.12 глотает только ENOENT, ENOTDIR, EBADF и ELOOP
+    (`pathlib._ignore_error`); EACCES выходит наружу. Функция обязана
+    вернуть строку при любом пути.
+    """
+    reason = why_cannot_write(UnprobeablePath(tmp_path, "tg_session.txt"))
+
+    assert "Permission denied" in reason, "владельцу нужна причина, а не стек"
+
+
+def test_unprobeable_path_becomes_a_documented_exit_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Вторые ворота: даже если проверка пути бросит, наружу идёт rc=5, не rc=1.
+
+    Проверка «куда писать» — единственная, что стоит вне общего `try`, и
+    именно на ней третий раз всплыл rc=1 с трейсбеком. Тест целится в место
+    вызова, а не в саму функцию: он останется верным, даже если функцию
+    когда-нибудь перепишут.
+    """
+
+    def denied(_path: Path) -> str:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(collector_auth, "why_cannot_write", denied)
+    recorder = Recorder()
+
+    # `client=None` в `_run` роняет тест, если фабрику всё-таки позвали:
+    # отказ обязан прийти ДО отправки кода, иначе попытка сгорела впустую.
+    code, out = _run(tmp_path, None, recorder)
+
+    assert code == EXIT_NO_OUTPUT_FILE, "rc=1 из трейсбека в таблице кодов описан как наш баг"
+    assert "Permission denied" in recorder.transcript
+    assert not out.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="прав POSIX на Windows нет, прод — Linux")
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root обходит проверки прав — воспроизводить нечего",
+)
+def test_directory_without_traverse_permission_is_reported_by_name(tmp_path: Path) -> None:
+    """Настоящий каталог 0o000: `stat` на файл внутри отвечает EACCES.
+
+    Ровно тот случай, что даёт `install -d -m 700` без смены владельца. Нужное
+    сообщение («нет права записи или обхода») в модуле было и раньше — до него
+    просто не доходило, потому что `exists()` стоял первым.
+    """
+    closed = tmp_path / "secrets"
+    closed.mkdir()
+    closed.chmod(0o000)
+    try:
+        reason = why_cannot_write(closed / "tg_session.txt")
+    finally:
+        closed.chmod(0o700)
+
+    assert reason, "молчание тут означало бы попытку записи и трейсбек после входа"
+    assert "права записи" in reason
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="прав POSIX на Windows нет, прод — Linux")
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root обходит проверки прав — воспроизводить нечего",
+)
+def test_symlink_into_a_closed_directory_is_reported_not_raised(tmp_path: Path) -> None:
+    """`exists()` идёт по симлинку и падает EACCES на цели.
+
+    Поэтому `is_symlink()` (он по `lstat`) спрашивается первым: ответ есть, и
+    он верный, независимо от того, куда симлинк смотрит.
+    """
+    closed = tmp_path / "closed"
+    closed.mkdir()
+    link = tmp_path / "tg_session.txt"
+    try:
+        link.symlink_to(closed / "target")
+    except (OSError, NotImplementedError):
+        pytest.skip("создание симлинков недоступно")
+    closed.chmod(0o000)
+    try:
+        reason = why_cannot_write(link)
+    finally:
+        closed.chmod(0o700)
+
+    assert "симлинк" in reason
+
+
+def test_a_path_too_long_to_probe_is_a_reason_not_a_traceback(tmp_path: Path) -> None:
+    """ENAMETOOLONG — ещё один код, который `_ignore_error` не глотает."""
+    reason = why_cannot_write(tmp_path / ("и" * 5000) / "tg_session.txt")
+
+    assert reason, "пустая строка означала бы «можно писать»"
+
+
+def test_dead_output_channel_does_not_eat_the_diagnostics(tmp_path: Path) -> None:
+    """Переполненный том докеровского лога делал rc=1 из ЛЮБОЙ ошибки.
+
+    `say` пишет в stderr, а на общей машине это тот же том, куда `json-file`
+    складывает логи всех контейнеров. Кончилось место — `say` бросает
+    `OSError(ENOSPC)`, попадает в `except OSError` («не достучаться до
+    Telegram»), и `say` внутри самого обработчика бросает второй раз. Наружу
+    улетал rc=1 и трейсбек — ровно там, где диагностика и была нужна.
+    """
+    said: list[str] = []
+
+    def full_disk(text: str) -> None:
+        said.append(text)
+        raise OSError(28, "No space left on device")
+
+    out = tmp_path / "tg_session.txt"
+
+    code = run_auth(
+        _ready_settings(),
+        _console(say=full_disk),
+        out_path=out,
+        client_factory=lambda _i, _h: FakeClient(),
+    )
+
+    assert code == EXIT_OK, "файл записан — это успех, а не rc=1"
+    assert out.read_text(encoding="utf-8").strip() == SESSION
+    assert said, "сказать пытались — просто некуда"
+
+
+def test_dead_output_channel_keeps_the_error_code_too(tmp_path: Path) -> None:
+    """Тот же отказ вывода на ошибке: код обязан остаться своим, не 1."""
+
+    def full_disk(_text: str) -> None:
+        raise OSError(28, "No space left on device")
+
+    client = FakeClient(refuses=FloodWaitError(request=None, capture=30))
+
+    code = run_auth(
+        _ready_settings(),
+        _console(say=full_disk),
+        out_path=tmp_path / "tg_session.txt",
+        client_factory=lambda _i, _h: client,
+    )
+
+    assert code == EXIT_TELEGRAM_REFUSED, "отказ Telegram не превращается в rc=1"
+
+
+def test_dead_output_channel_does_not_break_the_reprompt(tmp_path: Path) -> None:
+    """Переспрос про пустой ввод тоже идёт через `say` — и тоже не вправе ронять."""
+    codes = iter(["", "54321"])
+
+    def full_disk(_text: str) -> None:
+        raise OSError(28, "No space left on device")
+
+    out = tmp_path / "tg_session.txt"
+
+    code = run_auth(
+        _ready_settings(),
+        _console(say=full_disk, ask=lambda _p: next(codes)),
+        out_path=out,
+        client_factory=lambda _i, _h: FakeClient(),
+    )
+
+    assert code == EXIT_OK
+    assert out.read_text(encoding="utf-8").strip() == SESSION
+
+
+def test_a_broken_message_is_not_hidden_by_the_output_guard(tmp_path: Path) -> None:
+    """Ворота глотают только `OSError`: наш баг в форматировании прятать не за что."""
+
+    def our_bug(_text: str) -> None:
+        raise KeyError("подставили не тот ключ")
+
+    with pytest.raises(KeyError):
+        run_auth(
+            _ready_settings(),
+            _console(say=our_bug),
+            out_path=tmp_path / "tg_session.txt",
+            client_factory=lambda _i, _h: FakeClient(),
+        )
+
+
+# --- Закрытые потоки и потеря терминала --------------------------------------
+
+
+class FakeTty:
+    """stdin, который считает себя терминалом."""
+
+    closed = False
+
+    def isatty(self) -> bool:
+        return True
+
+    def flush(self) -> None: ...
+
+
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_closed_output_stream_is_caught_before_the_code_is_spent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stream: str,
+) -> None:
+    """`auth 1>&- 2>&-` оставляет терминал на stdin, а `input()` уже не работает.
+
+    У процесса с закрытым fd 1 `sys.stdout` равен `None`, и `input()` бросает
+    `RuntimeError: lost sys.stdout` — не `OSError` и не `RPCError`, поэтому
+    срабатывал финальный обработчик с текстом «сбой протокола MTProto,
+    покажите разработчику». К этому моменту `connect` и `send_code_request`
+    уже прошли: код отправлен и потрачен, а следующая попытка рискует
+    FloodWait. Прежняя предпроверка этого не видела — она смотрела только
+    `stdin.isatty()`.
+    """
+    monkeypatch.setattr(sys, stream, None)
+    monkeypatch.setattr(sys, "stdin", FakeTty())
+    out = tmp_path / "tg_session.txt"
+
+    def must_not_connect(_api_id: int, _api_hash: str) -> FakeClient:
+        raise AssertionError("код подтверждения тратить было нельзя")
+
+    # is_interactive намеренно НЕ подменён: проверяется боевая предпроверка.
+    code = run_auth(
+        _ready_settings(),
+        Console(say=lambda _t: None, ask=lambda _p: "12345", ask_secret=lambda _p: ""),
+        out_path=out,
+        client_factory=must_not_connect,
+    )
+
+    assert code == EXIT_NO_TERMINAL, "rc=7 «сбой MTProto» гнал владельца искать прокси"
+    assert not out.exists()
+
+
+def test_usable_console_requires_a_terminal_and_both_streams(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "stdin", FakeTty())
+    assert console_module._console_is_usable(), "терминал есть, потоки живы"
+
+    monkeypatch.setattr(sys, "stderr", None)
+    assert not console_module._console_is_usable()
+
+
+def test_human_output_never_falls_back_to_stdout(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`print(file=None)` уходит в stdout — а там машиночитаемый путь к файлу."""
+    monkeypatch.setattr(sys, "stderr", None)
+
+    console_module._say("подсказка человеку")
+
+    assert capsys.readouterr().out == "", "текст для человека попал в машинный канал"
+
+
+def test_lost_stdout_on_the_code_prompt_is_a_terminal_problem(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`input()` без stdout бросает RuntimeError — ни OSError, ни RPCError."""
+
+    def lost_stdout() -> str:
+        raise RuntimeError("input(): lost sys.stdout")
+
+    monkeypatch.setattr("builtins.input", lost_stdout)
+    monkeypatch.setattr(sys, "stderr", None)
+
+    with pytest.raises(NoTerminalError):
+        console_module._ask("Код: ")
+
+
+def test_end_of_input_on_the_two_factor_prompt_is_the_same_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Голый `getpass` бросал EOFError → rc=7, хотя на приглашении кода это rc=6.
+
+    Одно и то же событие — конец ввода — не может давать разные коды в
+    зависимости от того, на каком приглашении оно случилось. И совет
+    «покажите разработчику, похоже на прокси» тут уводит в сторону.
+    """
+
+    def end_of_input(_prompt: str) -> str:
+        raise EOFError
+
+    # Подменяется сам `getpass`, а не обёртка: проверяется именно перевод
+    # конца ввода в `NoTerminalError`, которого у голого getpass не было.
+    monkeypatch.setattr(console_module, "getpass", end_of_input)
+    said: list[str] = []
+    client = FakeClient(needs_password=True)
+
+    code = run_auth(
+        _ready_settings(),
+        _console(say=said.append, ask_secret=console_module._ask_secret),
+        out_path=tmp_path / "tg_session.txt",
+        client_factory=lambda _i, _h: client,
+    )
+
+    assert code == EXIT_NO_TERMINAL, "rc=7 советовал искать прокси там, где отвалился терминал"
+    assert "прокси" not in "\n".join(said)
+
+
+# --- Пробел в облачном пароле -------------------------------------------------
+
+
+def test_two_factor_password_keeps_its_edge_spaces(tmp_path: Path) -> None:
+    """`.strip()` на секрете — молчаливая порча того, что человек ввёл верно.
+
+    Для цифрового кода обрезка правильна: краевой пробел из копипасты —
+    мусор. Облачный пароль пробелом может и начинаться, и заканчиваться;
+    обрезанный, он даёт rc=3 «пароль не тот», и владелец идёт искать ошибку в
+    пароле, которого не портил.
+    """
+    client = FakeClient(needs_password=True)
+    recorder = Recorder(password=" пробел по краям ")
+
+    code, out = _run(tmp_path, client, recorder)
+
+    assert code == EXIT_OK
+    assert client.sign_in_args[-1] == (None, None, " пробел по краям ")
+    assert out.read_text(encoding="utf-8").strip() == SESSION
+
+
+def test_the_confirmation_code_still_loses_its_edge_spaces(tmp_path: Path) -> None:
+    """Обратная сторона того же правила: код по-прежнему чистится."""
+    client = FakeClient()
+    recorder = Recorder(code="  54321  ")
+
+    code, _ = _run(tmp_path, client, recorder)
+
+    assert code == EXIT_OK
+    assert client.sign_in_args == [(PHONE, "54321", None)]
+
+
+def test_a_password_of_only_spaces_is_not_empty(tmp_path: Path) -> None:
+    """Пробел — допустимый символ пароля; «пусто» про него говорить нельзя."""
+    client = FakeClient(needs_password=True)
+    recorder = Recorder(password="   ")
+
+    code, _ = _run(tmp_path, client, recorder)
+
+    assert code == EXIT_OK
+    assert client.sign_in_args[-1] == (None, None, "   ")
+    assert len(recorder.secret_prompts) == 1, "переспрашивать было незачем"
+
+
+# --- Разбор аргументов --------------------------------------------------------
+
+
+def test_an_unknown_subcommand_does_not_silently_start_the_daemon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`notauth` уходил в сервис: аргумент проигнорирован, процесс живёт.
+
+    Владелец при этом ждёт диалога авторизации, а видит обычный старт
+    коллектора — и не понимает, почему его не спрашивают код.
+    """
+    started: list[str] = []
+    monkeypatch.setattr(collector_main, "run_service", lambda service: started.append(service.name))
+
+    code = collector_main.main(["notauth"])
+
+    assert code == EXIT_USAGE
+    assert started == [], "неизвестная подкоманда сервис не поднимает"
+
+
+def test_extra_arguments_to_auth_are_an_error_not_a_silent_drop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`auth a b` записал бы сессию в `a`, выбросив `b` без единого слова."""
+
+    def must_not_run(out_path: str | None = None) -> int:
+        raise AssertionError("до auth доходить нельзя")
+
+    monkeypatch.setattr(collector_main, "run_auth", must_not_run)
+
+    assert collector_main.main(["auth", "a", "b"]) == EXIT_USAGE
+
+
+def test_the_usage_hint_names_the_only_subcommand() -> None:
+    assert "auth" in collector_main.USAGE

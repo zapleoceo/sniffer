@@ -10,7 +10,16 @@
 (там же сказано, что файл промежуточный, а целевое место — БД).
 
 Юзербот только читает (CLAUDE.md, spec-v2 6.1). Список доступных методов
-Telegram и то, как аккаунт подписан в «Устройствах», — в `client`.
+Telegram — в `client`, подпись сеанса в «Устройствах» — в
+`sniffer.telegram_identity` (её обязан повторить и боевой читатель сессии).
+
+**Каждая строка для человека уходит через `console.tell`, а не через
+`console.say` напрямую.** Вывод — не безотказный канал: на общей машине
+докеровский `json-file` пишет в тот же том, и переполнение тома делает stderr
+источником `OSError(ENOSPC)`. Прямой `say` внутри обработчика ошибки бросал бы
+второе исключение из первого, и наружу летел бы rc=1 с трейсбеком вместо
+диагностики. Все коды возврата этого модуля описаны в `docs/deploy.md`, 3.5 —
+код, которого нет в той таблице, считается дефектом.
 """
 
 from __future__ import annotations
@@ -28,6 +37,7 @@ from sniffer.collector.console import (
     EmptyInputError,
     NoTerminalError,
     ask_required,
+    tell,
 )
 from sniffer.collector.session_file import (
     DEFAULT_SESSION_FILE,
@@ -44,6 +54,7 @@ EXIT_NO_OUTPUT_FILE = 5
 EXIT_NO_TERMINAL = 6
 EXIT_PROTOCOL = 7
 EXIT_NOT_SIGNED_IN = 8
+EXIT_USAGE = 9
 # 128 + SIGINT — то, что оболочка ожидает увидеть после Ctrl+C.
 EXIT_INTERRUPTED = 130
 
@@ -89,7 +100,9 @@ async def _close_quietly(client: TelegramLike, console: Console) -> None:
     try:
         await client.disconnect()
     except Exception as err:
-        console.say(f"Соединение закрылось с ошибкой ({type(err).__name__}); на сессию не влияет.")
+        tell(
+            console, f"Соединение закрылось с ошибкой ({type(err).__name__}); на сессию не влияет."
+        )
 
 
 async def authorize(
@@ -103,7 +116,7 @@ async def authorize(
     client = client_factory(settings.tg_api_id, settings.tg_api_hash.strip())
     await client.connect()
     try:
-        console.say(f"Запрашиваю код для {phone}…")
+        tell(console, f"Запрашиваю код для {phone}…")
         await client.send_code_request(phone)
         try:
             await client.sign_in(phone, ask_required(console, CODE_PROMPT))
@@ -141,37 +154,51 @@ def run_auth(
             # `TG_API_ID=abc` — реалистичная опечатка: .env правят руками.
             # Пустое значение закрыто в config.py, испорченное — нет, и
             # pydantic роняет процесс раньше любой нашей проверки.
-            console.say(f"Настройки не читаются: {_broken_settings(err)}. Поправьте .env.")
+            tell(console, f"Настройки не читаются: {_broken_settings(err)}. Поправьте .env.")
             return EXIT_NOT_CONFIGURED
 
     missing = missing_auth_settings(settings)
     if missing:
-        console.say(
+        tell(
+            console,
             f"Не хватает настроек: {', '.join(missing)}. "
-            "Заполните их в .env и повторите — авторизоваться без них негде."
+            "Заполните их в .env и повторите — авторизоваться без них негде.",
         )
         return EXIT_NOT_CONFIGURED
 
     if settings.tg_session.strip():
-        console.say(
+        tell(
+            console,
             "Внимание: TG_SESSION уже заполнен. Новая авторизация создаст ВТОРУЮ "
             "сессию на аккаунте — старую придётся отозвать вручную "
-            "(Telegram → Настройки → Устройства)."
+            "(Telegram → Настройки → Устройства).",
         )
 
     if not console.is_interactive():
         # Проверяем ДО отправки кода: Telegram уже прислал бы его, а прочитать
         # было бы некому — и на следующую попытку прилетит FloodWait. Терминал
-        # даёт `docker compose run`; `exec` без `-it` и `up` — нет.
-        console.say(
-            "Нужен интерактивный терминал: код подтверждения вводит человек. "
-            "На сервере запускайте через `docker compose run` (не `exec` и не `up`)."
+        # даёт `docker compose run`; `exec` без `-it` и `up` — нет. Закрытые
+        # stdout/stderr проверяются тем же вопросом (см. `_console_is_usable`):
+        # с ними `input()` падает уже ПОСЛЕ отправки кода, то есть попытка
+        # сгорает. Сказать об этом там же и некуда — весь ответ в коде выхода.
+        tell(
+            console,
+            "Нужен интерактивный терминал и живые stdout/stderr: код подтверждения "
+            "вводит человек, а приглашение к вводу надо где-то напечатать. "
+            "На сервере запускайте через `docker compose run` (не `exec` и не `up`).",
         )
         return EXIT_NO_TERMINAL
 
-    blocked = why_cannot_write(path)
+    try:
+        blocked = why_cannot_write(path)
+    except OSError as err:
+        # Вторые ворота к тому же ответу. `why_cannot_write` обязана вернуть
+        # строку при любом пути и сама ловит всё, что умеет бросить — но она
+        # единственная проверка, стоящая ВНЕ `try` ниже, и её будущая правка
+        # не должна превращаться в rc=1 с трейсбеком. Цена — четыре строки.
+        blocked = f"путь {path} не проверить ({type(err).__name__}: {err})"
     if blocked:
-        console.say(f"Записывать сессию некуда: {blocked}.")
+        tell(console, f"Записывать сессию некуда: {blocked}.")
         return EXIT_NO_OUTPUT_FILE
 
     try:
@@ -179,24 +206,25 @@ def run_auth(
     except RPCError as err:
         # Класс и текст ошибки Telegram, но не трейсбек: владельцу нужно
         # «код неверный» или «подождите N секунд», а не стек.
-        console.say(f"Telegram отказал: {type(err).__name__}: {err}")
+        tell(console, f"Telegram отказал: {type(err).__name__}: {err}")
         return EXIT_TELEGRAM_REFUSED
     except OSError as err:
         # Сеть и таймауты: TimeoutError с версии 3.3 — наследник OSError.
-        console.say(f"Не достучаться до Telegram: {type(err).__name__}: {err}")
+        tell(console, f"Не достучаться до Telegram: {type(err).__name__}: {err}")
         return EXIT_NETWORK
     except NoTerminalError as err:
-        console.say(f"Некому ввести код: {err}. Запускайте через `docker compose run`.")
+        tell(console, f"Некому ввести код: {err}. Запускайте через `docker compose run`.")
         return EXIT_NO_TERMINAL
     except (EmptyInputError, NotSignedInError) as err:
-        console.say(
+        tell(
+            console,
             f"Вход не состоялся: {err}. Сессия не сохранена — повторите команду. "
-            "Строку из неудачной попытки в .env класть нельзя: она нерабочая."
+            "Строку из неудачной попытки в .env класть нельзя: она нерабочая.",
         )
         return EXIT_NOT_SIGNED_IN
     except KeyboardInterrupt:
         # Ctrl+C на интерактивной команде — обычный способ передумать.
-        console.say("Прервано, сессия не создана.")
+        tell(console, "Прервано, сессия не создана.")
         return EXIT_INTERRUPTED
     except Exception as err:
         # Половина ошибок MTProto не наследует ни RPCError, ни OSError:
@@ -207,10 +235,11 @@ def run_auth(
         # трафика они реальны. Без этой ветки владелец получает трейсбек и
         # код 1, которого нет в таблице кодов. KeyboardInterrupt и
         # CancelledError сюда не попадают: они от BaseException.
-        console.say(
+        tell(
+            console,
             f"Неожиданная ошибка: {type(err).__name__}: {err}. Сессия не сохранена. "
             "Это либо сбой протокола MTProto (битый пакет, прокси или инспекция "
-            "трафика по пути), либо наш баг — покажите эту строку разработчику."
+            "трафика по пути), либо наш баг — покажите эту строку разработчику.",
         )
         return EXIT_PROTOCOL
 
@@ -219,10 +248,11 @@ def run_auth(
     except OSError as err:
         # Сессию не печатаем даже здесь: докер-логгер заберёт её так же, как
         # из любой другой строки stdout. Повтор команды создаст новую.
-        console.say(
+        tell(
+            console,
             f"Сессия получена, но записать её в {path} не вышло: {err}. "
             "Огрызок файла убран, так что команду можно повторять сразу; "
-            "неудачную авторизацию отзовите в «Устройствах»."
+            "неудачную авторизацию отзовите в «Устройствах».",
         )
         return EXIT_NO_OUTPUT_FILE
 
@@ -235,13 +265,15 @@ def _report_success(console: Console, path: Path) -> None:
 
     `python -m sniffer.collector auth | head -1` закрывает stdout, и `print`
     отвечает `BrokenPipeError`. Файл при этом записан, права выставлены: это
-    успех, а не сбой, и трейсбек тут дезинформирует.
+    успех, а не сбой, и трейсбек тут дезинформирует. Тот же `OSError(ENOSPC)`
+    прилетает, когда переполнился том докеровского лога.
     """
+    tell(
+        console,
+        f"Строка сессии записана в {path} (права 0600). Впишите её в .env как "
+        "TG_SESSION и удалите файл: shred -u или rm.",
+    )
     try:
-        console.say(
-            f"Строка сессии записана в {path} (права 0600). Впишите её в .env как "
-            "TG_SESSION и удалите файл: shred -u или rm."
-        )
         print(path)
     except OSError:
         pass

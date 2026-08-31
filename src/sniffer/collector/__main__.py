@@ -17,7 +17,8 @@ from collections.abc import Sequence
 
 import structlog
 
-from sniffer.collector.auth import run_auth
+from sniffer.collector.auth import EXIT_OK, EXIT_USAGE, run_auth
+from sniffer.collector.console import Console, tell
 from sniffer.config import Settings
 from sniffer.runtime.service import Service, idle_loop, run_service
 
@@ -63,17 +64,41 @@ async def _tick() -> int:
 SERVICE = Service(name=NAME, requires=missing_settings, run=run)
 
 
+USAGE = (
+    "Использование: python -m sniffer.collector [auth [файл]]\n"
+    "  без аргументов — обычный процесс коллектора;\n"
+    f"  {AUTH_COMMAND} [файл] — разовая интерактивная авторизация юзербота."
+)
+
+
 def main(argv: Sequence[str]) -> int:
     """Без аргументов — обычный процесс; `auth [файл]` — разовая авторизация.
 
     Путь приходит аргументом, а не переменной окружения: в контейнере он
     указывает на смонтированный каталог, и это решение места запуска, а не
     конфигурация сервиса.
+
+    Разбор строгий: **любой аргумент, кроме `auth`, — это ошибка, а не повод
+    поднять сервис**. `python -m sniffer.collector notauth` (опечатка, старое
+    имя подкоманды, лишний флаг) молча уходил в демона: аргумент
+    проигнорирован, процесс живёт, владелец ждёт диалога авторизации, которого
+    не будет, и видит в логе обычный старт коллектора. То же с лишним
+    позиционным аргументом у `auth`: `auth a b` записал бы сессию в `a`, а `b`
+    выбросил, хотя человек, скорее всего, ошибся именно в первом.
     """
-    if argv and argv[0] == AUTH_COMMAND:
-        return run_auth(out_path=argv[1] if len(argv) > 1 else None)
-    run_service(SERVICE)
-    return 0
+    if not argv:
+        run_service(SERVICE)
+        return EXIT_OK
+
+    if argv[0] != AUTH_COMMAND:
+        tell(Console(), f"Неизвестная подкоманда: {argv[0]!r}.\n{USAGE}")
+        return EXIT_USAGE
+
+    if len(argv) > 2:
+        tell(Console(), f"Лишние аргументы: {list(argv[2:])}.\n{USAGE}")
+        return EXIT_USAGE
+
+    return run_auth(out_path=argv[1] if len(argv) > 1 else None)
 
 
 if __name__ == "__main__":
