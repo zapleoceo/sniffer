@@ -172,7 +172,18 @@ class TelegramGroupsSource(Source):
                 self.degraded = True
                 log.warning("telegram.not_configured", missing=missing)
                 return None
-            self._client = self._reader_factory(settings)
+            # Создание клиента — тоже под охраной. `TG_SESSION` может быть
+            # заполнен, но не быть валидной StringSession (обрезали при правке
+            # .env), и тогда Telethon бросает ValueError ещё до сети. Без этого
+            # блока источник нарушал свой контракт «наружу не бросает» и, что
+            # хуже, не помечался degraded — то есть падал в каждом следующем
+            # плане одинаково.
+            try:
+                self._client = self._reader_factory(settings)
+            except Exception as exc:
+                self.degraded = True
+                log.warning("telegram.reader_failed", error=f"{type(exc).__name__}: {exc}")
+                return None
         if self._connected:
             return self._client
         try:

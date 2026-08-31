@@ -652,3 +652,24 @@ async def test_explicitly_disabled_registry_stays_quiet() -> None:
     source = TelegramGroupsSource(directory=EmptyChatDirectory(), client=FakeTelegram())
     assert await source.search("байк", {}) == []
     assert source.degraded is False
+
+
+async def test_broken_session_string_degrades_instead_of_throwing() -> None:
+    """`TG_SESSION` заполнен, но не валидная StringSession — обрезали в .env.
+
+    Контракт базового класса: наружу не бросаем. И, что важнее, источник обязан
+    пометить себя `degraded` — иначе он останется в следующих планах и упадёт
+    там точно так же.
+    """
+
+    def broken_factory(_settings: object) -> object:
+        raise ValueError("Not a valid string")
+
+    source = TelegramGroupsSource(
+        directory=FakeDirectory(fixture_chats()),
+        reader_factory=broken_factory,  # type: ignore[arg-type]
+    )
+    items = await source.search("продам", {"city": "nha_trang"})
+
+    assert items == []
+    assert source.degraded is True
