@@ -87,7 +87,7 @@ jobs:
     timeout-minutes: 25
 
     env:
-      SSH_HOST: ${{ secrets.SSH_HOST || '135.181.87.140' }}
+      SSH_HOST: ${{ secrets.SSH_HOST || '195.201.31.49' }}
       SSH_USER: ${{ secrets.SSH_USER || 'root' }}
       # Хост, пользователь и порт не секреты: они и так лежат в docs/deploy.md
       # и в CLAUDE.md. Секретами их можно переопределить при переезде, но без
