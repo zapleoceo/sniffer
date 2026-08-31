@@ -161,7 +161,9 @@ async def test_unknown_source_is_dropped() -> None:
     [
         {"tasks": "скутер, инжектор", "reasoning": "строка вместо списка"},
         {"tasks": [], "reasoning": "пустой план"},
-        {"tasks": [{"source": "chotot", "query": "  "}], "reasoning": "пустой запрос"},
+        # Пустой запрос источнику, который ищет текстом, искать нечем. Доске
+        # пустой `q` наоборот законен и лучше слова — см. test_market_vocabulary.
+        {"tasks": [{"source": "telegram_groups", "query": "  "}], "reasoning": "пустой запрос"},
         {"reasoning": "задач нет вовсе"},
         ["не объект вообще"],
     ],
@@ -202,7 +204,10 @@ async def test_empty_registry_costs_nothing() -> None:
 
 
 def test_fallback_speaks_russian_and_vietnamese() -> None:
-    plan = fallback_plan(make_passport(), SOURCES, reason="тест")
+    # `web` в списке потому, что вьетнамское СЛОВО теперь уезжает только
+    # источникам со свободным текстом: у структурной доски `q` складывается с
+    # фильтрами через И, и «tay ga» с `motorbiketype=3` даёт ноль вместо 12.
+    plan = fallback_plan(make_passport(), [*SOURCES, "web"], reason="тест")
     queries = [task.query for task in plan.tasks]
 
     assert any("скутер" in query for query in queries)
@@ -211,16 +216,19 @@ def test_fallback_speaks_russian_and_vietnamese() -> None:
     assert any("tay ga" in query for query in queries)
     assert {"ru", "vi"} <= {task.lang for task in plan.tasks}
     assert len(plan.tasks) <= MAX_TASKS
-    # Вьетнамский идёт на Chotot: вьетнамцы в Telegram байки не продают.
-    assert all(task.source == "chotot" for task in plan.tasks if task.lang == "vi")
+    # Вьетнамский не идёт в Telegram: вьетнамцы там байки не продают.
+    assert all(task.source != "telegram_groups" for task in plan.tasks if task.lang == "vi")
     assert all(task.params["city"] == "nha_trang" for task in plan.tasks)
 
 
 def test_fallback_mirrors_intent() -> None:
     """Клиент снимает жильё — искать надо тех, кто сдаёт."""
+    # Глагол сделки — приём прозы: доске он ломает даже рабочее слово (замер:
+    # «nguyên zin» 59, «bán nguyên zin» 0), поэтому вьетнамский глагол теперь
+    # виден у источника со свободным текстом, а не у Chotot.
     plan = fallback_plan(
         make_passport(intent=Intent.RENT, category=Category.APARTMENT),
-        SOURCES,
+        ["web"],
         reason="тест",
     )
     queries = " | ".join(task.query for task in plan.tasks)
@@ -242,7 +250,7 @@ def test_fallback_without_category_uses_client_words() -> None:
 
 
 def test_prompt_carries_market_vocabulary() -> None:
-    prompt = build_user_prompt(make_passport(), SOURCES)
+    prompt = build_user_prompt(make_passport(), [*SOURCES, "web"])
 
     assert "tay ga" in prompt  # вьетнамский словарь виден модели
     assert "инжектор" in prompt

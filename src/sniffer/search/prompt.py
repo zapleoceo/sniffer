@@ -14,6 +14,7 @@ from sniffer.domain.passport import Budget, Passport, PricePeriod
 from sniffer.search.plan import LOW_PRIORITY, MAX_TASKS, TOP_PRIORITY
 from sniffer.search.vocabulary import (
     attribute_phrases,
+    board_attribute_phrases,
     category_terms,
     city_name,
     jargon_terms,
@@ -67,6 +68,15 @@ SYSTEM_PROMPT = f"""Ты планировщик поиска частных об
 запрос по категории мотобайков в Нячанге даёт 71% настоящих скутеров-автоматов,
 а тот же запрос со структурным фильтром типа кузова — 100%. Твоя работа — слова
 предмета; отбор по свойствам делает исполнитель.
+
+У ИСТОЧНИКА С ПОМЕТКОЙ «жаргон: нет» ОСТАВЛЯЙ query ПУСТЫМ. Такой источник ищет
+полями, и текст там складывается с фильтрами через И: слово о свойстве не
+уточняет фильтр, а гасит его в ноль. Замер: фильтр «механика» даёт 12
+объявлений, он же со словом «côn tay» в тексте — ноль, и клиент видит пустоту,
+которую прочтёт как «на рынке нет». Единственное исключение — конкретное имя
+модели («Honda Vision», «Air Blade»): это настоящий текст объявления. Слова
+свойств для таких источников перечислены ниже отдельным списком, и он короткий,
+потому что в нём только измеренные; чего там нет — не пиши.
 
 ОГРАНИЧЕНИЯ:
 - не больше {MAX_TASKS} задач: каждая стоит запроса к источнику и времени;
@@ -185,7 +195,24 @@ def _yes_no(value: bool) -> str:
 
 
 def _vocabulary_block(passport: Passport, sources: Sequence[str]) -> str:
-    """Известный словарь рынка — затравка, чтобы модель не начинала с нуля."""
+    """Известный словарь рынка — затравка, чтобы модель не начинала с нуля.
+
+    Разбит по типу источника, а не выдан одним списком. Иначе промпт спорит сам
+    с собой: правило выше запрещает писать свойства в текст запроса, а список
+    показывает модели ровно эти слова — и она напишет. Слова для прозы и слова,
+    измеренно безопасные для источника, ищущего полями, — разные наборы, и
+    второй короткий: «côn tay» в тексте гасит верный фильтр в ноль.
+    """
+    prose = [source for source in sources if source_profile(source).free_text]
+    board = [source for source in sources if not source_profile(source).free_text]
+
+    blocks = [block for block in (_prose_block(passport, prose), _board_block(passport, board))]
+    return "\n\n".join(block for block in blocks if block)
+
+
+def _prose_block(passport: Passport, sources: Sequence[str]) -> str:
+    if not sources:
+        return ""
     langs = plan_langs(list(sources))
     lines = [
         line
@@ -210,8 +237,36 @@ def _vocabulary_block(passport: Passport, sources: Sequence[str]) -> str:
     if not lines:
         return ""
     return "\n".join(
-        ["Известный словарь рынка по этой категории — отправная точка, а не список:", *lines]
+        [
+            "Словарь рынка для источников со свободным текстом "
+            f"({', '.join(sources)}) — отправная точка, а не список:",
+            *lines,
+        ]
     )
+
+
+def _board_block(passport: Passport, sources: Sequence[str]) -> str:
+    """Что вообще можно писать в текст источнику, который ищет полями."""
+    if not sources:
+        return ""
+    langs = plan_langs(list(sources))
+    lines = [
+        line
+        for lang in langs
+        if (
+            line := _lang_line(
+                f"{lang}, проверенные замером слова",
+                tuple(board_attribute_phrases(passport.category, passport.attributes, lang)),
+            )
+        )
+    ]
+    header = (
+        f"Источники, которые ищут полями ({', '.join(sources)}): свойства из паспорта уезжают "
+        "туда фильтрами, писать их словами нельзя — слово о свойстве гасит фильтр в ноль."
+    )
+    if not lines:
+        return f"{header} Проверенных замером слов для этого паспорта нет: оставь query пустым."
+    return "\n".join([f"{header} Из слов допустимы только эти:", *lines])
 
 
 def _lang_line(label: str, terms: tuple[str, ...]) -> str:

@@ -4,9 +4,16 @@
 была мусорной: на «нужен скутер в нячанге» приезжал Honda Winner X 2021 —
 спортбайк с механикой — потому что план уходил общим запросом по категории.
 
+И второе поведение, из-за которого выдача была ПУСТОЙ: слово о свойстве в `q`
+структурной доски гасит верный структурный фильтр, потому что доска складывает
+их через И. Замер: `motorbiketype=3` — 12 объявлений, он же с `q='côn tay'` —
+ноль. Клиент читает пустоту как «на рынке нет механики», хотя её двенадцать.
+Первый баг был виден глазами, второй — нет, поэтому здесь он закреплён по
+КАЖДОМУ значению атрибута из docs/passport.md, а не по одному.
+
 Живой сети здесь нет. Числа из замеров (Нячанг, cg=2020, 31.08.2026) лежат в
-комментариях и в docs/spec-v2.md: тест, который ходит на Chotot, падает не
-когда сломан код, а когда Chotot чихнул.
+`market_terms.BOARD_QUERY_HITS` и в docs/spec-v2.md: тест, который ходит на
+Chotot, падает не когда сломан код, а когда Chotot чихнул.
 """
 
 from __future__ import annotations
@@ -17,11 +24,18 @@ import pytest
 
 from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport, PricePeriod
 from sniffer.search.fallback import fallback_plan
+from sniffer.search.market_terms import (
+    BOARD_ATTRIBUTE_TERMS,
+    BOARD_QUERY_HITS,
+    BOARD_QUERY_TOTAL,
+)
 from sniffer.search.plan import MAX_TASKS, SearchPlan, context_params, parse_tasks
 from sniffer.search.vocabulary import (
     accepts_jargon,
     attribute_phrases,
+    board_attribute_phrases,
     category_terms,
+    is_board_safe,
     source_langs,
     wants_city_in_query,
 )
@@ -35,6 +49,53 @@ from sniffer.sources.chotot_reference import (
 
 SOURCES = ["telegram_groups", "chotot"]
 WEB_SOURCES = ["telegram_groups", "chotot", "web"]
+
+# Все значения атрибутов мотобайка из docs/passport.md. Одно значение в тестах
+# ловит ровно один баг: «tay ga» безопасно как `q` только потому, что случайно
+# совпадает с motorbiketype=1, и на `transmission=automatic` дефект незаметен.
+MOTORBIKE_ATTRIBUTES: dict[str, tuple[Any, ...]] = {
+    "transmission": ("automatic", "manual", "semi"),
+    "condition": ("new", "good", "worn"),
+    "papers": ("blue_card", "none"),
+    "engine_cc": (50, 125, 400),
+    "year_min": (2018, 2024),
+    "brand": ("Honda", "Vespa", "Zongshen"),
+    "delivery": (True, False),
+    "test_ride": (True, False),
+}
+ATTRIBUTE_CASES = [
+    pytest.param({attribute: value}, id=f"{attribute}={value}")
+    for attribute, values in MOTORBIKE_ATTRIBUTES.items()
+    for value in values
+]
+# Пары: фильтр по одному атрибуту не должен гаситься словом другого.
+ATTRIBUTE_PAIRS = [
+    pytest.param({"transmission": "manual", "papers": "blue_card"}, id="manual+blue_card"),
+    pytest.param({"transmission": "semi", "condition": "good"}, id="semi+good"),
+    pytest.param({"transmission": "automatic", "condition": "new"}, id="automatic+new"),
+    pytest.param({"brand": "Vespa", "condition": "worn"}, id="vespa+worn"),
+]
+
+# Атрибуты, которые Chotot отбирает своим полем: они едут фильтром и словом не
+# дублируются (замер: `q='honda'` и `motorbikebrand=1` дают одни и те же 26).
+FILTERED_ATTRIBUTES = ("transmission", "engine_cc", "year_min", "brand")
+
+# Слова, которые замер дисквалифицировал как `q` доски. Ноль лжёт клиенту,
+# полная выдача не фильтрует ничего (spec-v2 2.2, правила 4 и 5).
+BOARD_ZERO_WORDS = (
+    "xe ga",
+    "côn tay",
+    "xe côn tay",
+    "bán tự động",
+    "cà vẹt",
+    "cavet",
+    "giấy tờ đầy đủ",
+    "xe cũ",
+    "bán nguyên zin",
+    "bán cavet",
+    "bán xe mới",
+)
+BOARD_FULL_OUTPUT_WORDS = ("xe máy", "chính chủ", "nguyên zin")
 
 
 def make_passport(**overrides: Any) -> Passport:
@@ -54,6 +115,12 @@ def queries(plan: SearchPlan, source: str | None = None) -> list[str]:
     return [task.query for task in plan.tasks if source is None or task.source == source]
 
 
+def board_params(attributes: dict[str, Any]) -> list[dict[str, Any]]:
+    """Что уедет на Chotot полным путём: паспорт → фолбэк → build_params."""
+    plan = fallback_plan(make_passport(attributes=attributes), ["chotot"], reason="тест")
+    return [build_params(task.query, task.params) for task in plan.tasks]
+
+
 # --------------------------------------------------------------------------
 # 1. Расширение запроса по категории и по атрибутам
 # --------------------------------------------------------------------------
@@ -61,13 +128,13 @@ def queries(plan: SearchPlan, source: str | None = None) -> list[str]:
 
 def test_query_expands_beyond_client_words() -> None:
     """Клиент сказал «скутер» — искать надо и тем, чего он не говорил."""
-    plan = fallback_plan(make_passport(), SOURCES, reason="тест")
+    plan = fallback_plan(make_passport(), WEB_SOURCES, reason="тест")
     text = " | ".join(queries(plan))
 
     assert "скутер" in text  # слово клиента осталось
     assert "автомат" in text  # свойство названо словом рынка
     assert "инжектор" in text  # жаргон, которого клиент не знает
-    assert "tay ga" in text  # перевод на язык доски
+    assert "tay ga" in text  # перевод на язык рынка
 
 
 def test_attribute_becomes_a_market_word_not_a_passport_key() -> None:
@@ -100,7 +167,7 @@ def test_category_is_data_not_branching() -> None:
     """Новая категория — строка в таблице, а не ветка в коде."""
     plan = fallback_plan(
         make_passport(category=Category.APARTMENT, intent=Intent.RENT, attributes={}),
-        SOURCES,
+        WEB_SOURCES,
         reason="тест",
     )
     text = " | ".join(queries(plan))
@@ -108,6 +175,18 @@ def test_category_is_data_not_branching() -> None:
     assert "квартира" in text
     assert "căn hộ" in text
     assert "скутер" not in text
+
+
+def test_papers_words_live_in_one_table() -> None:
+    """Слова документов нужны и жаргону, и атрибуту `papers` — знание одно.
+
+    Две копии «блюкарт» однажды разъедутся, и правку внесут только в одну.
+    """
+    from sniffer.search.market_terms import ATTRIBUTE_TERMS, JARGON, PAPERS_WORDS
+
+    assert ATTRIBUTE_TERMS[Category.MOTORBIKE]["papers"]["blue_card"] is PAPERS_WORDS
+    for lang, words in PAPERS_WORDS.items():
+        assert set(words) <= set(JARGON[Category.MOTORBIKE][lang])
 
 
 # --------------------------------------------------------------------------
@@ -195,6 +274,21 @@ def test_jargon_is_a_separate_query_not_a_suffix() -> None:
     assert "инжектор" in queries(plan, "telegram_groups")
 
 
+@pytest.mark.parametrize("attributes", ATTRIBUTE_CASES)
+def test_prose_source_still_describes_the_property_by_word(attributes: dict[str, Any]) -> None:
+    """У чата фасет нет, поэтому свойство там обязано остаться словом.
+
+    Обратная сторона починки: запретив слова атрибутов доске, легко случайно
+    отнять их и у чата, где они единственный инструмент.
+    """
+    words = attribute_phrases(Category.MOTORBIKE, attributes, "ru")
+    plan = fallback_plan(make_passport(attributes=attributes), ["telegram_groups"], reason="тест")
+    text = " | ".join(queries(plan, "telegram_groups"))
+
+    assert plan.tasks
+    assert all(word in text for word in words[:1])
+
+
 # --------------------------------------------------------------------------
 # 5. Структурные поля Chotot — в params, а не в текст запроса
 # --------------------------------------------------------------------------
@@ -217,18 +311,16 @@ def test_transmission_becomes_a_structural_filter(transmission: str, expected: i
 
 def test_structural_fields_land_in_params_not_in_the_query_text() -> None:
     """Тип кузова — поле, а не слово: он отсекает механику надёжнее текста."""
-    plan = fallback_plan(make_passport(), ["chotot"], reason="тест")
-    task = plan.tasks[0]
-    built = build_params(task.query, task.params)
+    built = board_params({"transmission": "automatic"})[0]
 
     assert built["motorbiketype"] == MOTORBIKE_TYPE_AUTOMATIC
     assert built["cg"] == 2020
     assert built["region_v2"] == 7044
     assert built["area_v2"] == 704401
-    # Ни коробки, ни бюджета в тексте: Chotot ищет по `q` непредсказуемо, а по
-    # полю — точно. «automatic» в `q` попросту вернул бы ноль.
-    assert "automatic" not in built["q"]
-    assert "motorbiketype" not in built["q"]
+    # Ни коробки, ни бюджета, ни вообще слова: `q` складывается с фильтром через
+    # И, и «tay ga» с motorbiketype=1 даёт те же 41 — уточнять нечего, а с
+    # motorbiketype=3 то же слово даёт ноль вместо 12.
+    assert "q" not in built
 
 
 def test_every_supported_attribute_reaches_chotot_as_a_field() -> None:
@@ -288,15 +380,155 @@ def test_plan_filter_beats_the_attribute_translation() -> None:
 
 
 # --------------------------------------------------------------------------
-# 6. Фолбэк проходит ту же нормализацию, что и ответ модели
+# 6. `q` структурной доски: только измеренное, иначе фильтр гаснет в ноль
 # --------------------------------------------------------------------------
 
 
-def test_fallback_and_model_plan_carry_identical_context() -> None:
-    """spec-v2 2.4: иначе фолбэк разъедется с боевым путём."""
-    passport = make_passport()
+@pytest.mark.parametrize("attributes", ATTRIBUTE_CASES + ATTRIBUTE_PAIRS)
+def test_no_unmeasured_word_reaches_the_board(attributes: dict[str, Any]) -> None:
+    """Каждое слово в `q` доски обязано иметь замер, и замер не ноль.
+
+    Это главный инвариант: слово, попавшее в `q` без числа, — это либо пустая
+    выдача, либо задача из бюджета плана, потраченная на фильтр, который ничего
+    не отфильтровал.
+    """
+    for built in board_params(attributes):
+        query = built.get("q")
+        assert query is None or is_board_safe(query), f"неизмеренное слово в q: {query!r}"
+
+
+@pytest.mark.parametrize("attributes", ATTRIBUTE_CASES + ATTRIBUTE_PAIRS)
+def test_filtered_attribute_is_not_duplicated_by_a_word(attributes: dict[str, Any]) -> None:
+    """Есть поле — едет поле. Слово о том же свойстве только гасит его.
+
+    Замер: `motorbiketype=3` — 12 объявлений, с `q='côn tay'` — ноль;
+    `motorbiketype=2` — 5, с `q='bán tự động'` — ноль.
+    """
+    for built in board_params(attributes):
+        for attribute in FILTERED_ATTRIBUTES:
+            if attribute not in attributes:
+                continue
+            words = attribute_phrases(Category.MOTORBIKE, {attribute: attributes[attribute]}, "vi")
+            assert all(word not in built.get("q", "") for word in words)
+
+
+@pytest.mark.parametrize("attributes", ATTRIBUTE_CASES + ATTRIBUTE_PAIRS)
+def test_word_measured_as_zero_never_reaches_the_board(attributes: dict[str, Any]) -> None:
+    """Регрессия на измеренные нули: «côn tay», «cà vẹt», «xe cũ», «xe ga».
+
+    Каждое из них — правильное слово рынка и правильный запрос к чату. К доске
+    это ноль объявлений, то есть ложь клиенту «на рынке нет».
+    """
+    for built in board_params(attributes):
+        query = built.get("q", "")
+        assert all(word not in query for word in BOARD_ZERO_WORDS)
+
+
+@pytest.mark.parametrize("attributes", ATTRIBUTE_CASES + ATTRIBUTE_PAIRS)
+def test_word_that_filters_nothing_never_reaches_the_board(attributes: dict[str, Any]) -> None:
+    """«chính chủ» отдаёт все 59 из 59 — spec-v2 2.2 правило 5: это не фильтр.
+
+    Слово, не сужающее выдачу, тратит задачу из бюджета плана и создаёт вид
+    работающего поиска.
+    """
+    for built in board_params(attributes):
+        query = built.get("q", "")
+        assert all(word not in query for word in BOARD_FULL_OUTPUT_WORDS)
+
+
+@pytest.mark.parametrize("attributes", ATTRIBUTE_CASES + ATTRIBUTE_PAIRS)
+def test_deal_verb_is_not_glued_to_the_board_query(attributes: dict[str, Any]) -> None:
+    """Глагол сделки приставкой — приём прозы; доске он ломает даже рабочее слово.
+
+    Замер: «nguyên zin» 59 → «bán nguyên zin» 0; «xe mới» 8 → «bán xe mới» 0.
+    """
+    for built in board_params(attributes):
+        assert not built.get("q", "").startswith("bán")
+
+
+@pytest.mark.parametrize("attributes", ATTRIBUTE_CASES + ATTRIBUTE_PAIRS)
+def test_board_always_gets_exactly_one_task_with_its_filters(attributes: dict[str, Any]) -> None:
+    """Источник не должен выпасть из плана из-за того, что слов для него нет."""
+    plan = fallback_plan(make_passport(attributes=attributes), ["chotot"], reason="тест")
+
+    assert plan.sources() == ["chotot"]
+    assert len(plan.tasks) == 1
+    assert build_params(plan.tasks[0].query, plan.tasks[0].params)["cg"] == 2020
+
+
+def test_attribute_without_a_filter_gives_the_honest_full_output() -> None:
+    """`papers` Chotot полем не отбирает — значит не отбираем вовсе.
+
+    Замер: `cà vẹt`, `cavet`, `giấy tờ đầy đủ` — ноль каждое при 59 без запроса.
+    Лучше 59 честных объявлений и ранжирование, чем пустота с красивым словом.
+    """
+    built = board_params({"papers": "blue_card"})[0]
+
+    assert "q" not in built
+    assert not any(key.startswith("motorbike") for key in built)
+
+
+def test_measured_attribute_word_does_reach_the_board() -> None:
+    """Whitelist не пустой лозунг: «xe mới» замер прошло (8 из 59) и едет.
+
+    Если бы правило было «доске никогда никаких слов», этот тест был бы красным,
+    и заодно он держит живым сам путь board-слова в `q`.
+    """
+    built = board_params({"condition": "new"})[0]
+
+    assert built["q"] == "xe mới"
+    assert board_attribute_phrases(Category.MOTORBIKE, {"condition": "new"}, "vi") == ["xe mới"]
+
+
+def test_board_whitelist_is_backed_by_a_measurement() -> None:
+    """spec-v2 2.2 правила 4 и 5 распространяются и на ATTRIBUTE_TERMS.
+
+    Слово без числа, слово с нулём и слово, отдающее всю выдачу, в whitelist
+    попасть не могут — иначе таблица снова станет догадкой.
+    """
+    for attribute_values in BOARD_ATTRIBUTE_TERMS.values():
+        for values in attribute_values.values():
+            for langs in values.values():
+                for terms in langs.values():
+                    for term in terms:
+                        assert term in BOARD_QUERY_HITS, f"{term} без замера"
+                        assert 0 < BOARD_QUERY_HITS[term] < BOARD_QUERY_TOTAL
+
+
+@pytest.mark.parametrize("word", BOARD_ZERO_WORDS)
+def test_measured_zeros_stay_recorded_as_zero(word: str) -> None:
+    """Числа замера — данные, и они не должны молча «улучшиться»."""
+    assert BOARD_QUERY_HITS[word] == 0
+    assert not is_board_safe(word)
+
+
+@pytest.mark.parametrize("word", BOARD_FULL_OUTPUT_WORDS)
+def test_words_that_filter_nothing_stay_recorded_as_full_output(word: str) -> None:
+    assert BOARD_QUERY_HITS[word] == BOARD_QUERY_TOTAL
+    assert not is_board_safe(word)
+
+
+def test_unmeasured_word_is_not_board_safe() -> None:
+    """Отсутствие замера — это «нельзя», а не «наверное можно»."""
+    assert not is_board_safe("xe máy độ kiểu")
+    assert not is_board_safe("скутер")
+
+
+# --------------------------------------------------------------------------
+# 7. Фолбэк проходит ту же нормализацию, что и ответ модели
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("attributes", ATTRIBUTE_CASES + ATTRIBUTE_PAIRS)
+def test_fallback_and_model_plan_build_identical_requests(attributes: dict[str, Any]) -> None:
+    """spec-v2 2.4: иначе фолбэк разъедется с боевым путём.
+
+    Сравнивается не `.params`, а результат `build_params()` — именно там
+    расходился `q`, и сравнение только параметров этого не видело.
+    """
+    passport = make_passport(attributes=attributes)
     model_tasks = parse_tasks(
-        [{"source": "chotot", "query": "tay ga", "lang": "vi", "params": [], "priority": 1}],
+        [{"source": "chotot", "query": "", "lang": "vi", "params": [], "priority": 1}],
         SOURCES,
     )
     model_plan = SearchPlan.from_tasks(model_tasks, defaults=context_params(passport))
@@ -306,11 +538,24 @@ def test_fallback_and_model_plan_carry_identical_context() -> None:
     chotot_fallback = next(task for task in fallback.tasks if task.source == "chotot")
 
     assert chotot_model.params == chotot_fallback.params
-    # И, как следствие, один и тот же структурный фильтр на выходе адаптера.
-    assert (
-        build_params(chotot_model.query, chotot_model.params)["motorbiketype"]
-        == (build_params(chotot_fallback.query, chotot_fallback.params)["motorbiketype"])
+    model_request = build_params(chotot_model.query, chotot_model.params)
+    # Модель прислала пустой текст, фолбэк мог добавить измеренное слово —
+    # структурная часть запроса обязана совпасть до последнего поля.
+    fallback_request = build_params(chotot_fallback.query, chotot_fallback.params)
+    assert model_request == {key: value for key, value in fallback_request.items() if key != "q"}
+
+
+def test_empty_query_is_legal_for_a_board_and_dropped_for_a_chat() -> None:
+    """Пустой `q` — лучший запрос к доске и бесполезная задача для чата."""
+    tasks = parse_tasks(
+        [
+            {"source": "chotot", "query": "", "lang": "vi", "params": [], "priority": 1},
+            {"source": "telegram_groups", "query": "  ", "lang": "ru", "params": [], "priority": 1},
+        ],
+        SOURCES,
     )
+
+    assert [task.source for task in tasks] == ["chotot"]
 
 
 def test_fallback_respects_the_plan_budget_and_dedups() -> None:
@@ -340,3 +585,33 @@ def test_context_params_hands_over_neutral_facts_only() -> None:
     assert params["attributes"] == {"transmission": "automatic"}
     assert params["budget"]["currency"] == "USD"
     assert not any(key.startswith("motorbike") for key in params)
+
+
+# --------------------------------------------------------------------------
+# 8. Промпт не противоречит сам себе
+# --------------------------------------------------------------------------
+
+
+def test_prompt_shows_property_words_only_to_prose_sources() -> None:
+    """Запрет писать свойства в текст и список этих слов рядом — тот же баг.
+
+    Модель прочитает список и напишет «côn tay» в `q` доски, а это ноль.
+    """
+    from sniffer.search.prompt import build_user_prompt
+
+    passport = make_passport(attributes={"transmission": "manual"})
+    prose_only = build_user_prompt(passport, ["web"])
+    board_only = build_user_prompt(passport, ["chotot"])
+
+    assert "côn tay" in prose_only
+    assert "côn tay" not in board_only
+    assert "query пустым" in board_only
+
+
+def test_prompt_offers_the_board_only_measured_words() -> None:
+    from sniffer.search.prompt import build_user_prompt
+
+    board_only = build_user_prompt(make_passport(attributes={"condition": "new"}), ["chotot"])
+
+    assert "xe mới" in board_only
+    assert "nguyên zin" not in board_only

@@ -12,6 +12,12 @@
 (spec-v2, 2.4). Атрибуты доезжают до источника через `context_params`, а не
 через текст запроса, поэтому `transmission=automatic` становится фильтром и
 здесь, без участия модели.
+
+И ровно поэтому текст запроса для источника, который ищет полями, собирается из
+ОТДЕЛЬНОГО измеренного словаря. Фильтр и `q` складываются через И, так что
+слово о том же свойстве не уточняет фильтр, а гасит его в ноль: замер —
+`motorbiketype=3` даёт 12 объявлений, он же с `q='côn tay'` — ноль. Клиенту это
+видно как «на рынке нет механики», хотя её двенадцать.
 """
 
 from __future__ import annotations
@@ -27,6 +33,7 @@ from sniffer.search.plan import (
 )
 from sniffer.search.vocabulary import (
     attribute_phrases,
+    board_attribute_phrases,
     category_terms,
     city_name,
     intent_terms,
@@ -61,10 +68,22 @@ def _source_tasks(passport: Passport, source: str, lang: str) -> list[SearchTask
     # Город в текст — только источникам, которые ищут по всему интернету. В чате
     # Нячанга слово «Нячанг» в объявлениях не пишут, и оно лишь режет выдачу.
     city = city_name(passport.city, lang) if profile.city_in_query else ""
-    verbs = intent_terms(passport.intent, lang)
+    # Глагол сделки приставкой к предмету — приём прозы. У доски он ломает даже
+    # рабочее слово: замер — «nguyên zin» 59, «bán nguyên zin» 0; «xe mới» 8,
+    # «bán xe mới» 0. Поэтому глагол уходит только источникам со свободным текстом.
+    verbs = intent_terms(passport.intent, lang) if profile.free_text else ()
+
+    nouns = _nouns(passport, source, lang)
+    if not nouns:
+        # Доске текст не нужен: отбор делают её поля, а измеренно безопасного
+        # слова для этого паспорта нет. Пустой `q` — это честные 12 объявлений
+        # по `motorbiketype=3` вместо нуля по `q='côn tay'` (spec-v2 4.1.1).
+        # Источнику, который ищет только текстом, пустой запрос бесполезен:
+        # искать нечем, и задача из бюджета плана уйдёт впустую.
+        return [] if profile.free_text else [_task(source, "", lang, TOP_PRIORITY)]
 
     tasks: list[SearchTask] = []
-    for index, noun in enumerate(_nouns(passport, source, lang)):
+    for index, noun in enumerate(nouns):
         priority = TOP_PRIORITY if index == 0 else DEFAULT_PRIORITY
         tasks.append(_task(source, _with_city(noun, city), lang, priority))
         if verbs:
@@ -92,22 +111,24 @@ def _source_tasks(passport: Passport, source: str, lang: str) -> list[SearchTask
 def _nouns(passport: Passport, source: str, lang: str) -> list[str]:
     """Чем назвать предмет. Порядок = порядок убывания уверенности.
 
-    Различие по типу источника, а не по его имени: у структурной доски свойство
-    предмета это отдельное поле, и её собственное слово («tay ga») отбирает
-    лучше любого описания. В чате полей нет, поэтому свойство приклеивается к
-    предмету словом («скутер автомат»), иначе «автомат» приведёт стиральные
-    машины.
+    Различие по типу источника, а не по его имени — по флагу `free_text`, то
+    есть по данным профиля.
     """
-    attributes = attribute_phrases(passport.category, passport.attributes, lang)
-    generic = list(category_terms(passport.category, lang))
-
     if source_profile(source).free_text:
-        nouns = list(_compound(generic, attributes))
-        nouns += generic
-    else:
-        # Слово рынка вперёд, общие названия после: список категории намеренно
-        # содержит и «xe số» (лапка), а он клиенту с автоматом не нужен.
-        nouns = attributes + [term for term in generic if term not in attributes]
+        return _prose_nouns(passport, lang)
+    return _board_nouns(passport, lang)
+
+
+def _prose_nouns(passport: Passport, lang: str) -> list[str]:
+    """Слова для источника, где объявление написано прозой.
+
+    Полей у чата нет, поэтому свойство приклеивается к предмету словом
+    («скутер автомат»), иначе «автомат» приведёт стиральные машины.
+    """
+    generic = list(category_terms(passport.category, lang))
+    qualities = attribute_phrases(passport.category, passport.attributes, lang)
+    nouns = list(_compound(generic, qualities))
+    nouns += generic
 
     brand = str(passport.attributes.get("brand", "")).strip()
     if brand:
@@ -115,10 +136,37 @@ def _nouns(passport: Passport, source: str, lang: str) -> list[str]:
         # первым запросом в любом из них.
         nouns.insert(0, brand)
     if not nouns and passport.raw_query.strip():
-        # Категорию не распознали — ищем словами клиента. Для вьетнамского
-        # источника это заведомо слабо, но пустой план хуже слабого.
+        # Категорию не распознали — ищем словами клиента. Слабо, но пустой план
+        # хуже слабого: чат хотя бы поищет по тексту.
         nouns = [passport.raw_query.strip()]
     return list(dict.fromkeys(nouns))[:TERMS_PER_LANG]
+
+
+def _board_nouns(passport: Passport, lang: str) -> list[str]:
+    """Слова для источника, который ищет полями. Обычно ни одного — и это верно.
+
+    Доска складывает `q` со своими структурными фильтрами через И, поэтому цена
+    лишнего слова — не «выдача чуть уже», а пустота, которую клиент прочтёт как
+    «на рынке нет». Замер 31.08.2026 (Нячанг, cg=2020, всего 59):
+
+    - `motorbiketype=3` — 12 объявлений; он же с `q='côn tay'`, `q='xe côn tay'`
+      или `q='tay ga'` — **ноль** в каждом случае;
+    - `motorbiketype=2` — 5; с `q='bán tự động'` — ноль;
+    - «cà vẹt», «cavet», «giấy tờ đầy đủ» — ноль каждое при 59 без запроса;
+    - «chính chủ», «nguyên zin», «xe máy» — все 59, то есть не фильтруют ничего.
+
+    Поэтому здесь только измеренное подмножество (`BOARD_ATTRIBUTE_TERMS`).
+    Названия предмета из `CATEGORY_TERMS` не годятся ни одно: «tay ga» и «xe số»
+    — это `motorbiketype=1` и `=2` словами (пересечение полное), и с чужим
+    значением фильтра они дают ноль; «xe máy» не фильтрует; «xe ga» не находит
+    НИЧЕГО. Категорию доска и так знает полем `cg`.
+
+    Бренд тоже не текстом: замер — `q='honda'` и `motorbikebrand=1` дают одни и
+    те же 26, а поле не зависит от написания, которое прислал клиент. Незнакомый
+    доске бренд остаётся без фильтра — честная полная выдача плюс ранжирование
+    лучше неизмеренного слова, которое может вернуть пустоту.
+    """
+    return board_attribute_phrases(passport.category, passport.attributes, lang)[:TERMS_PER_LANG]
 
 
 def _compound(generic: list[str], attributes: list[str]) -> tuple[str, ...]:

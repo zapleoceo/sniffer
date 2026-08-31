@@ -14,6 +14,7 @@ from typing import Any
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from sniffer.domain.passport import Passport
+from sniffer.search.vocabulary import source_profile
 
 # spec-v2, раздел 2.3: свобода источников не означает свободу расходов.
 MAX_TASKS = 12
@@ -45,13 +46,15 @@ class SearchTask(BaseModel):
 
     @field_validator("query")
     @classmethod
-    def _query_filled(cls, value: str) -> str:
-        stripped = " ".join(value.split())
-        if not stripped:
-            raise ValueError("пустой запрос")
+    def _normalise_query(cls, value: str) -> str:
+        # Пустой запрос — законная задача для источника, который ищет полями:
+        # `q` складывается там с фильтрами через И, и слово о свойстве гасит
+        # верный фильтр в ноль (spec-v2 4.1.1). Осмысленность пустоты проверяет
+        # `parse_tasks` — она знает источник, а модель `SearchTask` не знает.
+        #
         # Модель иногда выдаёт вместо запроса пересказ объявления. Источники на
         # такое отвечают нулём совпадений, поэтому режем по длине.
-        return stripped[:MAX_QUERY_LEN]
+        return " ".join(value.split())[:MAX_QUERY_LEN]
 
     @field_validator("lang")
     @classmethod
@@ -167,6 +170,12 @@ def parse_tasks(raw: Any, available: Collection[str]) -> list[SearchTask]:
             continue
         source = str(item.get("source", "")).strip()
         if source not in known:
+            continue
+        if not str(item.get("query", "")).strip() and source_profile(source).free_text:
+            # Источнику, который ищет только текстом, пустой запрос искать
+            # нечем — задача уйдёт впустую. Источнику, который ищет полями,
+            # пустой `q` наоборот лучший запрос: фильтры отбирают, а лишнее
+            # слово гасит их в ноль (spec-v2 4.1.1).
             continue
         try:
             tasks.append(
