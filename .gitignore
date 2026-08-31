@@ -15,3 +15,7 @@ tg_session.txt
 dist/
 build/
 *.egg-info/
+
+# Рабочие каталоги агентов: это git-worktree, а не файлы проекта.
+# Попали в индекс один раз через `git add -A` — гейт от повтора.
+.claude/worktrees/

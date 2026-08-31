@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     tg_phone: str = ""
     tg_session: str = ""
 
-    database_url: str = "postgresql+asyncpg://sniffer:sniffer@localhost:5433/sniffer"
+    database_url: str = "postgresql+asyncpg://sniffer:sniffer@localhost:5434/sniffer"
 
     # AIbroker
     broker_url: str = "https://aib.zapleo.com"

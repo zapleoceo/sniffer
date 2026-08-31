@@ -17,7 +17,7 @@ SnifferBot живёт на том же Hetzner-сервере, что Вера, 
 | Репозиторий | `https://github.com/zapleoceo/sniffer`, ветка `master` |
 | Compose-проект | `sniffer` (сеть `sniffer_default`, том `sniffer_sniffer_pgdata`) |
 | Контейнеры | `sniffer-postgres`, `-collector`, `-worker`, `-bot`, `-notifier` |
-| БД | `docker exec sniffer-postgres psql -U sniffer -d sniffer`, хост-порт `127.0.0.1:5433` |
+| БД | `docker exec sniffer-postgres psql -U sniffer -d sniffer`, хост-порт `127.0.0.1:5434` |
 
 **Домен настроен и отвечает** (31.08.2026). `lbot.zapleo.com` → A-запись
 `195.201.31.49`, проксируется Cloudflare; на сервере лежит
@@ -163,8 +163,8 @@ cd sniffer && cp .env.example .env
 Два поля важно не пропустить:
 
 - `DATABASE_URL=postgresql+asyncpg://sniffer:<пароль>@postgres:5432/sniffer` —
-  внутри compose-сети база доступна по имени сервиса, а не по `localhost:5433`.
-  5433 — это только для доступа с хоста.
+  внутри compose-сети база доступна по имени сервиса, а не по `localhost:5434`.
+  5434 — это только для доступа с хоста.
 - `POSTGRES_PASSWORD=<длинный случайный>` — если не задать, compose подставит
   дефолт `sniffer`. Порт слушает только loopback, но пароль-заглушка на
   машине, где живут ещё три проекта, — это долг, а не решение.

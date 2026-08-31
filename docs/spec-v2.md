@@ -33,7 +33,7 @@
 | Каталог на сервере | `/var/www/vera3` | `/var/www/sniffer` |
 | Compose-проект | `vera3` | `sniffer` |
 | Postgres | контейнер `vera3-postgres`, БД `vera` | контейнер `sniffer-postgres`, БД `sniffer` |
-| Порт БД на хосте | 5432 | **5433**, только `127.0.0.1` |
+| Порт БД на хосте | **5433** | **5434**, только `127.0.0.1` |
 | Docker-сеть | `vera3_default` | `sniffer_default` |
 | Telegram-аккаунт | личный Димы | **отдельный номер** |
 | LLM | AIbroker, ключ проекта `vera` | AIbroker, **свой project-key со своим дневным cap** |
