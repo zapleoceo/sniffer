@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from sniffer.domain.dialogue import (
@@ -14,6 +16,9 @@ from sniffer.domain.dialogue import (
     SKIP,
     DialogueState,
     Feedback,
+    _contradicts,
+    _contradicts_budget,
+    _same_stem,
     apply_answer,
     apply_feedback,
     feedback_buttons,
@@ -107,7 +112,7 @@ def test_every_question_can_be_skipped() -> None:
 
 
 def test_button_answer_fills_the_budget() -> None:
-    answered = apply_answer(bike(), "budget.max", parse_option("budget.max", "500"))
+    answered = apply_answer(bike(), "budget.max", parse_option("budget.max", "500 USD"))
 
     assert answered.budget.max == 500
     assert answered.budget.currency is Currency.USD
@@ -317,3 +322,277 @@ def test_answer_closes_the_pending_question() -> None:
 
     assert state.pending is None
     assert state.asked == ("budget.max",), "пропуск не отменяет того, что вопрос был задан"
+
+
+# --------------------------------------------------------------------------
+# Вторая проверка: где «новое слово» врало в обе стороны. Каждый случай ниже
+# был замерен живьём, поэтому лежит отдельным тестом, а не одним общим.
+# --------------------------------------------------------------------------
+
+
+def _asked(text: str, **fields: Any) -> Passport:
+    """Паспорт с этой формулировкой и явно названными полями."""
+    base: dict[str, Any] = {
+        "intent": Intent.BUY,
+        "category": Category.MOTORBIKE,
+        "city": "nha_trang",
+        "raw_query": text,
+    }
+    base.update(fields)
+    return Passport(**base)
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        pytest.param(10_000, 1_000, id="доллары-в-десять-раз-дешевле"),
+        pytest.param(12_000_000, 1_200_000, id="донги-полными-цифрами"),
+        pytest.param(8_000_000, 8_000, id="три-нуля-потеряны"),
+        pytest.param(1_000, 100_000, id="дороже-в-сто-раз"),
+    ],
+)
+def test_a_changed_budget_is_a_new_request_not_a_repeat(before: float, after: float) -> None:
+    """Клиент передумал по сумме — это новый запрос, а не та же просьба.
+
+    Замер показал потерю данных: `restates` сравнивал три поля и бюджета среди
+    них не было, а половина со словами склеивала «1000» и «10000» по общей
+    основе. Правка в десять раз молча выбрасывалась, и искали по прежней сумме.
+    """
+    current = _asked(
+        f"квартира в нячанге до {before:.0f} долларов",
+        category=Category.APARTMENT,
+        budget=Budget(max=before, currency=Currency.USD),
+    )
+    fresh = _asked(
+        f"квартира в нячанге до {after:.0f} долларов",
+        category=Category.APARTMENT,
+        budget=Budget(max=after, currency=Currency.USD),
+    )
+
+    assert not restates(current, fresh)
+
+
+def test_the_same_number_in_another_currency_is_a_new_request() -> None:
+    """300 донгов и 300 долларов — не одна сумма, а разница в двадцать тысяч раз."""
+    current = _asked("скутер до 300", budget=Budget(max=300, currency=Currency.USD))
+    fresh = _asked("скутер до 300 донгов", budget=Budget(max=300, currency=Currency.VND))
+
+    assert not restates(current, fresh)
+
+
+def test_a_repeat_that_names_no_budget_keeps_the_collected_one() -> None:
+    """Молчание про бюджет — не «бюджет другой», а «про бюджет ничего не сказал».
+
+    Иначе любой короткий повтор после собранного ответа стирал бы этот ответ.
+    """
+    current = _asked("ищу скутер в нячанге", budget=Budget(max=400, currency=Currency.USD))
+    fresh = _asked("скутер нячанг")
+
+    assert restates(current, fresh)
+
+
+def test_a_changed_attribute_is_a_new_request() -> None:
+    """«Нужен автомат» → «нужна механика»: сменился запрос, а не формулировка."""
+    current = _asked("ищу скутер автомат в нячанге", attributes={"transmission": "automatic"})
+    fresh = _asked("ищу скутер механика в нячанге", attributes={"transmission": "manual"})
+
+    assert not restates(current, fresh)
+
+
+@pytest.mark.parametrize(
+    "addition",
+    [
+        pytest.param("а", id="одна-буква"),
+        pytest.param("а б", id="две-буквы"),
+        pytest.param("срочно", id="вежливость"),
+        pytest.param("пожалуйста", id="ещё-вежливость"),
+    ],
+)
+def test_appending_a_filler_word_does_not_reset_the_question_limit(addition: str) -> None:
+    """Дописанное служебное слово — тот же запрос, а не новый.
+
+    Именно так обходился лимит трёх вопросов: «ищу скутер в нячанге», потом
+    «…а», потом «…а б» — каждый раз новая цепочка и новые три вопроса, живьём
+    получалось девять. Слово, не несущее содержания, повтором быть не мешает.
+    """
+    current = _asked("ищу скутер в нячанге")
+    fresh = _asked(f"ищу скутер в нячанге {addition}")
+
+    assert restates(current, fresh)
+
+
+def test_a_preposition_added_to_the_same_words_is_still_a_repeat() -> None:
+    """«квартира в нячанге мебель» → «…с мебелью»: предлог сведений не приносит."""
+    current = _asked("квартира в нячанге мебель", category=Category.APARTMENT)
+    fresh = _asked("квартира в нячанге с мебелью", category=Category.APARTMENT)
+
+    assert restates(current, fresh)
+
+
+def test_a_telegraphic_repeat_works_in_both_directions() -> None:
+    """Исход не должен зависеть от того, какую фразу клиент напечатал первой.
+
+    «скутер нячанг» → «ищу скутер в нячанге» добавляет «ищу» и «в» — оба
+    служебные, значит повтор. Обратный порядок повтором был и раньше.
+    """
+    short, full = _asked("скутер нячанг"), _asked("ищу скутер в нячанге")
+
+    assert restates(short, full)
+    assert restates(full, short)
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        pytest.param("дом", "дома", id="дом-дома"),
+        pytest.param("дом", "домик", id="дом-домик"),
+        pytest.param("нячанг", "нячанге", id="нячанг-нячанге"),
+        pytest.param("квартира", "квартиру", id="квартира-квартиру"),
+        pytest.param("сдам", "сдаю", id="сдам-сдаю"),
+    ],
+)
+def test_one_word_in_two_forms_is_one_word(first: str, second: str) -> None:
+    """Падеж и уменьшительное — то же слово. «дом»/«дома» четырёх букв не
+    набирали и считались разными, хотя это чистая словоформа."""
+    assert _same_stem(first, second)
+    assert _same_stem(second, first)
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        pytest.param("куангнгае", "куангнаме", id="два-города-вьетнама"),
+        pytest.param("куангнинь", "куангбинь", id="ещё-два-города"),
+        pytest.param("автомат", "автобус", id="автомат-автобус"),
+        pytest.param("квартал", "квартира", id="квартал-квартира"),
+        pytest.param("студент", "студия", id="студент-студия"),
+        pytest.param("1000", "10000", id="числа-в-десять-раз"),
+        pytest.param("500", "5000", id="ещё-числа"),
+    ],
+)
+def test_different_words_stay_different(first: str, second: str) -> None:
+    """Общее начало — ещё не общий корень.
+
+    Фиксированные четыре буквы склеивали «Куангнгай» с «Куангнамом» (два разных
+    города, которых нет ни в одном справочнике) и «1000» с «10000». У числа
+    морфологии нет вовсе, поэтому числа сравниваются точно.
+    """
+    assert not _same_stem(first, second)
+    assert not _same_stem(second, first)
+
+
+def test_two_unlisted_cities_are_two_requests() -> None:
+    """Города не из справочника: город обоих не разобран, различить их может
+    только слово — и оно обязано их различить."""
+    current = _asked("ищу скутер в куангнгае", city=None)
+    fresh = _asked("ищу скутер в куангнаме", city=None)
+
+    assert not restates(current, fresh)
+
+
+def test_a_button_label_and_its_value_name_the_same_currency() -> None:
+    """Подпись говорит «$» — значит уедет USD, чем бы ни был паспорт.
+
+    Замер: клиент сказал «сниму квартиру в нячанге за донги», паспорт получил
+    VND, и кнопка «до 300 $» отправляла 300 донгов — 1.2 цента. Валюта теперь
+    лежит в значении кнопки, рядом с подписью, а не берётся из паспорта.
+    """
+    in_dong = _asked(
+        "сниму квартиру в нячанге за донги",
+        intent=Intent.RENT_OUT,
+        category=Category.APARTMENT,
+        budget=Budget(currency=Currency.VND),
+    )
+
+    answered = apply_answer(in_dong, "budget.max", parse_option("budget.max", "300 USD"))
+
+    assert (answered.budget.max, answered.budget.currency) == (300, Currency.USD)
+
+
+def test_a_new_ceiling_does_not_leave_the_range_inside_out() -> None:
+    """«От 3 млн донгов» плюс кнопка «до 300 $» давали min=3000000, max=300.
+
+    Из такого диапазона не собирается никакой фильтр. Проигрывает старая
+    нижняя граница: клиент только что назвал верхнюю, о ней он и говорил.
+    """
+    with_floor = _asked(
+        "сниму квартиру в нячанге от 3 млн донгов",
+        intent=Intent.RENT_OUT,
+        category=Category.APARTMENT,
+        budget=Budget(min=3_000_000, currency=Currency.VND),
+    )
+
+    answered = apply_answer(with_floor, "budget.max", parse_option("budget.max", "300 USD"))
+
+    assert answered.budget.min is None
+    assert (answered.budget.max, answered.budget.currency) == (300, Currency.USD)
+
+
+def test_a_floor_turned_into_a_ceiling_is_a_new_request() -> None:
+    """«От 500 долларов» → «до 500 долларов»: запрос противоположный.
+
+    Половина со словами здесь бессильна и это правильно: «от» и «до» —
+    предлоги, и считать их новым словом значило бы вернуть обход лимита
+    вопросов. Различает такие пары только сравнение самих фактов, поэтому тест
+    и стоит отдельно: без него слой сравнения фактов ничего не проверял —
+    остальные случаи закрывались словами.
+    """
+    floor = _asked(
+        "квартира в нячанге от 500 долларов",
+        category=Category.APARTMENT,
+        budget=Budget(min=500, currency=Currency.USD),
+    )
+    ceiling = _asked(
+        "квартира в нячанге до 500 долларов",
+        category=Category.APARTMENT,
+        budget=Budget(max=500, currency=Currency.USD),
+    )
+
+    assert not restates(floor, ceiling)
+    assert not restates(ceiling, floor)
+
+
+def test_a_negation_is_not_a_filler_word() -> None:
+    """«Скутер автомат» → «скутер не автомат»: просьба перевернулась.
+
+    Отрицание короткое и служебное на вид, поэтому в список служебных слов оно
+    просилось само. Попади оно туда — смена запроса читалась бы как повтор.
+    """
+    wants = _asked("ищу скутер автомат в нячанге")
+    refuses = _asked("ищу скутер не автомат в нячанге")
+
+    assert not restates(wants, refuses)
+
+
+def test_silence_about_a_field_is_not_a_contradiction() -> None:
+    """Новая формулировка не назвала валюту — прежняя остаётся.
+
+    Иначе «до 1000» после «до 1000 долларов» читалось бы как смена валюты и
+    обнуляло бы собранные ответы.
+    """
+    said_in_dollars = Budget(max=1000, currency=Currency.USD)
+
+    assert not _contradicts_budget(said_in_dollars, Budget(max=1000))
+    assert not _contradicts_budget(said_in_dollars, Budget())
+    assert _contradicts_budget(said_in_dollars, Budget(max=1000, currency=Currency.VND))
+    assert _contradicts_budget(said_in_dollars, Budget(max=200, currency=Currency.USD))
+
+
+def test_a_changed_attribute_contradicts_even_when_the_words_repeat() -> None:
+    """Атрибут сравнивается так же: назвал иначе — новый запрос, промолчал — нет."""
+    collected = _asked("ищу скутер автомат", attributes={"transmission": "automatic"})
+
+    assert _contradicts(collected, _asked("ищу скутер", attributes={"transmission": "manual"}))
+    assert not _contradicts(collected, _asked("ищу скутер"))
+    assert not _contradicts(collected, _asked("ищу скутер", attributes={"papers": "blue_card"}))
+
+
+def test_a_bare_number_still_means_dollars() -> None:
+    """«500» без валюты — доллары, а не «валюта неизвестна».
+
+    Кнопка теперь называет валюту сама, и легко было отнять доллар по умолчанию
+    у голого числа, которое клиент пишет словами чаще всего.
+    """
+    answered = apply_answer(bike(), "budget.max", parse_option("budget.max", "500"))
+
+    assert (answered.budget.max, answered.budget.currency) == (500, Currency.USD)

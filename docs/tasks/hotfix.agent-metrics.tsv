@@ -1,0 +1,6 @@
+agent	tokens	seconds	model
+verify-planner-vocabulary	210570	1143	opus
+review-dashboard-security	322756	5779	sonnet
+verify-auth-closure-round5	181010	840	opus
+verify-discover	258127	1698	opus
+verify-dialogue-round2	239310	1669	opus

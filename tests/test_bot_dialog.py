@@ -747,3 +747,26 @@ def test_dispatcher_knows_the_dialog() -> None:
     dispatcher = bot_app.build_dispatcher()
 
     assert [router.name for router in dispatcher.sub_routers] == ["search"]
+
+
+async def test_appending_a_word_does_not_buy_three_more_questions() -> None:
+    """Лимит трёх вопросов нельзя обойти дописыванием служебного слова.
+
+    Замер на живой базе: «ищу скутер в нячанге», потом «…а», потом «…а б», между
+    ними по три «не важно» — девять вопросов вместо трёх и три цепочки версий
+    вместо одной. Каждая новая цепочка обнуляла и собранные ответы, и счётчик.
+    """
+    store = MemoryStore()
+    talker = talk(store, bike())
+    asked = 0
+
+    for text in ("ищу скутер в нячанге", "ищу скутер в нячанге а", "ищу скутер в нячанге а б"):
+        replies = Replies()
+        await talker.on_text(CLIENT, text, replies)
+        asked += sum(1 for reply in replies.sent if reply.question is not None)
+        for code in ("budget", "trans", "cond"):
+            skipped = Replies()
+            await talker.on_answer(CLIENT, code, SKIP, skipped)
+            asked += sum(1 for reply in skipped.sent if reply.question is not None)
+
+    assert asked <= 3, f"задано {asked} вопросов — лимит обойден дописыванием слова"

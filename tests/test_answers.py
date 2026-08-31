@@ -100,7 +100,11 @@ def test_every_button_label_is_understood_as_its_own_value(
     expected = parse_option(field, value)
 
     if isinstance(parsed, Budget):
-        assert parsed.max == expected
+        # Сравниваются и сумма, И валюта: подпись кнопки называет валюту, и
+        # разъехаться значению с подписью нельзя. Раньше сверялась одна сумма,
+        # поэтому «до 300 $», уезжавшее как 300 донгов, тест не замечал.
+        assert isinstance(expected, Budget)
+        assert (parsed.max, parsed.currency) == (expected.max, expected.currency)
     else:
         assert parsed == expected
 
