@@ -76,7 +76,15 @@ def _require_owner(cookie: str | None) -> None:
 
 
 def _html(body: str, status: int = 200) -> HTMLResponse:
-    return HTMLResponse(body, status_code=status)
+    """Единственный конструктор HTML-ответа — и он же ставит заголовки.
+
+    Одного middleware не хватает: обработчик неожиданных исключений живёт в
+    `ServerErrorMiddleware`, а она в Starlette стоит СНАРУЖИ пользовательских
+    middleware, и её ответ через них не проходит. Проверено: страница 500
+    приезжала с одним `content-type`. Поэтому заголовки ставятся здесь, а
+    middleware остаётся для редиректов и JSON.
+    """
+    return HTMLResponse(body, status_code=status, headers=dict(SECURITY_HEADERS))
 
 
 def create_app() -> FastAPI:

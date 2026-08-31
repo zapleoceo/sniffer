@@ -429,6 +429,10 @@ def test_internal_error_does_not_leak_details(
     assert "hunter2" not in response.text
     assert "RuntimeError" not in response.text
     assert "Подробности в логе" in response.text
+    # Обработчик 500 живёт в ServerErrorMiddleware, а она стоит СНАРУЖИ
+    # пользовательских middleware — её ответ через них не проходит. Заголовки
+    # обязаны быть и здесь.
+    assert "default-src 'self'" in response.headers["content-security-policy"]
 
 
 def test_openapi_and_docs_are_off(client: TestClient) -> None:
