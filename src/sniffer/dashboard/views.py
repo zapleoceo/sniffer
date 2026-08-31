@@ -8,6 +8,12 @@ from sniffer.dashboard import data
 from sniffer.dashboard.html import cards, cell, esc, link, millis, moment, money, num, page, table
 from sniffer.domain.records import DIRECTION_IN, REQUEST_FAILED, DialogMessage, SessionState
 
+# Порядок этапов задаём явно. Не по алфавиту и не по порядку вставки: `jsonb` в
+# Postgres хранит ключи в своём порядке, и после записи в базу хронология
+# теряется. Незнакомые этапы (появятся с новыми ступенями воронки) идут после
+# известных, чтобы таблица не молчала о них.
+STAGE_ORDER = ("intake_ms", "plan_ms", "search_ms")
+
 
 def overview_page(view: data.Overview) -> str:
     return page(
@@ -32,7 +38,7 @@ def request_page(view: data.RequestDetail) -> str:
     )
     stages = table(
         ["этап", "время"],
-        [[cell(name), cell(millis(value))] for name, value in sorted(request.stages.items())],
+        [[cell(name), cell(millis(value))] for name, value in _ordered_stages(request.stages)],
     )
     calls = table(
         ["время", "capability", "провайдер", "модель", "вход", "выход", "стоимость", "брокер"],
@@ -130,6 +136,13 @@ def code_form(flow_id: str, *, csrf: str, note: str = "", password: bool = False
         "</div></section></main>"
     )
     return page("SnifferBot — сессия", body)
+
+
+def _ordered_stages(stages: dict[str, int]) -> list[tuple[str, int]]:
+    def position(name: str) -> tuple[int, str]:
+        return (STAGE_ORDER.index(name) if name in STAGE_ORDER else len(STAGE_ORDER), name)
+
+    return sorted(stages.items(), key=lambda item: position(item[0]))
 
 
 def _summary(view: data.Overview) -> str:

@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 
 from sniffer.config import reload_settings
 from sniffer.dashboard import app as dashboard_app
-from sniffer.dashboard import auth, data, reauth
+from sniffer.dashboard import auth, data, reauth, views
 from sniffer.domain.records import (
     REQUEST_DONE,
     BrokerCall,
@@ -180,6 +180,19 @@ def test_request_page_shows_cost_and_stage_timings(owner: TestClient) -> None:
     assert "$0.000123" in response.text
     assert "intake_ms" in response.text and "1.2 с" in response.text
     assert "8.0 с" in response.text
+
+
+def test_stages_are_shown_in_the_order_they_happened() -> None:
+    """`jsonb` порядок ключей не хранит — порядок обязан задавать код."""
+    shuffled = {"search_ms": 8000, "extract_ms": 300, "intake_ms": 1200, "plan_ms": 900}
+
+    assert [name for name, _ in views._ordered_stages(shuffled)] == [
+        "intake_ms",
+        "plan_ms",
+        "search_ms",
+        # Незнакомый этап — после известных, а не молча первым по алфавиту.
+        "extract_ms",
+    ]
 
 
 def test_unknown_request_is_404(owner: TestClient) -> None:
