@@ -86,6 +86,26 @@ def test_foreign_account_gets_403_not_an_empty_page(dashboard_env: DashboardEnv)
     assert "не владелец" in failure.value.message
 
 
+@pytest.mark.parametrize("bad_hash", ["ы" * 64, "не-подпись", "", "ab", "z" * 64, "ЁЁ" * 32])
+def test_malformed_hash_is_refused_not_crashed(dashboard_env: DashboardEnv, bad_hash: str) -> None:
+    """`compare_digest` на не-ASCII бросает TypeError — это было бы 500 вместо 403."""
+    data = dashboard_env.sign()
+    data["hash"] = bad_hash
+
+    with pytest.raises(auth.AuthError) as failure:
+        auth.authorize_widget(data)
+
+    assert failure.value.status == 400
+
+
+@pytest.mark.parametrize("bad_cookie", ["owner:1:1.ы" * 1, "owner:1:1." + "ы" * 64, "owner:1:1."])
+def test_malformed_cookie_signature_is_refused_not_crashed(
+    dashboard_env: DashboardEnv, bad_cookie: str
+) -> None:
+    assert not auth.is_owner_session(bad_cookie)
+    assert not auth.is_valid_csrf(bad_cookie)
+
+
 def test_missing_hash_is_a_bad_request(dashboard_env: DashboardEnv) -> None:
     data = dashboard_env.sign()
     del data["hash"]

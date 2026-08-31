@@ -226,6 +226,28 @@ def test_widget_callback_without_signature_is_refused(client: TestClient) -> Non
     assert client.get("/auth/telegram", params={"id": str(OWNER)}).status_code == 400
 
 
+@pytest.mark.parametrize(
+    "bad_cookie",
+    [
+        "owner:1:1.",
+        "owner:1:1.zz",
+        "garbage-without-a-dot",
+        "owner:169510539:1",
+        "csrf:169510539:1." + "a" * 64,
+    ],
+)
+def test_malformed_cookie_is_401_not_500(client: TestClient, bad_cookie: str) -> None:
+    """Кривая cookie — это 401, а не 500: 500 в логе выглядел бы как поломка.
+
+    Не-ASCII подпись здесь не проверить — HTTP-клиент сам откажется её
+    отправить. Тот случай ловит `test_malformed_cookie_signature_is_refused_not_crashed`
+    напрямую, потому что через сырой сокет он достижим.
+    """
+    client.cookies.set(auth.COOKIE_NAME, bad_cookie)
+
+    assert client.get("/").status_code == 401
+
+
 def test_logout_clears_the_cookie(owner: TestClient) -> None:
     response = owner.get("/logout", follow_redirects=False)
 

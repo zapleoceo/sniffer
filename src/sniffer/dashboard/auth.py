@@ -108,11 +108,24 @@ def _sign(kind: str, *, now: float | None = None) -> str:
     return f"{body}.{_digest(body)}"
 
 
+def _is_hex_digest(value: str) -> bool:
+    """Похоже на sha256-подпись: ровно 64 шестнадцатеричных символа.
+
+    Проверка обязательна ПЕРЕД `compare_digest`: на двух `str` она требует
+    ASCII и на не-ASCII бросает `TypeError`. Без этой проверки подпись из
+    кириллицы давала бы 500 вместо честного отказа — то есть строку в логе
+    об ошибке сервера там, где была попытка подделки.
+    """
+    return len(value) == 64 and all(char in "0123456789abcdef" for char in value.lower())
+
+
 def _verify(kind: str, token: str | None, ttl_s: int) -> bool:
     """Подпись верна, вид тот, срок не вышел, владелец тот же."""
     if not token or "." not in token:
         return False
     body, signature = token.rsplit(".", 1)
+    if not _is_hex_digest(signature):
+        return False
     parts = body.split(":")
     if len(parts) != 3 or parts[0] != kind:
         return False
@@ -163,6 +176,10 @@ def verify_widget(data: Mapping[str, str], *, now: float | None = None) -> int:
     received = str(data.get("hash", ""))
     if not received:
         raise AuthError(400, "в ответе виджета нет подписи")
+    # Форму подписи проверяем до сравнения: `compare_digest` на не-ASCII
+    # бросает TypeError, и `?hash=ы` давал бы 500 вместо 403.
+    if not _is_hex_digest(received):
+        raise AuthError(400, "подпись виджета не похожа на подпись")
 
     fields = {key: str(value) for key, value in data.items() if key != "hash"}
     check_string = "\n".join(f"{key}={fields[key]}" for key in sorted(fields))
