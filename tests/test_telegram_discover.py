@@ -13,6 +13,7 @@ Telegram, проверяет не разведку, а связь, — и тра
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import zlib
@@ -24,8 +25,11 @@ from typing import Any
 
 import pytest
 from telethon.errors import (
+    ChannelPrivateError,
+    ChannelsTooMuchError,
     FloodWaitError,
     InviteRequestSentError,
+    UserAlreadyParticipantError,
     UsernameNotOccupiedError,
 )
 
@@ -39,10 +43,11 @@ from sniffer.sources import (
     telegram_discover_screen,
 )
 from sniffer.sources.telegram_discover import ChatDiscovery
-from sniffer.sources.telegram_discover_joiner import ChatJoiner
+from sniffer.sources.telegram_discover_joiner import MAX_CANDIDATE_ATTEMPTS, ChatJoiner
 from sniffer.sources.telegram_discover_links import candidates_from
 from sniffer.sources.telegram_discover_reference import (
     MAX_JOINS_PER_DAY,
+    REJECT_ALREADY_INSIDE,
     REJECT_ALREADY_MEMBER,
     REJECT_BOT,
     REJECT_CHANNEL,
@@ -50,6 +55,7 @@ from sniffer.sources.telegram_discover_reference import (
     REJECT_FOREIGN_CITY,
     REJECT_JOIN_REQUEST_SENT,
     REJECT_REQUEST_NEEDED,
+    REJECT_TOO_MANY_ATTEMPTS,
     REJECT_UNRESOLVED,
     REJECT_USER,
     ChatCandidate,
@@ -177,10 +183,13 @@ class FakeQueue:
             priority=row["priority"],
         )
 
-    async def release(self, key: str) -> None:
+    async def release(self, key: str) -> int:
         for row in self.db.candidates:
             if row["key"] == key:
                 row["status"] = "queued"
+                row["attempts"] = row.get("attempts", 0) + 1
+                return int(row["attempts"])
+        return 0
 
     async def drop(self, key: str) -> None:
         self.db.candidates = [row for row in self.db.candidates if row["key"] != key]
@@ -810,18 +819,30 @@ async def test_lost_connection_costs_a_slot_but_not_the_candidate() -> None:
     assert await joiner(db, client, now=NOON + timedelta(minutes=5)).join_next() is None
 
 
-async def test_refused_candidate_gives_the_slot_back() -> None:
-    """Telegram сказал «такого нет»: вступления точно не было."""
+async def test_a_refused_candidate_still_spends_the_slot() -> None:
+    """Telegram сказал «такого нет» — вступления не было, но ЗАПРОС состоялся.
+
+    Тест переписан: раньше он требовал обратного — что слот возвращается и
+    следующий кандидат идёт сразу, без часа ожидания. Это и оказалось дырой в
+    лимите. `release_slot` удаляет событие, а вместе с ним `next_allowed_at`,
+    то есть паузу в час; на очереди из недоступных чатов замер дал 24 исходящих
+    `JoinChannel` за сутки вместо трёх, а при остановленном времени — 40.
+    Флуд-лимит Telegram считает запросы, а не успехи.
+
+    Принцип записан в spec-v2 4.5 прямым текстом, и он сильнее удобства:
+    «слот потрачен и тогда, когда чата мы не получили, но запрос наружу
+    состоялся».
+    """
     db = seeded_db("gone", "alive")
     client = joiner_client("gone", "alive")
     client.join_errors["gone"] = UsernameNotOccupiedError(request=None)
 
     assert await joiner(db, client, now=NOON).join_next() is None
-    assert db.events == []
     assert db.rejects["@gone"] == telegram_discover_reference.REJECT_JOIN_REFUSED
-    # Слот вернулся — следующий кандидат идёт сразу, без часа ожидания.
-    chat = await joiner(db, client, now=NOON).join_next()
-    assert chat is not None and chat.username == "alive"
+    # Слот потрачен: следующий кандидат ждёт час, как после успешного вступления.
+    assert await joiner(db, client, now=NOON).join_next() is None
+    later = await joiner(db, client, now=NOON + timedelta(hours=1, minutes=1)).join_next()
+    assert later is not None and later.username == "alive"
 
 
 async def test_chat_cap_stops_growth() -> None:
@@ -941,18 +962,64 @@ async def test_only_allowed_methods_reach_telegram() -> None:
         client.send_message  # noqa: B018
 
 
+def discovery_modules() -> list[Path]:
+    """Файлы разведки — по ГРАФУ ИМПОРТОВ, а не по имени файла.
+
+    Так же, как на пути чтения (`test_telegram_groups.read_path_modules`), и по
+    той же причине. Список по маске `telegram_discover*.py` обходился одним
+    переименованием: модуль `sources/discover_helper.py`, импортированный из
+    разведки, с прямым `client.send_message(...)` внутри, проходил ВСЕ ворота
+    зелёными — mypy и ruff на таком вызове слепы (Telethon без `py.typed`, для
+    них это `Any`), а страж его просто не видел. Проверено на копии дерева.
+    """
+    root = Path(str(telegram_discover.__file__)).parent.parent
+    seen: dict[str, Path] = {}
+    # Обход начинается от ВСЕХ охраняемых модулей, а не от одной точки входа.
+    # Проверяемое свойство — замкнутость: если охраняемый модуль что-то
+    # импортирует, это «что-то» тоже под стражем. Так закрывается обход новым
+    # файлом с любым именем и в любом каталоге.
+    queue = [module.__name__ for module in MODULES]
+    while queue:
+        name = queue.pop()
+        if name in seen:
+            continue
+        path = root.parent / (name.replace(".", "/") + ".py")
+        if not path.is_file():
+            path = root.parent / name.replace(".", "/") / "__init__.py"
+            if not path.is_file():
+                continue
+        seen[name] = path
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+                queue.append(node.module)
+            elif isinstance(node, ast.Import):
+                queue.extend(alias.name for alias in node.names)
+    return [path for name, path in seen.items() if name.startswith("sniffer.")]
+
+
 def test_every_discovery_module_is_under_guard() -> None:
     """Список `MODULES` обязан покрывать все модули разведки.
 
     Без этой проверки страж закрытого списка обходится не правкой запрета, а
     новым файлом: код переезжает в модуль, которого в списке нет, и запросы к
-    Telegram перестают проверяться молча. Ровно так и случилось бы при выносе
-    преобразований в `telegram_discover_convert`.
+    Telegram перестают проверяться молча.
+
+    Список берётся из графа импортов, поэтому обойти его переименованием
+    нельзя: файл, который разведка импортирует, попадает под стража сам —
+    как бы он ни назывался и в каком бы каталоге ни лежал.
     """
-    package = Path(str(telegram_discover.__file__)).parent
-    on_disk = {path.stem for path in package.glob("telegram_discover*.py")}
     listed = {Path(str(module.__file__)).stem for module in MODULES}
-    assert on_disk == listed
+    # Разведка тянет и общее (config, db, домен), но клиент Telegram живёт в
+    # `sources` — там и должно быть проверено ВСЁ, до чего она дотягивается.
+    reachable = {path.stem for path in discovery_modules() if path.parent.name == "sources"}
+    # `telegram_groups` исключён: это отдельный источник со своим стражем
+    # (`test_telegram_groups`), разведка лишь берёт у него реестр чатов.
+    reachable -= {"telegram_groups", "telegram_reference", "telegram_client", "telegram_mapping"}
+
+    assert reachable <= listed, (
+        f"под стражем нет модулей, до которых разведка дотягивается: {sorted(reachable - listed)}"
+    )
 
 
 def test_modules_call_no_forbidden_method() -> None:
@@ -1247,3 +1314,127 @@ def test_broadcast_is_never_taken_for_a_group(
 ) -> None:
     """Вещание не группа: объявлений от людей в нём не бывает."""
     assert telegram_discover_convert.is_group(entity) is is_group, what
+
+
+# --------------------------------------------------------------------------
+# Три способа превысить три вступления в сутки. Каждый замерен прогоном по
+# суткам, поэтому и закреплён отдельным тестом: суточный лимит — единственное,
+# что отделяет рабочий аккаунт от бана.
+# --------------------------------------------------------------------------
+
+
+def outgoing_joins(client: FakeTelegram) -> int:
+    """Сколько запросов на вступление УШЛО наружу — удачных и неудачных.
+
+    Считать по `joined` нельзя: там только успехи, а суточный лимит Telegram
+    считает запросы. Первая версия этих тестов мерила именно `joined` и потому
+    пропускала ровно тот дефект, ради которого написана — возврат слота на
+    отказе давал 24 запроса в сутки при трёх успехах.
+    """
+    return sum(1 for call in client.calls if call.startswith("join"))
+
+
+def broken_client(error: Exception, *usernames: str) -> FakeTelegram:
+    """Клиент, у которого вступление в любой чат кончается этой ошибкой."""
+    client = joiner_client(*usernames)
+    client.join_errors = {name: error for name in usernames}
+    return client
+
+
+async def test_a_refusal_does_not_hand_the_slot_back() -> None:
+    """Отказ Telegram тратит слот: запрос наружу состоялся.
+
+    Замер до правки: очередь из недоступных чатов, вызов раз в час — 24
+    исходящих `JoinChannel` за сутки вместо трёх, потому что `release_slot`
+    удалял событие вместе с паузой в час. Флуд-лимит Telegram считает запросы,
+    а не успехи, и принцип «слот потрачен, если запрос состоялся» записан в
+    spec-v2 4.5 прямым текстом.
+    """
+    names = tuple(f"gone{index}" for index in range(30))
+    db = seeded_db(*names)
+    client = broken_client(ChannelPrivateError(request=None), *names)
+
+    for hour in range(24):
+        await joiner(db, client, now=NOON + timedelta(hours=hour)).join_next()
+
+    assert outgoing_joins(client) <= MAX_JOINS_PER_DAY, (
+        f"наружу ушло {outgoing_joins(client)} запросов вместо {MAX_JOINS_PER_DAY}"
+    )
+
+
+async def test_an_eternal_candidate_stops_eating_the_daily_slots() -> None:
+    """Кандидат с неизвестным исходом не крутится в очереди бесконечно.
+
+    Замер до правки: `UserAlreadyParticipantError` уходил в общий `except`,
+    кандидат возвращался в очередь, `reserve()` брал его же — 21 исходящий join
+    за семь суток, по три в день, вечно, и второй кандидат не получал хода
+    никогда. Считаются попытки, а не типы ошибок: так закрывается и седьмая
+    ошибка, которую никто не назвал.
+    """
+    db = seeded_db("eternal", "second")
+    client = broken_client(TimeoutError("обрыв связи посреди вступления"), "eternal", "second")
+
+    for hour in range(7 * 24):
+        await joiner(db, client, now=NOON + timedelta(hours=hour)).join_next()
+
+    assert db.rejects.get("@eternal") == REJECT_TOO_MANY_ATTEMPTS
+    assert not any(row["key"] == "@eternal" for row in db.candidates), (
+        "вечный кандидат остался в очереди"
+    )
+    assert outgoing_joins(client) <= 2 * MAX_CANDIDATE_ATTEMPTS, (
+        f"на двух кандидатов ушло {outgoing_joins(client)} запросов за семь суток"
+    )
+
+
+async def test_already_inside_spends_the_slot_and_drops_the_candidate() -> None:
+    """«Мы уже внутри» — не повод пробовать снова: запрос ушёл, чат есть.
+
+    Случай не редкий: очередь живёт неделями, и чат мог быть взят другим путём.
+    """
+    db = seeded_db("already")
+    client = broken_client(UserAlreadyParticipantError(request=None), "already")
+
+    assert await joiner(db, client, now=NOON).join_next() is None
+
+    assert db.rejects.get("@already") == REJECT_ALREADY_INSIDE
+    assert not any(row["key"] == "@already" for row in db.candidates)
+
+
+async def test_a_full_account_stops_joins_like_a_flood() -> None:
+    """Потолок чатов у самого Telegram: следующая попытка ничего не изменит.
+
+    Пробовать ещё дважды в те же сутки — два бесполезных запроса в подпись
+    автомата. Кандидат при этом не виноват и остаётся в очереди.
+    """
+    db = seeded_db("full", "next")
+    broken = broken_client(ChannelsTooMuchError(request=None), "full", "next")
+
+    assert await joiner(db, broken, now=NOON).join_next() is None
+
+    healthy = joiner_client("full", "next")
+    assert await joiner(db, healthy, now=NOON + timedelta(hours=2)).join_next() is None, (
+        "после «аккаунт полон» стоп не действует"
+    )
+    assert any(row["key"] == "@full" and row["status"] == "queued" for row in db.candidates), (
+        "кандидат ни в чём не виноват"
+    )
+
+
+async def test_a_flood_near_midnight_still_stops_for_half_a_day() -> None:
+    """Флуд в 23:59 держал шестьдесят секунд — буква правила против его смысла.
+
+    Замер до правки: `blocked_until` = полночь, то есть минута; дальше работала
+    только часовая пауза, и в течение трёх часов после предупреждения уходило
+    два новых вступления.
+    """
+    late = datetime(2026, 9, 1, 23, 59, tzinfo=UTC)
+    db = seeded_db("flooded", "next")
+    flooding = broken_client(FloodWaitError(request=None, capture=30), "flooded", "next")
+
+    assert await joiner(db, flooding, now=late).join_next() is None
+
+    healthy = joiner_client("flooded", "next")
+    for hours in (1, 3, 6, 11):
+        assert await joiner(db, healthy, now=late + timedelta(hours=hours)).join_next() is None, (
+            f"через {hours} ч после флуда вступление прошло — стоп короче полусуток"
+        )

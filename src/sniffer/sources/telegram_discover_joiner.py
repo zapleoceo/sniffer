@@ -30,11 +30,13 @@ from datetime import UTC, datetime, time, timedelta
 import structlog
 from telethon.errors import (
     ChannelPrivateError,
+    ChannelsTooMuchError,
     FloodWaitError,
     InviteHashEmptyError,
     InviteHashExpiredError,
     InviteHashInvalidError,
     InviteRequestSentError,
+    UserAlreadyParticipantError,
     UsernameInvalidError,
     UsernameNotOccupiedError,
 )
@@ -42,11 +44,14 @@ from telethon.errors import (
 from sniffer.config import get_settings
 from sniffer.sources.telegram_discover_reference import (
     DISCOVERED_RANK,
+    FLOOD_MIN_STOP,
     JOIN_PAUSE_JITTER,
     MAX_TRACKED_CHATS,
     MIN_JOIN_PAUSE,
+    REJECT_ALREADY_INSIDE,
     REJECT_JOIN_REFUSED,
     REJECT_JOIN_REQUEST_SENT,
+    REJECT_TOO_MANY_ATTEMPTS,
     CandidateQueue,
     ChatCandidate,
     ChatRegistry,
@@ -62,10 +67,20 @@ log = structlog.get_logger(__name__)
 Now = Callable[[], datetime]
 Jitter = Callable[[], timedelta]
 
-# Отказы, после которых точно известно: вступления не произошло. Только их
-# можно считать «кандидат плохой» — вернуть слот и выбросить кандидата.
-# Всё остальное (обрыв связи, таймаут, незнакомая ошибка) — неизвестный исход,
-# и слот там остаётся потраченным.
+# Отказы, после которых точно известно: вступления не произошло, и кандидат
+# больше не годится. Все шесть — ответы СЕРВЕРА, то есть запрос наружу уже
+# состоялся, поэтому слот они НЕ возвращают.
+#
+# Возвращали. И это давало 24 запроса в сутки вместо трёх: `release_slot`
+# удаляет событие, а вместе с ним исчезает и `next_allowed_at`, то есть пауза
+# в час. Замер: очередь из плохих кандидатов, вызов раз в час — 24 исходящих
+# `JoinChannel` за сутки; при остановленном времени — 40. Флуд-лимит Telegram
+# считает запросы, а не успехи, и `ChannelPrivateError` для чата, закрывшегося
+# за недели ожидания в очереди, — обычное дело.
+#
+# Принцип записан в spec-v2 4.5 и звучит однозначно: слот потрачен и тогда,
+# когда чата мы не получили, но запрос наружу состоялся. Правка ревью закрыла
+# один экземпляр этого класса (`InviteRequestSentError`) и оставила шесть.
 CANDIDATE_REFUSED = (
     UsernameNotOccupiedError,
     UsernameInvalidError,
@@ -74,6 +89,27 @@ CANDIDATE_REFUSED = (
     InviteHashEmptyError,
     ChannelPrivateError,
 )
+
+# Мы уже в этом чате. Исход известен точно, кандидат не нужен, но запрос
+# наружу состоялся — значит слот потрачен, как у любого отказа сервера.
+# Случай не редкий: очередь живёт неделями, и чат мог быть взят другим путём.
+ALREADY_INSIDE = (UserAlreadyParticipantError,)
+
+# Аккаунт упёрся в собственный потолок чатов Telegram. Само не пройдёт: пока
+# из чатов не выйдут, каждая следующая попытка — запрос в пустоту. Поэтому
+# останавливаемся так же, как после флуда, а не пробуем ещё три раза в сутки.
+ACCOUNT_FULL = (ChannelsTooMuchError,)
+
+# Сколько неизвестных исходов подряд терпит один кандидат. Ограничение нужно НЕ
+# для перечисленных выше ошибок, а для НЕПЕРЕЧИСЛЕННЫХ: неизвестный исход
+# возвращает кандидата в очередь, а `reserve()` берёт наименьший приоритет —
+# то есть его же. Замер до правки: `UserAlreadyParticipantError` давал 21
+# исходящий join за семь суток, по три в день, вечно, и второй кандидат не
+# получал хода никогда.
+#
+# Считать попытки, а не перечислять ошибки: список типов закрывает те случаи,
+# которые вспомнили, а счётчик закрывает и седьмой, которого никто не назвал.
+MAX_CANDIDATE_ATTEMPTS = 3
 
 
 def _utcnow() -> datetime:
@@ -161,7 +197,7 @@ class ChatJoiner:
             # называет секунды, но продолжать через них означает подтвердить
             # ему, что мы автомат. Стоп до конца суток (CLAUDE.md). Кандидат
             # возвращается в очередь: он ни в чём не виноват.
-            blocked_until = _end_of_day(now)
+            blocked_until = _flood_stop(now)
             await self._ledger.record_flood(event_id=event_id, blocked_until=blocked_until)
             await self._queue.release(candidate.key)
             log.warning(
@@ -188,12 +224,33 @@ class ChatJoiner:
             log.warning("discover.join_request_sent", candidate=candidate.key)
             return None
         except CANDIDATE_REFUSED as exc:
-            # Telegram сказал «такого нет» или «сюда нельзя»: вступления точно
-            # не было, слот возвращаем, кандидата больше не разбираем.
-            await self._ledger.release_slot(event_id=event_id)
+            # Telegram сказал «такого нет» или «сюда нельзя»: вступления не
+            # было, кандидата больше не разбираем. Слот НЕ возвращаем — запрос
+            # наружу состоялся, а лимит считает запросы (см. CANDIDATE_REFUSED).
             await self._queue.drop(candidate.key)
             await self._rejected.reject(candidate.key, REJECT_JOIN_REFUSED)
             log.info("discover.join_refused", candidate=candidate.key, error=why(exc))
+            return None
+        except ALREADY_INSIDE as exc:
+            # Мы в этом чате и так. Кандидат не нужен, слот потрачен: запрос
+            # ушёл, и Telegram на него ответил.
+            await self._queue.drop(candidate.key)
+            await self._rejected.reject(candidate.key, REJECT_ALREADY_INSIDE)
+            log.info("discover.already_inside", candidate=candidate.key, error=why(exc))
+            return None
+        except ACCOUNT_FULL as exc:
+            # Потолок чатов у самого Telegram: следующая попытка ничего не
+            # изменит. Останавливаемся, как после флуда; кандидат ни в чём не
+            # виноват и возвращается в очередь.
+            blocked_until = _flood_stop(now)
+            await self._ledger.record_flood(event_id=event_id, blocked_until=blocked_until)
+            await self._queue.release(candidate.key)
+            log.error(
+                "discover.account_full",
+                candidate=candidate.key,
+                blocked_until=blocked_until.isoformat(),
+                error=why(exc),
+            )
             return None
         except Exception as exc:
             # Обрыв связи посреди вступления: прошло оно или нет — неизвестно.
@@ -201,8 +258,30 @@ class ChatJoiner:
             # четвёртое), кандидат возвращается в очередь (терять его нельзя,
             # разбирать её больше некому). Повторный join в тот же чат для
             # Telegram идемпотентен, так что худший исход — потерянные сутки.
-            await self._queue.release(candidate.key)
-            log.warning("discover.join_unknown", candidate=candidate.key, error=why(exc))
+            #
+            # Но возвращается он НЕ бесконечно: `reserve()` берёт наименьший
+            # приоритет, то есть его же, и один вечный кандидат съедал все три
+            # слота каждые сутки — навсегда, а остальная очередь не двигалась.
+            # Поэтому попытки считаются, и после `MAX_CANDIDATE_ATTEMPTS` он
+            # уходит в отклонённые. Так закрывается и седьмая ошибка, которую
+            # никто не назвал: ограничение на попытки не зависит от её типа.
+            attempts = await self._queue.release(candidate.key)
+            if attempts >= MAX_CANDIDATE_ATTEMPTS:
+                await self._queue.drop(candidate.key)
+                await self._rejected.reject(candidate.key, REJECT_TOO_MANY_ATTEMPTS)
+                log.warning(
+                    "discover.candidate_exhausted",
+                    candidate=candidate.key,
+                    attempts=attempts,
+                    error=why(exc),
+                )
+                return None
+            log.warning(
+                "discover.join_unknown",
+                candidate=candidate.key,
+                attempts=attempts,
+                error=why(exc),
+            )
             return None
 
         # Событие достраивается сразу после успеха: слот уже занят с самого
@@ -263,6 +342,21 @@ class ChatJoiner:
             return False
         await self._ledger.mark_muted(tg_id=tg_id)
         return True
+
+
+def _flood_stop(now: datetime) -> datetime:
+    """До каких пор не вступаем после флуд-предупреждения.
+
+    «До конца суток» само по себе оказалось лазейкой: флуд в 23:59 держал
+    ШЕСТЬДЕСЯТ СЕКУНД, а дальше оставалась только часовая пауза — замер дал два
+    новых вступления в течение трёх часов после предупреждения. Буква правила
+    соблюдалась, защитный смысл исчезал.
+
+    Поэтому берётся большее из двух: остаток суток и `FLOOD_MIN_STOP`. Флуд в
+    полдень держит до полуночи, флуд в 23:59 — двенадцать часов, и короче
+    полусуток стоп не бывает ни в какой час.
+    """
+    return max(_end_of_day(now), now + FLOOD_MIN_STOP)
 
 
 def _end_of_day(now: datetime) -> datetime:

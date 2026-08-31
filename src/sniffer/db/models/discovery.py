@@ -48,6 +48,10 @@ class ChatCandidate(BigIdMixin, Base):
     found_in: Mapped[str] = mapped_column(Text, nullable=False, server_default=sa_text("''"))
     priority: Mapped[int] = mapped_column(Integer, nullable=False, server_default=sa_text("100"))
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=sa_text("'queued'"))
+    # Неизвестных исходов подряд. В БД, а не в памяти воркера: счётчик,
+    # обнуляемый перезапуском, не ограничивает ничего — а без ограничения один
+    # кандидат съедал все три суточных слота бессрочно (spec-v2, 4.5).
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=sa_text("0"))
     found_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=NOW
     )
