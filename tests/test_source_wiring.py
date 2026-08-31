@@ -96,6 +96,9 @@ class FakeChatRepository:
 
     async def list_active(self, *, limit: int = 10) -> list[Chat]:
         self.asked.append(limit)
+        # Второй чат — чужого города: репозиторий фильтра по городу не имеет и
+        # отдаёт активные чаты всех городов подряд (spec-v2, 4.4). Если город
+        # до обёртки не доедет, находка приедет и оттуда — это будет видно.
         return [
             Chat(
                 tg_id=CHAT_TG_ID,
@@ -103,7 +106,14 @@ class FakeChatRepository:
                 city="nha_trang",
                 username=CHAT_USERNAME,
                 search_rank=10,
-            )
+            ),
+            Chat(
+                tg_id=-1001902334455,
+                title="Дананг · Барахолка",
+                city="da_nang",
+                username="danang_baraholka",
+                search_rank=20,
+            ),
         ]
 
 
@@ -163,14 +173,15 @@ async def test_run_plan_finds_a_chat_that_exists_only_in_the_registry(
     assert [item.external_id for item in items] == [f"{CHAT_TG_ID}:{MSG_ID}"]
     assert items[0].url == f"https://t.me/{CHAT_USERNAME}/{MSG_ID}"
     # Адресуем чат по username из записи реестра: по голому id сущность
-    # разрешается только из кэша сессии (spec-v2, 4.4).
+    # разрешается только из кэша сессии (spec-v2, 4.4). Чат чужого города в
+    # обход не попал — значит город из задачи доехал до обёртки.
     assert client.queried == [CHAT_USERNAME]
 
 
-async def test_registry_is_asked_with_the_city_of_the_task(
+async def test_registry_is_asked_once_with_the_overfetch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Город из задачи доезжает до обёртки, а та просит выборку с запасом."""
+    """Запрос к базе один, и просит он выборку с запасом на фильтр по городу."""
     asked: list[int] = []
 
     class Recording(FakeChatRepository):
