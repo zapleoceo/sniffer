@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Annotated
 
 import structlog
@@ -24,6 +25,45 @@ from sniffer.dashboard.html import error_page, esc, login_page
 log = structlog.get_logger(__name__)
 
 OwnerCookie = Annotated[str | None, Cookie(alias=auth.COOKIE_NAME)]
+CallNext = Callable[[Request], Awaitable[Response]]
+
+# Второй рубеж после экранирования. Экранирование — основной механизм, но оно
+# отменяется одной забытой строкой, а CSP не отменяется ничем: даже прошедший
+# скрипт не сможет ни выполниться, ни отправить переписку клиентов наружу.
+#
+# Что откуда: скрипт виджета — с telegram.org, кнопка виджета — iframe с
+# oauth.telegram.org, аватарки — с t.me. Больше внешних источников на странице
+# нет. `frame-ancestors 'none'` запрещает встраивать НАС; `form-action 'self'` —
+# отправлять наши формы на чужой домен.
+CSP = "; ".join(
+    (
+        "default-src 'self'",
+        "script-src 'self' https://telegram.org",
+        # 'unsafe-inline' только для стилей: они лежат в <style> самой страницы.
+        # Для скриптов inline не разрешён — там он и опасен.
+        "style-src 'self' 'unsafe-inline'",
+        "img-src 'self' data: https://t.me https://telegram.org",
+        "frame-src https://oauth.telegram.org",
+        "connect-src 'self'",
+        "form-action 'self'",
+        "base-uri 'none'",
+        "object-src 'none'",
+        "frame-ancestors 'none'",
+    )
+)
+
+SECURITY_HEADERS = {
+    "Content-Security-Policy": CSP,
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    # Ссылки в карточках ведут на чужие сайты; адрес страницы владельца им
+    # знать незачем.
+    "Referrer-Policy": "no-referrer",
+    "Permissions-Policy": "geolocation=(), microphone=(), camera=()",
+    # Страница с перепиской клиентов не должна лежать в кэше прокси или
+    # оставаться в истории браузера после выхода.
+    "Cache-Control": "no-store",
+}
 
 
 class Unauthorized(Exception):
@@ -43,6 +83,18 @@ def create_app() -> FastAPI:
     # Документацию OpenAPI выключаем: описывать наружу нечего, а /docs — это
     # ещё одна страница, которая обязана быть закрытой, и однажды не будет.
     app = FastAPI(title="SnifferBot dashboard", docs_url=None, redoc_url=None, openapi_url=None)
+
+    @app.middleware("http")
+    async def _headers(request: Request, call_next: CallNext) -> Response:
+        """Заголовки на КАЖДЫЙ ответ, включая страницы ошибок и редиректы.
+
+        Middleware, а не установка в каждом хендлере: забытый хендлер — это
+        страница без CSP, и заметить это по диффу невозможно.
+        """
+        response = await call_next(request)
+        for name, value in SECURITY_HEADERS.items():
+            response.headers.setdefault(name, value)
+        return response
 
     @app.exception_handler(Unauthorized)
     async def _unauthorized(_request: Request, _exc: Unauthorized) -> HTMLResponse:

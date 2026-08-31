@@ -400,3 +400,41 @@ def test_openapi_and_docs_are_off(client: TestClient) -> None:
     """Ещё одна страница, которая обязана быть закрытой, однажды не будет."""
     assert client.get("/docs").status_code == 404
     assert client.get("/openapi.json").status_code == 404
+
+
+# ── заголовки безопасности ──────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("path", ["/", "/requests/3", "/session", "/healthz"])
+def test_security_headers_are_on_every_response(owner: TestClient, path: str) -> None:
+    """Второй рубеж после экранирования — и он не должен зависеть от хендлера."""
+    headers = owner.get(path).headers
+
+    csp = headers["content-security-policy"]
+    assert "default-src 'self'" in csp
+    # Inline-скрипт запрещён: именно там XSS и выполняется.
+    assert "'unsafe-inline'" not in csp.split("script-src")[1].split(";")[0]
+    assert "frame-ancestors 'none'" in csp
+    assert "form-action 'self'" in csp
+    assert headers["x-frame-options"] == "DENY"
+    assert headers["x-content-type-options"] == "nosniff"
+    assert headers["referrer-policy"] == "no-referrer"
+    assert headers["cache-control"] == "no-store"
+
+
+def test_login_page_also_carries_the_headers(client: TestClient) -> None:
+    """Страница входа отдаётся обработчиком исключения — её легко забыть."""
+    response = client.get("/")
+
+    assert response.status_code == 401
+    assert "telegram.org" in response.headers["content-security-policy"]
+
+
+def test_widget_script_source_is_allowed_by_csp(client: TestClient) -> None:
+    """CSP не должна ломать сам вход: скрипт виджета обязан загружаться."""
+    response = client.get("/")
+    csp = response.headers["content-security-policy"]
+
+    assert "script-src 'self' https://telegram.org" in csp
+    assert "frame-src https://oauth.telegram.org" in csp
+    assert "telegram.org/js/telegram-widget.js" in response.text
