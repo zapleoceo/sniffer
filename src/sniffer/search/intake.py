@@ -29,7 +29,7 @@ from sniffer.domain.passport import (
     PricePeriod,
 )
 from sniffer.search.intake_rules import parse_query
-from sniffer.search.market_terms import CITY_NAMES
+from sniffer.search.market_terms import ALL_CITY_NAMES
 from sniffer.search.planner import StructuredCaller
 
 log = structlog.get_logger(__name__)
@@ -40,7 +40,9 @@ SYSTEM_PROMPT = """Ты разбираешь запрос клиента о ча
 Вьетнаме в структуру. Отвечай только тем, что клиент действительно сказал или
 что однозначно следует из его слов: незаполненное поле честнее выдуманного.
 
-city — латинский слаг города: Нячанг → nha_trang, Дананг → da_nang.
+city — латинский слаг города из перечисления схемы: Нячанг → nha_trang,
+Дананг → da_nang, Хойан → hoi_an. Города, которого в перечислении нет, не
+подменяй похожим: оставь поле пустым.
 budget_max — число без пробелов и валюты; «10 млн донгов» → 10000000.
 currency — валюта суммы; «млн» без валюты во Вьетнаме означает донги.
 brand — марка техники, если названа."""
@@ -96,6 +98,10 @@ def intake_schema() -> dict[str, Any]:
     необязательных, а «не знаю» модель выражает пустой строкой. Числа тоже
     приходят строкой — провайдеры возвращают то `400`, то `"400 USD"`, и
     разобрать строку надёжнее, чем спорить о типе.
+
+    Перечисление городов — `ALL_CITY_NAMES`, а не только обслуживаемые: закрепи
+    здесь два города, и модель физически не сможет сказать, что клиент назвал
+    третий. Отказ искать в Хойане — ответ; молча подставленный Нячанг — нет.
     """
     return {
         "type": "object",
@@ -104,7 +110,7 @@ def intake_schema() -> dict[str, Any]:
         "properties": {
             "intent": _enum(Intent),
             "category": _enum(Category),
-            "city": {"type": "string", "enum": ["", *CITY_NAMES]},
+            "city": {"type": "string", "enum": ["", *ALL_CITY_NAMES]},
             "budget_max": {"type": "string", "description": "число без валюты, пусто если нет"},
             "currency": _enum(Currency),
             "period": _enum(PricePeriod),

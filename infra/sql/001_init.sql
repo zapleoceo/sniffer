@@ -157,13 +157,36 @@ CREATE TABLE IF NOT EXISTS passports (
 CREATE INDEX IF NOT EXISTS passports_user_idx ON passports (user_id, is_current);
 CREATE INDEX IF NOT EXISTS passports_root_idx ON passports (root_id, version DESC);
 
+-- Ключ цепочки — COALESCE(root_id, id): у первой версии root_id пуст, корнем
+-- ей служит свой же id. Оба индекса уникальны не для скорости, а как последний
+-- барьер: приложение блокирует корень цепочки перед вставкой, но два
+-- одновременных уточнения (двойной тап, ретрай апдейта, два воркера) не должны
+-- уметь оставить в цепочке ни двух версий с одним номером, ни двух актуальных
+-- — «последняя версия» после такого перестаёт быть определённой, а подписка и
+-- аналитика начинают читать разное.
+CREATE UNIQUE INDEX IF NOT EXISTS passports_chain_version_idx
+    ON passports ((COALESCE(root_id, id)), version);
+CREATE UNIQUE INDEX IF NOT EXISTS passports_chain_current_idx
+    ON passports ((COALESCE(root_id, id))) WHERE is_current;
+
 CREATE TABLE IF NOT EXISTS passport_events (
     id           BIGSERIAL PRIMARY KEY,
     passport_id  BIGINT      NOT NULL REFERENCES passports(id) ON DELETE CASCADE,
-    kind         TEXT        NOT NULL,   -- user_message | feedback | agent_infer | manual_edit
+    -- user_message | feedback | agent_infer | manual_edit | question_asked
+    -- question_asked — не правка паспорта, а след диалога: из него собирается
+    -- счётчик заданных вопросов, который обязан пережить перезапуск бота.
+    kind         TEXT        NOT NULL,
     payload      JSONB       NOT NULL DEFAULT '{}',
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Список видов закрыт: из этого лога собирается состояние диалога, и опечатка
+-- в виде события даёт не ошибку, а молча потерянный вопрос. Отдельным ALTER, а
+-- не строкой в CREATE TABLE, — чтобы ограничение доехало и до баз, созданных
+-- прежней версией файла.
+ALTER TABLE passport_events DROP CONSTRAINT IF EXISTS passport_events_kind_check;
+ALTER TABLE passport_events ADD CONSTRAINT passport_events_kind_check
+    CHECK (kind IN ('user_message', 'feedback', 'agent_infer', 'manual_edit', 'question_asked'));
 
 -- ── подписки и доставка ─────────────────────────────────────────────────────
 

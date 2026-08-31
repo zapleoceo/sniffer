@@ -7,13 +7,15 @@
 
 from __future__ import annotations
 
-from sqlalchemy import or_, select, update
+from typing import Any
+
+from sqlalchemy import func, or_, select, update
 
 from sniffer.db import models
-from sniffer.db.mappers import passport_values, to_stored_passport
+from sniffer.db.mappers import passport_values, to_passport_event, to_stored_passport
 from sniffer.db.repositories.base import Repository
 from sniffer.domain.passport import Passport
-from sniffer.domain.records import StoredPassport
+from sniffer.domain.records import PassportEvent, StoredPassport
 
 
 class PassportRepository(Repository):
@@ -49,8 +51,25 @@ class PassportRepository(Repository):
         Прежние версии цепочки снимаются с `is_current` до вставки новой:
         иначе подписка и выдача успели бы увидеть две актуальные версии одного
         паспорта и разойтись в том, какая из них правда.
+
+        Цепочка блокируется по корню, и номер версии считается уже под
+        блокировкой, а не берётся из `previous`. `previous` прочитан другой
+        сессией и к этому моменту может быть устаревшим: два одновременных
+        уточнения (двойной тап по кнопке, ретрай апдейта Telegram, два воркера)
+        иначе оба посчитали бы `previous.version + 1` от одной и той же версии
+        и вставили два одинаковых номера, а `is_current` при неудачном
+        переплетении остался бы у обоих. Postgres по умолчанию READ COMMITTED —
+        сам он такую пару не разведёт.
         """
         root = previous.root
+        await self._session.execute(
+            select(models.Passport.id).where(models.Passport.id == root).with_for_update()
+        )
+        latest = await self._session.scalar(
+            select(func.max(models.Passport.version)).where(
+                or_(models.Passport.id == root, models.Passport.root_id == root)
+            )
+        )
         await self._session.execute(
             update(models.Passport)
             .where(or_(models.Passport.id == root, models.Passport.root_id == root))
@@ -58,10 +77,48 @@ class PassportRepository(Repository):
         )
         row = models.Passport(
             user_id=previous.user_id,
-            version=previous.version + 1,
+            version=(latest or previous.version) + 1,
             root_id=root,
             **passport_values(passport),
         )
         self._session.add(row)
         await self._session.flush()
         return to_stored_passport(row)
+
+    async def list_versions(self, root: int) -> list[StoredPassport]:
+        """Вся цепочка версий по возрастанию номера.
+
+        Нужна там, где важна цепочка целиком, а не её последняя версия: объяснить
+        клиенту, почему выдача изменилась, и проверить инвариант «одна актуальная
+        версия на цепочку», который в одиночной выборке не виден.
+        """
+        rows = await self._session.scalars(
+            select(models.Passport)
+            .where(or_(models.Passport.id == root, models.Passport.root_id == root))
+            .order_by(models.Passport.version, models.Passport.id)
+        )
+        return [to_stored_passport(row) for row in rows]
+
+    async def add_event(
+        self, passport_id: int, kind: str, payload: dict[str, Any] | None = None
+    ) -> PassportEvent:
+        """След диалога: заданный вопрос, ответ клиента, нажатая кнопка."""
+        row = models.PassportEvent(passport_id=passport_id, kind=kind, payload=payload or {})
+        self._session.add(row)
+        await self._session.flush()
+        return to_passport_event(row)
+
+    async def list_events(self, root: int) -> list[PassportEvent]:
+        """События всей цепочки версий, в порядке появления.
+
+        Именно цепочки, а не одной версии: клиент отвечает на вопрос — версия
+        меняется, а счётчик заданных вопросов обязан продолжиться, а не
+        начаться заново.
+        """
+        rows = await self._session.scalars(
+            select(models.PassportEvent)
+            .join(models.Passport, models.Passport.id == models.PassportEvent.passport_id)
+            .where(or_(models.Passport.id == root, models.Passport.root_id == root))
+            .order_by(models.PassportEvent.id)
+        )
+        return [to_passport_event(row) for row in rows]

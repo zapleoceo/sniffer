@@ -506,6 +506,35 @@ ssh sniffer '/var/www/sniffer/infra/deploy.sh /var/www/sniffer <предыдущ
 миграционного механизма в проекте нет; когда появится, это место придётся
 переписать.
 
+### 7.1 Что накатить руками после мержа диалога-паспорта
+
+Файл `001_init.sql` идемпотентен целиком, поэтому на существующем томе его
+можно просто прогнать заново:
+
+```bash
+docker exec -i sniffer-postgres psql -U sniffer -d sniffer -v ON_ERROR_STOP=1 \
+  < infra/sql/001_init.sql
+```
+
+Появятся два уникальных индекса по цепочке версий паспорта
+(`passports_chain_version_idx`, `passports_chain_current_idx`) и `CHECK` на
+`passport_events.kind`. **Уникальный индекс не создастся, если в базе уже есть
+битые данные** — как раз те, от которых он защищает. Тогда psql скажет
+`could not create unique index … is duplicated`, и сначала надо посмотреть, что
+именно лежит:
+
+```sql
+SELECT COALESCE(root_id, id) AS chain, version, count(*)
+FROM passports GROUP BY 1, 2 HAVING count(*) > 1;
+
+SELECT COALESCE(root_id, id) AS chain, count(*)
+FROM passports WHERE is_current GROUP BY 1 HAVING count(*) > 1;
+```
+
+Разбирать такие цепочки руками: оставить одну версию под номером и одну
+актуальную, остальные перенумеровать или снять `is_current`. Молча удалять
+версии нельзя — на них ссылаются `passport_events` и подписки.
+
 ## 8. Диск заполнен
 
 Симптом: деплой упал с кодом 20 и сообщением про занятость выше 85%.

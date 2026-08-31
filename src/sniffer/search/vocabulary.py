@@ -24,12 +24,14 @@ from dataclasses import dataclass
 
 from sniffer.domain.passport import Category, Intent
 from sniffer.search.market_terms import (
+    ALL_CITY_NAMES,
     ATTRIBUTE_TERMS,
     BOARD_ATTRIBUTE_TERMS,
     BOARD_QUERY_HITS,
     BOARD_QUERY_TOTAL,
     BOARD_SAFE_QUERIES,
     CATEGORY_TERMS,
+    CITY_ALIASES,
     CITY_NAMES,
     INTENT_TERMS,
     JARGON,
@@ -261,10 +263,40 @@ def _phrases(
 
 
 def city_name(city: str | None, lang: str) -> str:
-    """Незнакомый город разворачиваем из слага: `da_lat` → `Da Lat`."""
+    """Незнакомый город разворачиваем из слага: `da_lat` → `Da Lat`.
+
+    Берётся полный справочник, а не только обслуживаемые города: назвать Хойан
+    Хойаном надо и в отказе «пока работаю только по Нячангу».
+    """
     if not city:
         return ""
-    known = CITY_NAMES.get(city)
+    known = ALL_CITY_NAMES.get(city)
     if known:
         return known.get(lang, known.get("en", city))
     return city.replace("_", " ").title()
+
+
+def city_variants(slug: str) -> tuple[str, ...]:
+    """Все написания города — этим ищут название в тексте клиента.
+
+    Слаг тоже вариант: «nha trang» клиент пишет и латиницей.
+    """
+    names = ALL_CITY_NAMES.get(slug, {})
+    return tuple(sorted({*names.values(), *CITY_ALIASES.get(slug, ()), slug.replace("_", " ")}))
+
+
+def is_served(city: str | None) -> bool:
+    """Ищем ли мы в этом городе.
+
+    Пустой город — да: его подставит `default_city`, отказывать не за что.
+    """
+    return not city or city in CITY_NAMES
+
+
+def served_cities(lang: str) -> tuple[str, ...]:
+    """Названия обслуживаемых городов — для ответа «пока работаю только по …».
+
+    Из того же словаря, что и поиск: список городов в тексте бота, набранный
+    руками, разъехался бы с реальностью на первом же новом городе.
+    """
+    return tuple(city_name(slug, lang) for slug in CITY_NAMES)

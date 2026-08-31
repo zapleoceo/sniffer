@@ -69,14 +69,14 @@ async def open_request(
         return None
 
 
-async def log_answer(open_request: OpenRequest | None, text: str) -> None:
+async def log_answer(opened: OpenRequest | None, text: str) -> None:
     """Записать то, что клиент увидел."""
-    if open_request is None:
+    if opened is None:
         return
     try:
         async with session_scope() as session:
             await DialogRepository(session).log_outgoing(
-                open_request.user_id, text, request_id=open_request.request_id
+                opened.user_id, text, request_id=opened.request_id
             )
             await session.commit()
     # Широкий except намеренно: журнал не смеет ронять диалог.
@@ -85,7 +85,7 @@ async def log_answer(open_request: OpenRequest | None, text: str) -> None:
 
 
 async def close_request(
-    open_request: OpenRequest | None,
+    opened: OpenRequest | None,
     *,
     stages: dict[str, int],
     result_count: int = 0,
@@ -94,12 +94,12 @@ async def close_request(
     error: str | None = None,
 ) -> None:
     """Закрыть запрос: длительность, этапы, результат или причина отказа."""
-    if open_request is None:
+    if opened is None:
         return
     try:
         async with session_scope() as session:
             await ClientRequestRepository(session).finish(
-                open_request.request_id,
+                opened.request_id,
                 result_count=result_count,
                 stages=stages,
                 plan_fallback=plan_fallback,

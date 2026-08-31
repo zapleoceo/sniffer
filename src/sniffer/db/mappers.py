@@ -17,6 +17,7 @@ from sniffer.domain.records import (
     DialogMessage,
     Job,
     Listing,
+    PassportEvent,
     RawMessage,
     SessionState,
     StoredPassport,
@@ -145,6 +146,16 @@ def to_stored_passport(row: models.Passport) -> StoredPassport:
             missing_fields=list(row.missing_fields),
             status=PassportStatus(row.status),
         ),
+    )
+
+
+def to_passport_event(row: models.PassportEvent) -> PassportEvent:
+    return PassportEvent(
+        id=row.id,
+        passport_id=row.passport_id,
+        kind=row.kind,
+        payload=dict(row.payload),
+        created_at=row.created_at,
     )
 
 
