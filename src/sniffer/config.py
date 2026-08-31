@@ -44,6 +44,23 @@ class Settings(BaseSettings):
     r2_secret_access_key: str = ""
     r2_bucket: str = "sniffer-media"
 
+    # Веб-интерфейс владельца
+    # Порт слушаем только на loopback: снаружи ходит nginx, а не браузер.
+    dashboard_host: str = "0.0.0.0"
+    dashboard_port: int = 8005
+    # Кому можно внутрь. Ноль означает «владелец не задан» — вход закрыт всем.
+    owner_chat_id: Annotated[int, BeforeValidator(_empty_to_zero)] = 0
+    # Имя бота для Telegram Login Widget. Виджет подписывает данные ключом,
+    # производным от BOT_TOKEN, поэтому имя должно принадлежать тому же боту.
+    bot_username: str = "RecVNbot"
+    # Подписывает НАШУ cookie. Отдельный секрет от BOT_TOKEN намеренно: один
+    # ключ на две цели означает, что утечка одной обесценивает обе.
+    dashboard_session_secret: str = ""
+    # Шифрует строку сессии юзербота в БД. Третий секрет, не переиспользуем
+    # предыдущие: у шифрования данных в покое другой срок жизни и другой
+    # радиус ущерба, чем у подписи cookie.
+    secret_encryption_key: str = ""
+
     # Поведение
     live_search_max_chats: int = 10
     live_search_cache_ttl_s: int = 300

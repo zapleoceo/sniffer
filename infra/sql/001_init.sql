@@ -224,3 +224,83 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 
 CREATE INDEX IF NOT EXISTS jobs_due_idx ON jobs (status, run_after, id);
+
+-- ── наблюдаемость и сессии ──────────────────────────────────────────────────
+-- Всё, что показывает веб-интерфейс владельца (docs/dashboard.md). Данные
+-- пишем свои: страница не должна зависеть от доступности брокера.
+
+-- Один запрос клиента как единица наблюдения. Существует ровно затем, чтобы
+-- «клиент спросил про байк» и «потрачено N токенов» связывались ключом, а не
+-- сопоставлением времени — при двух параллельных запросах время врёт.
+CREATE TABLE IF NOT EXISTS client_requests (
+    id            BIGSERIAL PRIMARY KEY,
+    user_id       BIGINT      NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    passport_id   BIGINT      REFERENCES passports(id) ON DELETE SET NULL,
+    raw_query     TEXT        NOT NULL,
+    status        TEXT        NOT NULL DEFAULT 'running',  -- running|done|failed
+    -- Куда ушло время: {"intake_ms": 1200, "plan_ms": 900, "search_ms": 8000}.
+    -- JSONB, а не колонки: ступеней у воронки станет больше, и каждая новая не
+    -- должна требовать миграции ради одного числа.
+    stages        JSONB       NOT NULL DEFAULT '{}',
+    plan_fallback BOOLEAN     NOT NULL DEFAULT FALSE,
+    sources       TEXT[]      NOT NULL DEFAULT '{}',
+    result_count  INT         NOT NULL DEFAULT 0,
+    error         TEXT,
+    started_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at   TIMESTAMPTZ,
+    duration_ms   INT
+);
+
+CREATE INDEX IF NOT EXISTS client_requests_user_idx   ON client_requests (user_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS client_requests_recent_idx ON client_requests (started_at DESC);
+
+-- Переписка с ботом. Отдельно от `passport_events`: события паспорта — это
+-- история разбора запроса, а здесь лежит то, что человек реально увидел.
+CREATE TABLE IF NOT EXISTS dialog_messages (
+    id         BIGSERIAL PRIMARY KEY,
+    user_id    BIGINT      NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    request_id BIGINT      REFERENCES client_requests(id) ON DELETE SET NULL,
+    direction  TEXT        NOT NULL,                       -- in | out
+    text       TEXT        NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS dialog_messages_user_idx ON dialog_messages (user_id, created_at DESC);
+
+-- Расходы на LLM. `broker_request_id` — это id строки в `usage_log` брокера,
+-- он же приезжает в ответе завершённой задачи. Держим его, чтобы спор о
+-- стоимости решался сверкой по ключу, а не пересказом.
+CREATE TABLE IF NOT EXISTS broker_calls (
+    id                BIGSERIAL PRIMARY KEY,
+    request_id        BIGINT        REFERENCES client_requests(id) ON DELETE SET NULL,
+    broker_request_id BIGINT,
+    capability        TEXT          NOT NULL,
+    provider          TEXT,
+    model             TEXT,
+    tokens_in         INT           NOT NULL DEFAULT 0,
+    tokens_out        INT           NOT NULL DEFAULT 0,
+    cost_usd          NUMERIC(12,6) NOT NULL DEFAULT 0,
+    latency_ms        INT,
+    created_at        TIMESTAMPTZ   NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS broker_calls_request_idx ON broker_calls (request_id);
+-- Поллинг может вернуть один и тот же завершённый job дважды (ретрай сети,
+-- рестарт процесса) — двойной записи расхода быть не должно. Индекс частичный:
+-- у вызова, до которого брокер не дошёл, ключа нет, и такие строки не спорят.
+CREATE UNIQUE INDEX IF NOT EXISTS broker_calls_broker_id_idx
+    ON broker_calls (broker_request_id) WHERE broker_request_id IS NOT NULL;
+
+-- Сессия юзербота. Строка сессии лежит зашифрованной (Fernet, ключ из
+-- SECRET_ENCRYPTION_KEY): дамп базы не должен давать доступ к аккаунту.
+CREATE TABLE IF NOT EXISTS telegram_sessions (
+    id            BIGSERIAL PRIMARY KEY,
+    phone         TEXT        NOT NULL UNIQUE,
+    session_enc   TEXT        NOT NULL,
+    is_active     BOOLEAN     NOT NULL DEFAULT TRUE,
+    last_ok_at    TIMESTAMPTZ,
+    last_error    TEXT,
+    last_error_at TIMESTAMPTZ,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);

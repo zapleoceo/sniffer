@@ -11,7 +11,7 @@ GIN-индексами и `vector(1024)` в декларативных моде�
 без базы, поэтому дрейф ловится на любой машине.
 
 Разбиение по модулям повторяет разделы самого DDL: источники, предложения,
-клиенты и паспорта, подписки и доставка, очередь.
+клиенты и паспорта, подписки и доставка, очередь, наблюдаемость и сессии.
 """
 
 from sniffer.db.models.base import EMBEDDING_DIM, Base, BigIdMixin
@@ -19,13 +19,22 @@ from sniffer.db.models.clients import Passport, PassportEvent, User
 from sniffer.db.models.delivery import Notification, Outbox, Subscription
 from sniffer.db.models.jobs import Job
 from sniffer.db.models.listings import Listing, ListingMedia
+from sniffer.db.models.observability import (
+    BrokerCall,
+    ClientRequest,
+    DialogMessage,
+    TelegramSession,
+)
 from sniffer.db.models.sources import Chat, RawMessage, Seller
 
 __all__ = [
     "EMBEDDING_DIM",
     "Base",
     "BigIdMixin",
+    "BrokerCall",
     "Chat",
+    "ClientRequest",
+    "DialogMessage",
     "Job",
     "Listing",
     "ListingMedia",
@@ -36,5 +45,6 @@ __all__ = [
     "RawMessage",
     "Seller",
     "Subscription",
+    "TelegramSession",
     "User",
 ]
