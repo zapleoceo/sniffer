@@ -35,6 +35,8 @@ from sniffer.domain.dialogue import (
     next_question,
     parse_option,
     question_by_code,
+    question_for,
+    restates,
 )
 from sniffer.domain.passport import Passport
 from sniffer.search.answers import interpret, is_skip
@@ -100,12 +102,19 @@ class Conversation:
             return
 
         dialogue = await self._store.load(client)
-        if dialogue.state.pending and dialogue.passport is not None:
+        current = dialogue.passport
+        if dialogue.state.pending and current is not None:
             answered = await self._answer_in_words(dialogue, dialogue.state.pending, message, send)
             if answered:
                 return
 
         passport = await self._intake().parse(message)
+        if current is not None and restates(current.passport, passport):
+            # Та же просьба другими словами — не новый запрос. Начни здесь
+            # цепочка заново, и повтор фразы обнулял бы собранные ответы вместе
+            # со счётчиком вопросов: лимит обходился бы копипастом.
+            await self._restated(dialogue, send)
+            return
         dialogue = await self._store.start(dialogue, passport)
         await self._ask_or_search(dialogue, send)
 
@@ -165,12 +174,11 @@ class Conversation:
         if current is None:  # pragma: no cover — проверено вызывающим
             return False
 
-        if is_skip(text):
-            dialogue = await self._skip(dialogue, pending)
-        else:
-            value = interpret(pending, text)
-            if value is None:
-                return False
+        # Разбор поля идёт раньше проверки «не важно», а не наоборот: подпись
+        # кнопки «любой, лишь бы ездил» иначе читалась бы как пропуск, хотя
+        # сама кнопка ставит `worn`. Слово и кнопка обязаны означать одно.
+        value = interpret(pending, text)
+        if value is not None:
             passport = apply_answer(current.passport, pending, value)
             dialogue = await self._store.revise(
                 dialogue,
@@ -178,8 +186,26 @@ class Conversation:
                 kind=EVENT_USER_MESSAGE,
                 payload={"field": pending, "text": text},
             )
+        elif is_skip(text):
+            dialogue = await self._skip(dialogue, pending)
+        else:
+            return False
         await self._ask_or_search(dialogue, send)
         return True
+
+    async def _restated(self, dialogue: Dialogue, send: Send) -> None:
+        """Повтор той же просьбы: висящий вопрос повторяем, иначе ищем заново.
+
+        Спросить следующее поле было бы тем же обходом лимита, только на один
+        вопрос дешевле, а промолчать — оставить клиента без вопроса, ответа на
+        который бот ждёт. Повторный `question_asked` счётчик не двигает:
+        `advance` не дублирует уже заданное поле.
+        """
+        pending = question_for(dialogue.state.pending or "")
+        if pending is not None:
+            await self._ask(dialogue, pending, send)
+            return
+        await self._ask_or_search(dialogue, send)
 
     async def _skip(self, dialogue: Dialogue, field_name: str) -> Dialogue:
         """«Не важно» не меняет паспорт — значит, и версии не создаёт."""

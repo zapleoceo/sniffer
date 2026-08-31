@@ -19,6 +19,7 @@ from sniffer.bot import app as bot_app
 from sniffer.bot.conversation import (
     NO_REQUEST_YET,
     NOTHING_FOUND,
+    NOTHING_TO_REFINE,
     SEARCH_FAILED,
     Conversation,
     Reply,
@@ -382,6 +383,117 @@ async def test_text_that_is_not_an_answer_starts_a_new_request() -> None:
     assert replies.sent[0].question is not None
 
 
+async def test_repeating_the_same_words_keeps_what_was_collected() -> None:
+    """Повтор той же формулировки — не новый запрос.
+
+    Начни здесь новая цепочка, и повтор фразы обнулял бы и собранные ответы, и
+    счётчик вопросов: лимит в три вопроса обходился бы копипастом.
+    """
+    store = MemoryStore()
+    talker = talk(store, bike())
+    await talker.on_text(CLIENT, "ищу скутер в нячанге", Replies())
+    await talker.on_answer(CLIENT, "budget", "500", Replies())
+    await talker.on_answer(CLIENT, "trans", "automatic", Replies())
+    await talker.on_answer(CLIENT, "cond", "good", Replies())
+
+    replies = Replies()
+    await talker.on_text(CLIENT, "ищу скутер в нячанге", replies)
+
+    current = await store.load(CLIENT)
+    assert current.passport is not None
+    assert current.passport.passport.budget.max == 500, "бюджет не потерян"
+    assert current.passport.passport.attributes == {
+        "transmission": "automatic",
+        "condition": "good",
+    }, "ответы на кнопки не потеряны"
+    assert current.state.asked == (
+        "budget.max",
+        "attributes.transmission",
+        "attributes.condition",
+    ), "счётчик вопросов не начался заново"
+    assert [reply.question for reply in replies.sent] == [None, None], "повтором лимит не обойти"
+    assert "Ищу" in replies.texts[0]
+
+
+async def test_a_shorter_wording_of_the_same_request_is_not_a_new_one() -> None:
+    """Клиент повторяет короче — это та же просьба, а не смена темы."""
+    store = MemoryStore()
+    talker = talk(store, bike())
+    await talker.on_text(CLIENT, "ищу скутер в нячанге", Replies())
+    await talker.on_answer(CLIENT, "budget", "500", Replies())
+
+    replies = Replies()
+    await talker.on_text(CLIENT, "скутер в нячанге", replies)
+
+    current = await store.load(CLIENT)
+    assert current.passport is not None
+    assert current.passport.passport.budget.max == 500
+    assert current.state.asked[0] == "budget.max"
+    assert replies.sent[0].question is not None
+    assert replies.sent[0].question.field == "attributes.transmission", "допрос продолжился"
+
+
+async def test_a_repeat_while_a_question_hangs_asks_it_again() -> None:
+    """Клиент повторил запрос вместо ответа: вопрос остаётся тем же.
+
+    Спросить следующий было бы обходом лимита через повтор, а промолчать —
+    оставить клиента без вопроса, на который бот ждёт ответ.
+    """
+    store = MemoryStore()
+    talker = talk(store, bike())
+    await talker.on_text(CLIENT, "ищу скутер в нячанге", Replies())
+
+    replies = Replies()
+    await talker.on_text(CLIENT, "ищу скутер в нячанге", replies)
+
+    assert replies.sent[0].question is not None
+    assert replies.sent[0].question.field == "budget.max"
+    assert (await store.load(CLIENT)).state.asked == ("budget.max",), "вопрос всё тот же один"
+    assert [row.version for row in store.rows] == [1], "повтор версий не плодит"
+
+
+async def test_the_button_label_typed_by_hand_means_the_same_thing() -> None:
+    """«любой, лишь бы ездил» — подпись кнопки `worn`, а не пропуск вопроса.
+
+    Клиент читает кнопку и печатает её словами чаще, чем придумывает свои: раз
+    кнопка ставит `worn`, то и её подпись обязана ставить `worn`.
+    """
+    store = MemoryStore()
+    talker = talk(
+        store,
+        bike(
+            budget=Budget(max=400, currency=Currency.USD),
+            attributes={"transmission": "automatic"},
+        ),
+    )
+    asked = Replies()
+    await talker.on_text(CLIENT, "ищу скутер", asked)
+    assert asked.sent[0].question is not None
+    assert asked.sent[0].question.field == "attributes.condition"
+
+    await talker.on_text(CLIENT, "любой, лишь бы ездил", Replies())
+
+    current = await store.load(CLIENT)
+    assert current.passport is not None
+    assert current.passport.passport.attributes["condition"] == "worn"
+    assert current.passport.version == 2, "ответ словами — новая версия, а не пропуск"
+
+
+async def test_a_bare_any_is_still_a_skip() -> None:
+    """Разбор поля идёт первым, но «любой» сам по себе полю ничего не говорит."""
+    store = MemoryStore()
+    talker = talk(store, bike(budget=Budget(max=400, currency=Currency.USD)))
+    await talker.on_text(CLIENT, "ищу скутер", Replies())
+
+    await talker.on_text(CLIENT, "любой", Replies())
+
+    assert [row.version for row in store.rows] == [1], "пропуск версии не создаёт"
+    assert (await store.load(CLIENT)).state.asked == (
+        "attributes.transmission",
+        "attributes.condition",
+    )
+
+
 async def test_stale_button_does_not_answer_twice() -> None:
     """Клавиатура остаётся в чате: второе нажатие не должно плодить версии."""
     store = MemoryStore()
@@ -448,6 +560,25 @@ async def test_pricey_without_a_budget_asks_instead_of_guessing() -> None:
     assert replies.sent[0].question is not None
     assert replies.sent[0].question.field == "budget.max"
     assert [row.version for row in store.rows] == [1], "спросить — не значит уже уточнить"
+
+
+async def test_second_wrong_in_a_row_has_nothing_left_to_ask() -> None:
+    """Один вопрос сверх лимита — один на диалог, а не по одному на нажатие."""
+    store = MemoryStore()
+    talker = talk(store, bike())
+    await talker.on_text(CLIENT, "ищу скутер", Replies())
+    await talker.on_answer(CLIENT, "budget", SKIP, Replies())
+    await talker.on_answer(CLIENT, "trans", SKIP, Replies())
+    await talker.on_answer(CLIENT, "cond", SKIP, Replies())
+
+    first = Replies()
+    await talker.on_feedback(CLIENT, Feedback.WRONG, first)
+    assert first.sent[0].question is not None
+    assert first.sent[0].question.field == "attributes.brand", "четвёртый вопрос разрешён"
+
+    second = Replies()
+    await talker.on_feedback(CLIENT, Feedback.WRONG, second)
+    assert second.texts == [NOTHING_TO_REFINE], "пятого нет — потолок абсолютный"
 
 
 async def test_feedback_without_a_request_says_so() -> None:
@@ -520,6 +651,22 @@ def test_answer_and_feedback_fit_the_callback_limit() -> None:
     assert len(packed.encode()) <= 64
     assert len(feedback.encode()) <= 64
     assert AnswerCallback.unpack(packed).value == "automatic"
+
+
+def test_cyrillic_value_is_measured_in_bytes_not_characters() -> None:
+    """Лимит именно байтовый, и проверять его надо тем, где байт больше символа.
+
+    На латинице длина в символах и в байтах совпадает, поэтому кириллица —
+    единственный вход, который отличит верный подсчёт от посимвольного: 27 букв
+    ещё влезают (63 байта при 36 символах), 28-я уже нет (65 байт при 37).
+    """
+    fits = AnswerCallback(code="cond", value="я" * 27).pack()
+
+    assert len(fits) < len(fits.encode()), "символов меньше, чем байтов"
+    assert len(fits.encode()) == 63
+
+    with pytest.raises(ValueError, match="too long"):
+        AnswerCallback(code="cond", value="я" * 28).pack()
 
 
 def test_reply_without_buttons_has_no_keyboard() -> None:

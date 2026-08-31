@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -18,6 +19,7 @@ from enum import StrEnum
 from sniffer.domain.passport import (
     FIELD_INFORMATIVENESS,
     MAX_CLARIFYING_QUESTIONS,
+    MAX_FEEDBACK_QUESTIONS,
     Budget,
     Category,
     Currency,
@@ -45,6 +47,17 @@ EVENT_QUESTION_ASKED = "question_asked"
 # Насколько режем бюджет по кнопке «дорого». Не в ноль и не в половину:
 # клиент отбраковал показанное, а не отказался от покупки.
 PRICEY_FACTOR = 0.7
+
+# Доля общих слов, при которой формулировки считаются одной и той же просьбой
+# (`restates`). 0.6 разделяет два реальных случая: «ищу скутер в нячанге» и
+# «скутер в нячанге» — 0.75, то же и «квартиру в нячанге» — 0.4. Порог мягче
+# точного равенства, потому что повторяют обычно короче, и жёстче половины,
+# потому что общий город и предлог есть почти у любых двух запросов клиента.
+SAME_QUERY_RATIO = 0.6
+
+# Слово — последовательность буквенно-цифровых символов. Знаки и регистр
+# формулировку не меняют: «Ищу скутер в Нячанге!» — тот же запрос.
+_WORD_RE = re.compile(r"\w+")
 
 AnswerValue = str | float | Budget
 
@@ -188,6 +201,55 @@ def _ranked(passport: Passport) -> list[str]:
     return next_questions(passport, limit=len(weights) or 1)
 
 
+def restates(current: Passport, fresh: Passport) -> bool:
+    """Клиент повторил ту же просьбу, а не сформулировал новую.
+
+    Свободный текст — это либо ответ на вопрос, либо новый запрос, и различить
+    их обязан кто-то: приняв повтор за новый запрос, бот обнуляет собранные
+    ответы и счётчик вопросов, то есть лимит в три вопроса обходится копипастом
+    собственной фразы.
+
+    Критерий двойной, и обе половины нужны:
+
+    * **Разбор** — намерение, категория, город. Это и есть запрос; сменилось
+      любое — тема другая, и новая цепочка версий здесь единственно верна.
+      «Ищу скутер в Дананге» после «ищу скутер в Нячанге» отличается одним
+      словом из четырёх, но это другой запрос, и решает это город, а не
+      похожесть текста.
+    * **Слова** — доля общих слов формулировки. Разбор видит не всё: незнакомое
+      правилам «ладно, тогда квартиру» оставит категорию прежней, и без
+      сравнения слов бот принял бы смену темы за повтор. Порог, а не точное
+      равенство, потому что повторяют обычно короче: «скутер в нячанге» — та же
+      просьба, что и «ищу скутер в нячанге».
+    """
+    if (current.intent, current.category, current.city) != (
+        fresh.intent,
+        fresh.category,
+        fresh.city,
+    ):
+        return False
+    return _same_words(current.raw_query, fresh.raw_query)
+
+
+def _same_words(before: str, after: str) -> bool:
+    """Доля общих слов двух формулировок против порога.
+
+    Множества, а не последовательности: клиент переставляет слова свободно
+    («скутер нячанг» и «нячанг скутер» — одно и то же), а вот выпавшее слово
+    из четырёх — уже заметная разница.
+    """
+    first, second = _words(before), _words(after)
+    if not first or not second:
+        # Сравнивать нечего — считать это повтором нельзя: пустая формулировка
+        # совпадает со всем подряд.
+        return False
+    return len(first & second) / len(first | second) >= SAME_QUERY_RATIO
+
+
+def _words(text: str) -> set[str]:
+    return set(_WORD_RE.findall(text.casefold()))
+
+
 def parse_option(field: str, raw: str) -> AnswerValue:
     """Значение кнопки → значение поля паспорта."""
     if field == "budget.max":
@@ -209,8 +271,6 @@ def apply_answer(passport: Passport, field: str, value: AnswerValue) -> Passport
         update["budget"] = _budget(passport, value)
     elif field == "category":
         update["category"] = Category(str(value))
-    elif field == "districts":
-        update["districts"] = [str(value)]
     elif field.startswith("attributes."):
         update["attributes"] = {**passport.attributes, field.removeprefix("attributes."): value}
     else:  # pragma: no cover — поля вне каталога вопросов сюда не приходят
@@ -273,11 +333,13 @@ def feedback_question(passport: Passport, kind: Feedback, asked: Sequence[str]) 
     """Что спросить, когда обратную связь не во что превратить.
 
     Лимит поднимается на один вопрос выше обычного: три вопроса — это защита от
-    допроса до выдачи, а здесь клиент сам нажал кнопку и ждёт уточнения.
+    допроса до выдачи, а здесь клиент сам нажал кнопку и ждёт уточнения. Именно
+    `MAX_FEEDBACK_QUESTIONS`, а не «на один больше уже заданных»: относительный
+    потолок рос бы с каждым нажатием.
     """
     if kind is Feedback.PRICEY:
         return question_for("budget.max")
-    return next_question(passport, asked, limit=len(asked) + 1)
+    return next_question(passport, asked, limit=MAX_FEEDBACK_QUESTIONS)
 
 
 @dataclass(frozen=True, slots=True)

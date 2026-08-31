@@ -21,9 +21,12 @@ from sniffer.domain.dialogue import (
     next_question,
     parse_option,
     replay,
+    restates,
 )
 from sniffer.domain.passport import (
+    FIELD_INFORMATIVENESS,
     MAX_CLARIFYING_QUESTIONS,
+    MAX_FEEDBACK_QUESTIONS,
     Budget,
     Category,
     Currency,
@@ -184,6 +187,26 @@ def test_wrong_feedback_asks_one_more_question_over_the_limit() -> None:
     assert question.field == "attributes.brand"
 
 
+def test_feedback_ceiling_does_not_grow_with_each_press(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Потолок обратной связи абсолютный: MAX+1, а не «на один больше заданных».
+
+    Пятое информативное поле — то, чего у motorbike сегодня нет: без него
+    правило держится случайно, на длине каталога, и молча ломается в тот день,
+    когда поле добавят.
+    """
+    monkeypatch.setitem(FIELD_INFORMATIVENESS[Category.MOTORBIKE], "attributes.rooms", 0.05)
+    asked = (
+        "budget.max",
+        "attributes.transmission",
+        "attributes.condition",
+        "attributes.brand",
+    )
+
+    assert len(asked) == MAX_FEEDBACK_QUESTIONS
+    assert next_question(bike(), asked=asked[:1]) is not None, "спросить ещё есть что"
+    assert feedback_question(bike(), Feedback.WRONG, asked=asked) is None
+
+
 def test_automatic_button_is_offered_only_where_it_means_something() -> None:
     values = {option.value for option in feedback_buttons(bike())}
     apartment = {option.value for option in feedback_buttons(bike(category=Category.APARTMENT))}
@@ -191,6 +214,51 @@ def test_automatic_button_is_offered_only_where_it_means_something() -> None:
     assert Feedback.AUTOMATIC.value in values
     assert Feedback.AUTOMATIC.value not in apartment
     assert {Feedback.PRICEY.value, Feedback.WRONG.value} <= apartment
+
+
+# ── та же просьба или новая ─────────────────────────────────────────────────
+
+
+def test_the_same_wording_is_the_same_request() -> None:
+    """Повтор фразы не должен обнулять собранное: это не новый запрос."""
+    assert restates(bike(raw_query="ищу скутер в нячанге"), bike(raw_query="ищу скутер в нячанге"))
+    assert restates(
+        bike(raw_query="ищу скутер в нячанге"), bike(raw_query="Ищу скутер в Нячанге!")
+    ), "регистр и знаки формулировку не меняют"
+    assert restates(bike(raw_query="ищу скутер в нячанге"), bike(raw_query="скутер в нячанге")), (
+        "короче — та же просьба"
+    )
+
+
+def test_another_city_is_a_new_request_even_with_the_same_words() -> None:
+    """Слов общих много, а запрос другой: решает разбор, а не похожесть текста."""
+    assert not restates(
+        bike(raw_query="ищу скутер в нячанге"),
+        bike(city="da_nang", raw_query="ищу скутер в дананге"),
+    )
+
+
+def test_another_category_is_a_new_request() -> None:
+    assert not restates(
+        bike(raw_query="ищу скутер"),
+        bike(category=Category.APARTMENT, raw_query="ладно, тогда квартиру в Нячанге"),
+    )
+
+
+def test_other_words_are_a_new_request_even_when_the_fields_match() -> None:
+    """Разбор мог не увидеть смену темы — тогда клиента слушают по словам.
+
+    Ровно этот случай и спасает «ладно, тогда квартиру»: разбор по правилам
+    поставил бы ту же категорию, если слово «квартиру» ему незнакомо.
+    """
+    assert not restates(
+        bike(raw_query="ищу скутер"), bike(raw_query="ладно, тогда квартиру в Нячанге")
+    )
+
+
+def test_an_empty_wording_is_not_a_repeat() -> None:
+    """Сравнивать нечего — значит, и повтором это считать нельзя."""
+    assert not restates(bike(raw_query=""), bike(raw_query="ищу скутер"))
 
 
 # ── состояние диалога ───────────────────────────────────────────────────────

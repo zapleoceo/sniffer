@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -210,6 +211,39 @@ async def test_passport_revision_keeps_history(db_session: AsyncSession) -> None
     assert current.id == second.id
     assert current.passport.budget.max == 300
     assert current.passport.districts == ["Vinh Hai"]
+
+
+async def test_two_parallel_revisions_do_not_share_a_version(db_engine: AsyncEngine) -> None:
+    """Двойной тап по кнопке не должен дать две версии с одним номером.
+
+    `Barrier` здесь обязателен: без него воркеры уходят в базу по очереди,
+    гонка не наступает вовсе, и тест зеленеет на сломанном коде. С ним оба
+    запроса стартуют одновременно — и без блокировки корня цепочки каждый
+    считает следующий номер от одной и той же прежней версии, а `is_current`
+    остаётся у обоих: дальше подписка и аналитика видят два «сейчас».
+    """
+    sessions = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with sessions() as setup:
+        user = await UserRepository(setup).get_or_create(42)
+        assert user.id is not None
+        first = await PassportRepository(setup).save_new(user.id, _passport(400))
+        await setup.commit()
+
+    gate = asyncio.Barrier(2)
+
+    async def revise(budget_max: float) -> None:
+        async with sessions() as session:
+            await gate.wait()
+            await PassportRepository(session).save_revision(first, _passport(budget_max))
+            await session.commit()
+
+    await asyncio.gather(revise(300), revise(200))
+
+    async with sessions() as check:
+        chain = await PassportRepository(check).list_versions(first.id)
+
+    assert [row.version for row in chain] == [1, 2, 3], "номера версий не повторяются"
+    assert [row.is_current for row in chain] == [False, False, True], "актуальная — ровно одна"
 
 
 async def test_events_of_the_whole_chain_come_in_order(db_session: AsyncSession) -> None:

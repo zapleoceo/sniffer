@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 
+from sniffer.domain.dialogue import QUESTIONS, parse_option
 from sniffer.domain.passport import Budget, Currency
 from sniffer.search.answers import interpret, is_skip
 
@@ -74,6 +75,41 @@ def test_rooms_in_words(text: str, expected: int) -> None:
 def test_brand_and_category_reuse_the_query_parser() -> None:
     assert interpret("attributes.brand", "хочу yamaha") == "yamaha"
     assert interpret("category", "вообще-то квартиру") == "apartment"
+
+
+@pytest.mark.parametrize(
+    ("field", "label", "value"),
+    [
+        (question.field, option.label, option.value)
+        for question in QUESTIONS
+        for option in question.options
+    ],
+    ids=[
+        f"{question.code}-{option.value}" for question in QUESTIONS for option in question.options
+    ],
+)
+def test_every_button_label_is_understood_as_its_own_value(
+    field: str, label: str, value: str
+) -> None:
+    """Ответ словами разбирается тем же знанием, что и кнопка (passport.md).
+
+    Подпись кнопки — самый частый ответ текстом: клиент читает её и печатает.
+    Разойдись подпись с разбором, и бот не понял бы собственный вопрос.
+    """
+    parsed = interpret(field, label)
+    expected = parse_option(field, value)
+
+    if isinstance(parsed, Budget):
+        assert parsed.max == expected
+    else:
+        assert parsed == expected
+
+
+def test_a_skip_word_inside_a_real_answer_does_not_hide_it() -> None:
+    """«любой, лишь бы ездил» — это `worn`, хотя «любой» само по себе пропуск."""
+    assert interpret("attributes.condition", "любой, лишь бы ездил") == "worn"
+    assert interpret("attributes.condition", "лишь бы на ходу") == "worn"
+    assert is_skip("любой"), "без уточнения «любой» остаётся пропуском"
 
 
 def test_an_answer_that_is_not_an_answer() -> None:
