@@ -382,6 +382,7 @@ SearXNG возвращает ссылки и сниппеты, но не сод�
 ```python
 def new_directory() -> ChatDirectory:
     from sniffer.db import ChatRepository, session_scope
+
     return RepositoryChatDirectory(session_scope, ChatRepository)
 ```
 
