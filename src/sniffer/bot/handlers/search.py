@@ -15,10 +15,13 @@ from aiogram import F, Router
 from aiogram.filters import CommandStart
 from aiogram.types import Message
 
+from sniffer.bot import journal
 from sniffer.bot.cards import MAX_CARDS, render_cards
+from sniffer.broker.usage import request_scope
 from sniffer.domain.passport import Passport
 from sniffer.search.intake import QueryIntake
 from sniffer.search.live import run_plan
+from sniffer.search.plan import SearchPlan
 from sniffer.search.planner import SearchPlanner
 from sniffer.search.vocabulary import city_name
 from sniffer.sources.base import RawItem, registered_sources
@@ -52,29 +55,71 @@ async def search(message: Message) -> None:
     if not text:
         return
 
+    opened = await _open(message, text)
+    # Расходы на модель относятся к этому запросу и ни к какому другому:
+    # contextvar доносит его id до клиента брокера через слои, которым он не
+    # нужен, — и не путается между двумя клиентами, отвечающими одновременно.
+    with request_scope(opened.request_id if opened else None):
+        await _run(message, text, opened)
+
+
+async def _run(message: Message, text: str, opened: journal.OpenRequest | None) -> None:
+    watch = journal.Stopwatch()
     passport = await QueryIntake().parse(text)
-    await message.answer(_accepted(passport))
+    watch.lap("intake_ms")
+
+    await _answer(message, opened, _accepted(passport))
 
     try:
-        items = await _find(passport)
-    except Exception:
+        plan, items = await _find(passport, watch)
+    except Exception as exc:
         # Граница запроса: неожиданная ошибка внутри поиска не должна оставлять
         # клиента без ответа. Трейсбек уходит в лог целиком.
         log.exception("bot.search_failed", chat_id=message.chat.id)
-        await message.answer(SEARCH_FAILED)
+        await _answer(message, opened, SEARCH_FAILED)
+        await journal.close_request(
+            opened, stages=watch.stages, error=f"{type(exc).__name__}: {exc}"
+        )
         return
 
-    if not items:
-        await message.answer(NOTHING_FOUND)
-        return
-    await message.answer(render_cards(items, limit=MAX_CARDS))
+    answer = NOTHING_FOUND if not items else render_cards(items, limit=MAX_CARDS)
+    await _answer(message, opened, answer)
+    await journal.close_request(
+        opened,
+        stages=watch.stages,
+        result_count=len(items),
+        plan_fallback=plan.is_fallback,
+        sources=plan.sources(),
+    )
 
 
-async def _find(passport: Passport) -> list[RawItem]:
+async def _find(passport: Passport, watch: journal.Stopwatch) -> tuple[SearchPlan, list[RawItem]]:
     sources = sorted(registered_sources())
     plan = await SearchPlanner().plan(passport, sources)
+    watch.lap("plan_ms")
     log.info("bot.plan", tasks=len(plan.tasks), fallback=plan.is_fallback, sources=plan.sources())
-    return await run_plan(plan)
+    items = await run_plan(plan)
+    watch.lap("search_ms")
+    return plan, items
+
+
+async def _open(message: Message, text: str) -> journal.OpenRequest | None:
+    """Открыть запрос в журнале. Анонимный апдейт журналировать некуда."""
+    if message.from_user is None:
+        return None
+    return await journal.open_request(
+        message.from_user.id, text, username=message.from_user.username
+    )
+
+
+async def _answer(message: Message, opened: journal.OpenRequest | None, text: str) -> None:
+    """Ответить клиенту и записать ответ в журнал — в этом порядке.
+
+    Сначала человек, потом лог: сломанный журнал не должен задерживать ответ, а
+    порядок «сначала записать» ровно это и делал бы.
+    """
+    await message.answer(text)
+    await journal.log_answer(opened, text)
 
 
 def _accepted(passport: Passport) -> str:
