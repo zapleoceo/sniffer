@@ -12,15 +12,24 @@ live-подписка приходят на P1 — их место в `_tick`.
 from __future__ import annotations
 
 import asyncio
+import sys
+from collections.abc import Sequence
 
 import structlog
 
+from sniffer.collector.auth import EXIT_OK, EXIT_USAGE, run_auth
+from sniffer.collector.console import Console, tell
 from sniffer.config import Settings
 from sniffer.runtime.service import Service, idle_loop, run_service
 
 log = structlog.get_logger(__name__)
 
 NAME = "collector"
+
+# Разовая ручная операция живёт подкомандой того же модуля, а не отдельным
+# скриптом: авторизация нужна ровно тому образу, в котором потом крутится
+# коллектор, и версия Telethon у них обязана быть одна.
+AUTH_COMMAND = "auth"
 
 # Интервал опроса больше, чем у воркера: Telegram не любит частых обращений, а
 # новые сообщения приходят подпиской, а не поллингом.
@@ -30,8 +39,9 @@ POLL_INTERVAL_S = 15.0
 def missing_settings(settings: Settings) -> list[str]:
     """Без строки сессии авторизоваться в контейнере всё равно негде.
 
-    Интерактивный ввод кода из SMS в фоновом процессе невозможен, поэтому
-    `TG_SESSION` такое же обязательное требование, как ключи приложения.
+    Интерактивный ввод кода подтверждения в фоновом процессе невозможен,
+    поэтому `TG_SESSION` такое же обязательное требование, как ключи
+    приложения. Строку выдаёт подкоманда `auth` — разовая ручная операция.
     """
     required = {
         "TG_API_ID": bool(settings.tg_api_id),
@@ -53,5 +63,43 @@ async def _tick() -> int:
 
 SERVICE = Service(name=NAME, requires=missing_settings, run=run)
 
+
+USAGE = (
+    "Использование: python -m sniffer.collector [auth [файл]]\n"
+    "  без аргументов — обычный процесс коллектора;\n"
+    f"  {AUTH_COMMAND} [файл] — разовая интерактивная авторизация юзербота."
+)
+
+
+def main(argv: Sequence[str]) -> int:
+    """Без аргументов — обычный процесс; `auth [файл]` — разовая авторизация.
+
+    Путь приходит аргументом, а не переменной окружения: в контейнере он
+    указывает на смонтированный каталог, и это решение места запуска, а не
+    конфигурация сервиса.
+
+    Разбор строгий: **любой аргумент, кроме `auth`, — это ошибка, а не повод
+    поднять сервис**. `python -m sniffer.collector notauth` (опечатка, старое
+    имя подкоманды, лишний флаг) молча уходил в демона: аргумент
+    проигнорирован, процесс живёт, владелец ждёт диалога авторизации, которого
+    не будет, и видит в логе обычный старт коллектора. То же с лишним
+    позиционным аргументом у `auth`: `auth a b` записал бы сессию в `a`, а `b`
+    выбросил, хотя человек, скорее всего, ошибся именно в первом.
+    """
+    if not argv:
+        run_service(SERVICE)
+        return EXIT_OK
+
+    if argv[0] != AUTH_COMMAND:
+        tell(Console(), f"Неизвестная подкоманда: {argv[0]!r}.\n{USAGE}")
+        return EXIT_USAGE
+
+    if len(argv) > 2:
+        tell(Console(), f"Лишние аргументы: {list(argv[2:])}.\n{USAGE}")
+        return EXIT_USAGE
+
+    return run_auth(out_path=argv[1] if len(argv) > 1 else None)
+
+
 if __name__ == "__main__":
-    run_service(SERVICE)
+    raise SystemExit(main(sys.argv[1:]))

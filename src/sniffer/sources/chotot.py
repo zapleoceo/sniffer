@@ -20,6 +20,7 @@ import structlog
 from sniffer.config import get_settings
 from sniffer.domain.passport import Category
 from sniffer.sources.base import DEFAULT_TIMEOUT_S, RawItem, Source, register
+from sniffer.sources.chotot_filters import attribute_params, budget_params
 from sniffer.sources.chotot_reference import (
     AD_TYPE,
     AREA_V2,
@@ -28,6 +29,7 @@ from sniffer.sources.chotot_reference import (
     GATEWAY_URL,
     LISTING_URL,
     MAX_LIMIT,
+    PLAN_FILTERS,
     REGION_V2,
     SOURCE_NAME,
     USER_AGENT,
@@ -101,9 +103,24 @@ def build_params(query: str, params: dict[str, Any]) -> dict[str, Any]:
     area = _as_int(params.get("area_v2", AREA_V2.get(city)))
     if area:
         built["area_v2"] = area
+
+    # Атрибуты паспорта — структурными полями, а не словами в `q`. Тип кузова
+    # отделяет скутер от спортбайка точнее любого текста: замер по Нячангу —
+    # 71% настоящих скутеров общим запросом против 100% с `motorbiketype=1`.
+    built.update(attribute_params(params.get("category"), params.get("attributes")))
+    built.update(budget_params(params.get("budget")))
+    # Явный фильтр из плана важнее выведенного из паспорта: модель могла узнать
+    # про источник то, чего в переводчике атрибутов ещё нет.
+    built.update(_explicit_filters(params))
+
     if query.strip():
         built["q"] = query.strip()
     return built
+
+
+def _explicit_filters(params: dict[str, Any]) -> dict[str, Any]:
+    """Поля Chotot, названные в плане прямым именем."""
+    return {key: params[key] for key in PLAN_FILTERS if params.get(key) is not None}
 
 
 def _to_item(ad: Any) -> RawItem | None:
