@@ -33,6 +33,11 @@ services:
     volumes:
       - sniffer_pgdata:/var/lib/postgresql/data
       - ./infra/sql/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
+      # Стартовый набор очереди вступлений. Отдельным файлом, а не хвостом
+      # схемы: схема — структура, сид — данные, и на живой базе их накатывают
+      # по отдельности. Порядок гарантирован именем: initdb берёт файлы
+      # каталога по алфавиту.
+      - ./infra/sql/002_seed_candidates.sql:/docker-entrypoint-initdb.d/002_seed_candidates.sql:ro
     ports:
       # 5433, чтобы не конфликтовать с локальным Postgres и с AIbroker (5435).
       # Слушаем только loopback: наружу база не смотрит никогда.

@@ -1,0 +1,42 @@
+[
+  {
+    "id": 101,
+    "message": "Мы переехали, теперь тут t.me/nyachang_arendaa — заходите.",
+    "entities": []
+  },
+  {
+    "id": 102,
+    "message": "Видел объявление https://t.me/nyachang_uslugi/45120, ещё висит?",
+    "entities": []
+  },
+  {
+    "id": 103,
+    "message": "Закрытый для своих: t.me/joinchat/AbCdEfGhIjKlMnOpQr",
+    "entities": []
+  },
+  {
+    "id": 104,
+    "message": "И новая ссылка тоже есть: https://t.me/+XyZ1234567890abcdef",
+    "entities": []
+  },
+  {
+    "id": 105,
+    "message": "По жилью пиши @nhatrang_pro_house, там сами хозяева.",
+    "entities": []
+  },
+  {
+    "id": 106,
+    "message": "Наш второй чат — там барахолка.",
+    "entities": [{"url": "https://t.me/barakholka_nyachang"}]
+  },
+  {
+    "id": 107,
+    "message": "Пост тут t.me/c/1902334455/4471, почта ivan@mail.ru, витрина t.me/s/somefeed",
+    "entities": []
+  },
+  {
+    "id": 108,
+    "message": null,
+    "entities": null
+  }
+]

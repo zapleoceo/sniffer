@@ -76,7 +76,7 @@ merge в master → CI: quality → docs-gate → deploy
 | `verifier`: grounding, passport_match | карточки не проверяются на соответствие исходнику |
 | `matching/` | пусто: нет запроса по паспорту и ранжирования |
 | развёртывание на `195.201.31.49` | каталога `/var/www/sniffer` нет, контейнеров нет |
-| список чатов Нячанга | не существует ни в репозитории, ни в памяти проекта |
+| запуск разведки по расписанию | `telegram_discover` есть, процесса, который зовёт `ChatDiscovery.harvest()` и `ChatJoiner.join_next()`, нет |
 
 ## 3. Очередь фич
 
@@ -90,6 +90,7 @@ merge в master → CI: quality → docs-gate → deploy
 | `feat/db-layer` | async engine, модели, репозитории, единственное место с SQL | — |
 | `feat/schema-v2` | недостающие таблицы + `users.tier`, миграция на живой базе | `db-layer` |
 | `feat/telegram-groups-adapter` | `messages.search` по известным чатам, FloodWait с экспоненциальной паузой | — |
+| `feat/telegram-discover` | **готово**: перекрёстные ссылки → отбор без вступления → очередь вступлений (3 в сутки, час паузы, потолок 50) → беззвучный режим; стартовый сид 35 групп. Ждёт реализаций протоколов поверх БД | `db-layer` |
 
 `db-layer` блокирует почти всё, поэтому идёт первым и один.
 
@@ -137,7 +138,7 @@ merge в master → CI: quality → docs-gate → deploy
 
 | Ветка | Содержание | Оговорка |
 |---|---|---|
-| `feat/telegram-discover` | `resolve_username` по словарю кандидатов | вступление в группы остаётся ручным |
+| ~~`feat/telegram-discover`~~ | переехала в волну 1: без неё чатов нет вовсе | — |
 | `feat/media-r2` | фото объявлений в R2 | нужны ключи |
 | `feat/web-source` | SearXNG + Firecrawl | **на этой машине их ставить нельзя** — [deploy.md, раздел 2](deploy.md#2-требования-к-машине); нужно отдельное решение |
 
