@@ -43,7 +43,7 @@ from sniffer.search.answers import interpret, is_skip
 from sniffer.search.intake import QueryIntake
 from sniffer.search.live import run_plan
 from sniffer.search.planner import SearchPlanner
-from sniffer.search.vocabulary import city_name
+from sniffer.search.vocabulary import city_name, is_served, served_cities
 from sniffer.sources.base import RawItem, registered_sources
 
 log = structlog.get_logger(__name__)
@@ -55,6 +55,10 @@ NOTHING_FOUND = (
 SEARCH_FAILED = "Не смог доискать: источники не ответили. Попробуйте ещё раз через пару минут."
 NO_REQUEST_YET = "Сначала напишите, что ищете, — а потом уточним."
 NOTHING_TO_REFINE = "Уточнить больше нечего. Переформулируйте запрос, и поищу заново."
+UNSERVED_CITY = (
+    "{city} я пока не ищу: реестр чатов и параметры досок собраны под другие города — "
+    "{served}. Напишите запрос по одному из них, и поищу."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,7 +222,15 @@ class Conversation:
     async def _ask_or_search(self, dialogue: Dialogue, send: Send) -> None:
         if dialogue.passport is None:  # pragma: no cover — сюда приходят с паспортом
             return
-        question = next_question(dialogue.passport.passport, dialogue.state.asked)
+        passport = dialogue.passport.passport
+        if not is_served(passport.city):
+            # Искать в городе, под который не собран ни реестр чатов, ни
+            # параметры досок, нечем. Сказать это прямо — единственный честный
+            # ответ: уточнять бюджет в городе, где нет источников, значит
+            # тратить вопросы клиента впустую.
+            await send(Reply(_unserved(passport.city)))
+            return
+        question = next_question(passport, dialogue.state.asked)
         if question is None:
             await self._search(dialogue, send)
             return
@@ -258,6 +270,13 @@ class Conversation:
             await send(Reply(NOTHING_FOUND))
             return
         await send(Reply(render_cards(items), feedback=feedback_buttons(passport)))
+
+
+def _unserved(city: str | None) -> str:
+    """Список городов берётся из словаря: набранный руками, он разъедется первым."""
+    return UNSERVED_CITY.format(
+        city=city_name(city, "ru") or "Этот город", served=", ".join(served_cities("ru"))
+    )
 
 
 def _accepted(passport: Passport) -> str:

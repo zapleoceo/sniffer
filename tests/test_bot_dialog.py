@@ -37,6 +37,8 @@ from sniffer.domain.dialogue import (
 )
 from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
 from sniffer.domain.records import PassportEvent, StoredPassport
+from sniffer.search.intake_rules import parse_query
+from sniffer.search.vocabulary import served_cities
 from sniffer.sources.base import RawItem
 
 NOW = datetime(2026, 8, 29, 12, 0, tzinfo=UTC)
@@ -112,6 +114,17 @@ class FakeIntake:
     async def parse(self, text: str) -> Passport:
         self.parsed.append(text)
         return self._passport.model_copy(update={"raw_query": text})
+
+
+class RulesIntake:
+    """Разбор по правилам — как в бою без модели: город берётся из текста.
+
+    `FakeIntake` для города не годится принципиально: он отдаёт заранее
+    заданный паспорт, то есть подменяет ровно то поле, которое проверяется.
+    """
+
+    async def parse(self, text: str) -> Passport:
+        return parse_query(text, default_city="nha_trang")
 
 
 class Replies:
@@ -431,6 +444,63 @@ async def test_a_shorter_wording_of_the_same_request_is_not_a_new_one() -> None:
     assert current.state.asked[0] == "budget.max"
     assert replies.sent[0].question is not None
     assert replies.sent[0].question.field == "attributes.transmission", "допрос продолжился"
+
+
+@pytest.mark.parametrize(
+    ("text", "slug", "shown"),
+    [
+        ("ищу скутер в Хойане", "hoi_an", "Хойан"),
+        ("ищу скутер в Вунгтау", "vung_tau", "Вунгтау"),
+        ("ищу скутер в Далате", "da_lat", "Далат"),
+        ("ищу скутер в Ханое", "ha_noi", "Ханой"),
+        ("ищу скутер в Сайгоне", "ho_chi_minh", "Хошимин"),
+    ],
+    ids=["hoi_an", "vung_tau", "da_lat", "ha_noi", "saigon"],
+)
+async def test_another_city_gets_an_answer_and_not_the_old_question(
+    text: str, slug: str, shown: str
+) -> None:
+    """Смена города — ответ клиенту, а не переспрос висящего вопроса.
+
+    Падало до правки: город вне справочника подставлялся городом по умолчанию,
+    намерение, категория и город совпадали с прежним запросом, а общих слов
+    выходило ровно 0.6 — то есть точно порог. `restates` отвечал `True`, и бот
+    молча переспрашивал бюджет, будто клиент повторился.
+    """
+    store = MemoryStore()
+    talker = Conversation(store, intake=RulesIntake, finder=nothing)
+    await talker.on_text(CLIENT, "ищу скутер в нячанге", Replies())
+
+    replies = Replies()
+    await talker.on_text(CLIENT, text, replies)
+
+    current = await store.load(CLIENT)
+    assert current.passport is not None
+    assert current.passport.passport.city == slug, "город клиента, а не подставленный"
+    assert current.passport.version == 1, "другой город — другой запрос, значит новая цепочка"
+    assert [reply.question for reply in replies.sent] == [None], "старый вопрос не переспрошен"
+    assert shown in replies.texts[0], "клиент назван городом, о котором спросил"
+    assert all(name in replies.texts[0] for name in served_cities("ru")), "сказано, где ищем"
+
+
+async def test_a_city_outside_the_dictionary_is_not_a_repeat_either() -> None:
+    """Справочник тут ни при чём: слово новое — значит просьба новая.
+
+    «Куангнгай» не знает ни один наш словарь, город подставляется прежним, и
+    решает только половина со словами. Раньше она отвечала «повтор» ровно на
+    пороге; теперь порога нет — есть слово, которого в прежней фразе не было.
+    """
+    store = MemoryStore()
+    talker = Conversation(store, intake=RulesIntake, finder=nothing)
+    await talker.on_text(CLIENT, "ищу скутер в нячанге", Replies())
+
+    replies = Replies()
+    await talker.on_text(CLIENT, "ищу скутер в куангнгае", replies)
+
+    current = await store.load(CLIENT)
+    assert current.passport is not None
+    assert current.passport.passport.raw_query == "ищу скутер в куангнгае", "новая цепочка"
+    assert replies.sent[0].question is not None, "новый запрос уточняется с начала"
 
 
 async def test_a_repeat_while_a_question_hangs_asks_it_again() -> None:

@@ -19,7 +19,7 @@ from typing import Any
 
 from sniffer.domain.passport import Category, Intent, Passport, PassportStatus
 from sniffer.search.budget_rules import parse_budget
-from sniffer.search.vocabulary import CITY_NAMES
+from sniffer.search.vocabulary import ALL_CITY_NAMES, city_variants
 
 # Порядок значим: побеждает первое совпадение. «Ищу квартиру в аренду» — это
 # аренда, а не покупка, поэтому глаголы сделки идут раньше общего «ищу».
@@ -100,16 +100,29 @@ _BRANDS: tuple[str, ...] = (
 _BRAND_RE = re.compile(r"\b(?:" + "|".join(_BRANDS) + r")\b", re.IGNORECASE)
 
 
-def _city_pattern(slug: str, names: dict[str, str]) -> re.Pattern[str]:
+def _city_pattern(slug: str) -> re.Pattern[str]:
     """Город ищем написаниями из справочника, а не слагом: клиент пишет «в Нячанге»."""
-    variants = {*names.values(), slug.replace("_", " ")}
-    alternatives = "|".join(re.escape(name).replace(r"\ ", r"\s?") for name in sorted(variants))
+    alternatives = "|".join(
+        re.escape(_city_stem(name)).replace(r"\ ", r"\s?") for name in city_variants(slug)
+    )
     # `\w*` — падежное окончание: «Нячанг», «Нячанге», «Нячанга».
     return re.compile(rf"\b(?:{alternatives})\w*", re.IGNORECASE)
 
 
+def _city_stem(name: str) -> str:
+    """Отрезаем «й»: в косвенном падеже его нет («Ханой» → «в Ханое»).
+
+    Только «й» и только на конце: остальные названия рынка склоняются
+    прибавлением окончания, которое добирает `\\w*`.
+    """
+    return name.removesuffix("й") if len(name) > 3 else name
+
+
+# Узнаём и те города, где не ищем: город, оставшийся неузнанным, подставляется
+# городом по умолчанию, и запрос про Хойан становится неотличим от повтора
+# запроса про Нячанг. Отказ искать — ответ, молчаливая подмена города — нет.
 _CITY_RULES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
-    (slug, _city_pattern(slug, names)) for slug, names in CITY_NAMES.items()
+    (slug, _city_pattern(slug)) for slug in ALL_CITY_NAMES
 )
 
 # Жильё в Нячанге снимают, а не покупают: иностранцу с туристической визой

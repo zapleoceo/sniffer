@@ -159,6 +159,29 @@ def test_city_from_text_wins_over_default() -> None:
     assert passport.intent is Intent.RENT_OUT
 
 
+@pytest.mark.parametrize(
+    ("text", "city"),
+    [
+        ("ищу скутер в Хойане", "hoi_an"),
+        ("сниму квартиру в Вунгтау", "vung_tau"),
+        ("ищу байк в Далате", "da_lat"),
+        ("ищу скутер в Ханое", "ha_noi"),
+        ("ищу скутер в Сайгоне", "ho_chi_minh"),
+        ("ищу скутер в Хошимине", "ho_chi_minh"),
+        ("scooter in Hoi An", "hoi_an"),
+    ],
+    ids=["hoi_an", "vung_tau", "da_lat", "ha_noi", "saigon", "hcmc", "latin"],
+)
+def test_city_we_do_not_serve_is_still_recognised(text: str, city: str) -> None:
+    """Город, где мы не ищем, обязан попасть в паспорт своим слагом.
+
+    Падало до правки: справочник знал два города, остальные подставлялись
+    городом по умолчанию — и запрос про Хойан приходил как запрос про Нячанг,
+    то есть неотличимо от повтора прежней просьбы.
+    """
+    assert parse_query(text, default_city=CITY).city == city
+
+
 def test_unclear_query_still_gives_passport() -> None:
     """Категорию не узнали — ищем словами клиента, а не отказываемся."""
     passport = parse_query("ищу холодильник", default_city=CITY)
@@ -255,6 +278,10 @@ def test_schema_is_strict() -> None:
     assert sorted(schema["required"]) == sorted(schema["properties"])
     assert "" in schema["properties"]["category"]["enum"]
     assert CITY in schema["properties"]["city"]["enum"]
+    # Закрепи в перечислении только обслуживаемые города, и модель физически не
+    # сможет сказать, что клиент назвал другой: отказ искать в Хойане — ответ,
+    # молча подставленный Нячанг — нет.
+    assert "hoi_an" in schema["properties"]["city"]["enum"]
 
 
 def test_merge_ignores_unknown_values() -> None:

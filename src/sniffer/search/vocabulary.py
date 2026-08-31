@@ -71,11 +71,41 @@ INTENT_TERMS: dict[Intent, dict[str, tuple[str, ...]]] = {
     Intent.RENT_OUT: {"ru": ("сниму",), "vi": ("cần thuê",), "en": ("looking to rent",)},
 }
 
-# Город в паспорте нормализован (`nha_trang`), а искать надо тем написанием,
-# которым его пишут в объявлениях.
+# Города, по которым мы действительно ищем: под них собран реестр чатов и сняты
+# параметры Chotot. Город в паспорте нормализован (`nha_trang`), а искать надо
+# тем написанием, которым его пишут в объявлениях.
 CITY_NAMES: dict[str, dict[str, str]] = {
     "nha_trang": {"ru": "Нячанг", "vi": "Nha Trang", "en": "Nha Trang"},
     "da_nang": {"ru": "Дананг", "vi": "Đà Nẵng", "en": "Da Nang"},
+}
+
+# Города, которые мы узнаём, но пока не обслуживаем. Узнавать их обязательно, и
+# причина не в вежливости: неузнанный город подставляется городом по умолчанию,
+# и «ищу скутер в Хойане» после «ищу скутер в Нячанге» приходит с тем же
+# намерением, категорией и городом — то есть неотличимо от повтора прежней
+# просьбы. Клиент получал переспрос вместо ответа.
+#
+# Список короткий намеренно: сюда попадают только направления, куда переезжают с
+# нашего рынка. Каждое лишнее название — риск поймать город там, где его нет
+# («hue» — обычное английское слово), а ложный город означает отказ искать.
+OTHER_CITY_NAMES: dict[str, dict[str, str]] = {
+    "hoi_an": {"ru": "Хойан", "vi": "Hội An", "en": "Hoi An"},
+    "da_lat": {"ru": "Далат", "vi": "Đà Lạt", "en": "Da Lat"},
+    "vung_tau": {"ru": "Вунгтау", "vi": "Vũng Tàu", "en": "Vung Tau"},
+    "phan_thiet": {"ru": "Фантьет", "vi": "Phan Thiết", "en": "Phan Thiet"},
+    "phu_quoc": {"ru": "Фукуок", "vi": "Phú Quốc", "en": "Phu Quoc"},
+    "ha_noi": {"ru": "Ханой", "vi": "Hà Nội", "en": "Hanoi"},
+    "ho_chi_minh": {"ru": "Хошимин", "vi": "Hồ Chí Minh", "en": "Ho Chi Minh"},
+}
+
+ALL_CITY_NAMES: dict[str, dict[str, str]] = {**CITY_NAMES, **OTHER_CITY_NAMES}
+
+# Разговорные написания, которых нет ни в справочнике, ни в слаге. Отдельно от
+# `ALL_CITY_NAMES`, потому что это не название на языке, а просто ещё одно слово
+# для поиска: «Сайгон» и «Хошимин» — один город.
+CITY_ALIASES: dict[str, tuple[str, ...]] = {
+    "ho_chi_minh": ("Сайгон", "Saigon", "Sài Gòn", "HCMC"),
+    "nha_trang": ("Ня Чанг",),
 }
 
 
@@ -107,10 +137,36 @@ def intent_terms(intent: Intent | None, lang: str) -> tuple[str, ...]:
 
 
 def city_name(city: str | None, lang: str) -> str:
-    """Незнакомый город разворачиваем из слага: `da_lat` → `Da Lat`."""
+    """Незнакомый город разворачиваем из слага: `quy_nhon` → `Quy Nhon`."""
     if not city:
         return ""
-    known = CITY_NAMES.get(city)
+    known = ALL_CITY_NAMES.get(city)
     if known:
         return known.get(lang, known.get("en", city))
     return city.replace("_", " ").title()
+
+
+def city_variants(slug: str) -> tuple[str, ...]:
+    """Все написания города — этим ищут название в тексте клиента.
+
+    Слаг тоже вариант: «nha trang» клиент пишет и латиницей.
+    """
+    names = ALL_CITY_NAMES.get(slug, {})
+    return tuple(sorted({*names.values(), *CITY_ALIASES.get(slug, ()), slug.replace("_", " ")}))
+
+
+def is_served(city: str | None) -> bool:
+    """Ищем ли мы в этом городе.
+
+    Пустой город — да: его подставит `default_city`, отказывать не за что.
+    """
+    return not city or city in CITY_NAMES
+
+
+def served_cities(lang: str) -> tuple[str, ...]:
+    """Названия обслуживаемых городов — для ответа «пока работаю только по …».
+
+    Из того же словаря, что и поиск: список городов в тексте бота, набранный
+    руками, разъехался бы с реальностью на первом же новом городе.
+    """
+    return tuple(city_name(slug, lang) for slug in CITY_NAMES)
