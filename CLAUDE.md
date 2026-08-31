@@ -86,14 +86,21 @@ sources/     адаптеры источников, один метод search()
 pipeline/    гейт → prefilter → извлечение → дедуп
 verifier/    grounding, соответствие паспорту, живость
 matching/    паспорт → SQL, ранжирование
+broker/      клиент AIbroker; учёт расходов внедряется, о базе не знает
 dashboard/   веб-интерфейс владельца, FastAPI — читает через репозитории
 db/          репозиторий, единственное место с SQL
 domain/      модели, без ввода-вывода
 ```
 
 Порядок зависимостей: `bot → search → sources`, `bot → matching → db`,
-`pipeline → verifier → db`, `dashboard → db`. Обратных зависимостей нет,
-`domain` не зависит ни от чего.
+`pipeline → verifier → db`, `dashboard → db`, `sources → db`. Обратных
+зависимостей нет, `domain` не зависит ни от чего.
+
+Последнее ребро — узкое и единственное: адаптеру `telegram_groups` нужен реестр
+чатов из таблицы `chats`. Знание о `db` сведено в одну функцию
+`sources/chat_directory.py::new_directory()`, сам адаптер видит только протокол
+`ChatDirectory`. Новое обращение к `db` из `sources` мимо этой границы —
+основание переделать, а не дописать импорт.
 
 `broker/client.py` про базу не знает: приёмник учёта расходов внедряется в него
 функцией, а запись в `broker_calls` живёт в `broker/usage.py`. Иначе клиент
