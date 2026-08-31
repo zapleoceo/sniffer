@@ -28,12 +28,21 @@ class BrokerCallRepository(Repository):
         Через `ON CONFLICT DO NOTHING`, а не «проверил — вставил»: поллинг
         отдаёт завершённую задачу повторно при ретрае сети, и двойной учёт
         стоимости выглядел бы как перерасход, которого не было.
+
+        `index_where` обязателен и повторяет предикат индекса
+        `broker_calls_broker_id_idx` буквально: по частичному индексу Postgres
+        цель конфликта не выводит и отвечает «no unique or exclusion constraint
+        matching the ON CONFLICT specification». Поймано живой базой — на
+        подделке этот запрос проходил бы.
         """
         table = cast(Table, models.BrokerCall.__table__)
         inserted = await self._session.scalar(
             pg_insert(table)
             .values(**broker_call_values(call))
-            .on_conflict_do_nothing(index_elements=["broker_request_id"])
+            .on_conflict_do_nothing(
+                index_elements=["broker_request_id"],
+                index_where=table.c.broker_request_id.isnot(None),
+            )
             .returning(table.c.id)
         )
         if inserted is None:
