@@ -2,7 +2,7 @@ name: sniffer
 
 # Изоляция от Веры — контракт из spec-v2.md, раздел 1. Здесь он выглядит так:
 # имя проекта sniffer (отсюда сеть sniffer_default и том sniffer_sniffer_pgdata),
-# все контейнеры с префиксом sniffer-, порт БД 5433 и только на 127.0.0.1.
+# все контейнеры с префиксом sniffer-, порт БД 5434 и только на 127.0.0.1.
 # Ни одного общего имени с vera3-* и stepan2-*.
 #
 # Потолки памяти (mem_limit) — часть той же изоляции. Машина общая, 3.8 ГБ на
@@ -39,9 +39,11 @@ services:
       # каталога по алфавиту.
       - ./infra/sql/002_seed_candidates.sql:/docker-entrypoint-initdb.d/002_seed_candidates.sql:ro
     ports:
-      # 5433, чтобы не конфликтовать с локальным Postgres и с AIbroker (5435).
-      # Слушаем только loopback: наружу база не смотрит никогда.
-      - "127.0.0.1:5433:5432"
+      # 5434, а не 5433: на этой машине 5433 занят vera3-postgres. Спецификация
+      # утверждала, что Вера на 5432, и первый же старт на сервере упёрся в
+      # "port is already allocated". Занятые соседями порты: 5433 (vera3),
+      # 5435 (aibroker). Слушаем только loopback: наружу база не смотрит.
+      - "127.0.0.1:5434:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U sniffer -d sniffer"]
       interval: 10s

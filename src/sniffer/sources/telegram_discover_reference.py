@@ -21,6 +21,14 @@
 ровно два действия — `join_public` / `join_invite` и `set_muted`. Ни отправки,
 ни реакции, ни отметки о прочтении в типе нет, и дописать их молча не выйдет:
 mypy не пропустит.
+
+Отдельно про `check_invite`: это `messages.checkChatInvite`, то есть **чтение**,
+а не третье исключение. Оно ничего не отправляет, никому не адресовано и в чате
+не видно — ровно как `resolve_username`, только для закрытой группы. Нужно оно
+потому, что **выйти из чата нельзя**: такого действия в закрытом списке
+CLAUDE.md нет, поэтому неверное вступление не откатывается ничем — оно навсегда
+занимает место под потолком и стоит одного из трёх суточных слотов. Значит
+единственное место, где ошибку ещё можно не совершить, — до вступления.
 """
 
 from __future__ import annotations
@@ -76,6 +84,15 @@ REJECT_UNRESOLVED = "unresolved"
 REJECT_FOREIGN_CITY = "foreign_city"
 REJECT_CITY_UNKNOWN = "city_unknown"
 REJECT_JOIN_REFUSED = "join_refused"
+# Заявка на вступление ушла к модератору. Не «плохой чат», а потраченное
+# действие: слот считается использованным (см. `ChatJoiner`).
+REJECT_JOIN_REQUEST_SENT = "join_request_sent"
+# Группа принимает только по заявке. Вступить молча нельзя, а заявка — это
+# исходящий запрос, который стоит суточного слота ни за что.
+REJECT_REQUEST_NEEDED = "request_needed"
+# Мы в этом чате уже состоим, а в реестре его нет. Вступать некуда;
+# заводить запись — работа не разведки, поэтому причина видна в журнале.
+REJECT_ALREADY_MEMBER = "already_member"
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,8 +127,17 @@ class ResolvedChat:
 
     Ради этой записи разведка и устроена так: `resolve_username` отдаёт тип,
     название и описание без единого исходящего действия. Решение о вступлении
-    принимается здесь, а не после — вступить и выйти это два действия вместо
-    нуля, и оба видны Telegram.
+    принимается здесь, а не после — выйти из чата нельзя вовсе (в закрытом
+    списке CLAUDE.md такого действия нет), так что ошибка вступления
+    невозвратна.
+
+    По приглашению то же самое отдаёт `messages.checkChatInvite` — тоже чтение.
+    Двух записей не нужно: отбор смотрит на одни и те же признаки, откуда бы
+    они ни пришли, и `screen()` поэтому один на оба пути.
+
+    `tg_id` у непройденного приглашения **нулевой**: до вступления Telegram id
+    закрытого чата не отдаёт. Значит сверять кандидата с реестром по id можно
+    только когда id есть.
     """
 
     tg_id: int
@@ -122,6 +148,10 @@ class ResolvedChat:
     is_bot: bool = False
     is_user: bool = False
     participants: int = 0
+    # Только для приглашений: вступление идёт через заявку к модератору.
+    request_needed: bool = False
+    # Только для приглашений: мы в этом чате уже состоим.
+    already_member: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,8 +305,11 @@ class MessageLike(Protocol):
 class TelegramJoiner(Protocol):
     """Поверхность Telegram для разведки: чтение плюс ровно два действия.
 
-    `join_public` / `join_invite` и `set_muted` — закрытый список исключений из
-    CLAUDE.md. Ни `send_message`, ни `send_reaction`, ни
+    Читающих методов три (`resolve_username`, `check_invite`,
+    `search_contacts`), действий ровно два: `join_public` / `join_invite` и
+    `set_muted` — закрытый список исключений из CLAUDE.md. Чтение в этот список
+    не входит и входить не может: оно никому не адресовано и в чате не видно,
+    поэтому под `PEER_FLOOD` не подпадает. Ни `send_message`, ни `send_reaction`, ни
     `send_read_acknowledge`, ни `forward_messages` сюда не попадают: аккаунт
     ловит `PEER_FLOOD` за исходящие (spec-v2, 6.1), а сервис на одном аккаунте
     это означает простой.
@@ -287,6 +320,8 @@ class TelegramJoiner(Protocol):
     async def disconnect(self) -> None: ...
 
     async def resolve_username(self, username: str) -> ResolvedChat | None: ...
+
+    async def check_invite(self, invite_hash: str) -> ResolvedChat | None: ...
 
     async def search_contacts(self, query: str, limit: int) -> Sequence[ResolvedChat]: ...
 

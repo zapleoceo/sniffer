@@ -23,11 +23,16 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from telethon.errors import FloodWaitError, UsernameNotOccupiedError
+from telethon.errors import (
+    FloodWaitError,
+    InviteRequestSentError,
+    UsernameNotOccupiedError,
+)
 
 from sniffer.sources import (
     telegram_discover,
     telegram_discover_client,
+    telegram_discover_convert,
     telegram_discover_joiner,
     telegram_discover_links,
     telegram_discover_reference,
@@ -38,10 +43,14 @@ from sniffer.sources.telegram_discover_joiner import ChatJoiner
 from sniffer.sources.telegram_discover_links import candidates_from
 from sniffer.sources.telegram_discover_reference import (
     MAX_JOINS_PER_DAY,
+    REJECT_ALREADY_MEMBER,
     REJECT_BOT,
     REJECT_CHANNEL,
     REJECT_CITY_UNKNOWN,
     REJECT_FOREIGN_CITY,
+    REJECT_JOIN_REQUEST_SENT,
+    REJECT_REQUEST_NEEDED,
+    REJECT_UNRESOLVED,
     REJECT_USER,
     ChatCandidate,
     DiscoveredChat,
@@ -67,11 +76,24 @@ FORBIDDEN_CALL = re.compile(
 )
 
 # Единственные запросы Telegram, которые вправе встречаться в этих модулях:
-# четыре чтения и два действия из закрытого списка CLAUDE.md.
+# четыре чтения и три запроса на два действия. Закрытый список CLAUDE.md
+# ограничивает именно
+# ДЕЙСТВИЯ — их по-прежнему два, вступление и беззвучный режим. `CheckChatInvite`
+# в него не входит и входить не может: это чтение, оно никому не адресовано и в
+# чате не видно, ровно как `ResolveUsername` — только для закрытой группы.
 ALLOWED_REQUESTS = {
     "ResolveUsernameRequest",
     "GetFullChannelRequest",
+    "CheckChatInviteRequest",
     "SearchRequest",
+    "JoinChannelRequest",
+    "ImportChatInviteRequest",
+    "UpdateNotifySettingsRequest",
+}
+
+# Из них — ровно два действия. Проверяется отдельно от общего списка: вырасти
+# вправе только чтение, а этот набор обязан остаться прежним.
+ALLOWED_ACTIONS = {
     "JoinChannelRequest",
     "ImportChatInviteRequest",
     "UpdateNotifySettingsRequest",
@@ -80,6 +102,7 @@ ALLOWED_REQUESTS = {
 MODULES = (
     telegram_discover,
     telegram_discover_client,
+    telegram_discover_convert,
     telegram_discover_joiner,
     telegram_discover_links,
     telegram_discover_reference,
@@ -274,6 +297,7 @@ class FakeTelegram:
     """
 
     known: dict[str, ResolvedChat] = field(default_factory=dict)
+    invites: dict[str, ResolvedChat] = field(default_factory=dict)
     search_results: dict[str, list[ResolvedChat]] = field(default_factory=dict)
     join_errors: dict[str, Exception] = field(default_factory=dict)
     mute_errors: set[int] = field(default_factory=set)
@@ -290,6 +314,10 @@ class FakeTelegram:
     async def resolve_username(self, username: str) -> ResolvedChat | None:
         self.calls.append(f"resolve:{username}")
         return self.known.get(username.lower())
+
+    async def check_invite(self, invite_hash: str) -> ResolvedChat | None:
+        self.calls.append(f"check_invite:{invite_hash}")
+        return self.invites.get(invite_hash)
 
     async def search_contacts(self, query: str, limit: int) -> Sequence[ResolvedChat]:
         self.calls.append(f"search:{query}")
@@ -330,6 +358,31 @@ def group(username: str, title: str, about: str = "", tg_id: int = 0) -> Resolve
         title=title,
         about=about,
         is_group=True,
+    )
+
+
+def invite(
+    title: str,
+    about: str = "",
+    *,
+    is_group: bool = True,
+    request_needed: bool = False,
+    already_member: bool = False,
+) -> ResolvedChat:
+    """Что отдаёт `checkChatInvite` о чате, в котором мы не состоим.
+
+    `tg_id` нулевой и `username` пустой не для удобства: до вступления Telegram
+    ни того, ни другого о закрытом чате не сообщает. Отбор обязан решать по
+    названию и описанию.
+    """
+    return ResolvedChat(
+        tg_id=0,
+        username="",
+        title=title,
+        about=about,
+        is_group=is_group,
+        request_needed=request_needed,
+        already_member=already_member,
     )
 
 
@@ -518,7 +571,12 @@ def test_mixed_chat_with_our_city_is_kept() -> None:
 
 
 async def test_screening_never_joins() -> None:
-    """Решение принимается по `resolve_username`, без единого вступления."""
+    """Решение принимается чтением, без единого вступления — по обеим формам.
+
+    Приглашение проходит те же ворота, что и username: `checkChatInvite` отдаёт
+    название, описание и тип, ничего не отправляя. Поблажки у хэша нет — и быть
+    не может, потому что выйти из чата закрытый список CLAUDE.md не разрешает.
+    """
     db = FakeDb()
     client = FakeTelegram(
         known={
@@ -528,20 +586,26 @@ async def test_screening_never_joins() -> None:
                 tg_id=-3, username="nhatrang_pro_house", title="Nha Trang дом"
             ),
             "barakholka_nyachang": group("barakholka_nyachang", "Барахолка Нячанг"),
-        }
+        },
+        invites={
+            "AbCdEfGhIjKlMnOpQr": invite("Барахолка Нячанг закрытая"),
+            # Города не видно ни в названии, ни в описании — вступать вслепую
+            # нельзя, откатить вступление нечем.
+            "XyZ1234567890abcdef": invite("Частный клуб", "только для своих"),
+        },
     )
     await discovery(db, client).harvest(fixture_messages(), found_in="@source_chat")
 
     assert not any(call.startswith("join") for call in client.calls)
-    # Канал `nhatrang_pro_house` отбракован, две группы и приглашения — в очередь.
+    # Канал и приглашение без города отбракованы; остальное — в очередь.
     assert sorted(row["key"] for row in db.candidates) == [
         "+AbCdEfGhIjKlMnOpQr",
-        "+XyZ1234567890abcdef",
         "@barakholka_nyachang",
         "@nyachang_arendaa",
         "@nyachang_uslugi",
     ]
     assert db.rejects["@nhatrang_pro_house"] == REJECT_CHANNEL
+    assert db.rejects["+XyZ1234567890abcdef"] == REJECT_CITY_UNKNOWN
 
 
 async def test_known_and_rejected_candidates_are_not_resolved_again() -> None:
@@ -589,6 +653,24 @@ def seeded_db(*usernames: str) -> FakeDb:
                 "invite_hash": "",
                 "found_in": "seed",
                 "priority": 10 + index,
+                "status": "queued",
+                "seq": index,
+            }
+        )
+    return db
+
+
+def seeded_invite_db(*hashes: str) -> FakeDb:
+    """Очередь из приглашений. Сид владельца их не содержит, разведка — да."""
+    db = FakeDb()
+    for index, invite_hash in enumerate(hashes):
+        db.candidates.append(
+            {
+                "key": f"+{invite_hash}",
+                "username": "",
+                "invite_hash": invite_hash,
+                "found_in": "@source_chat",
+                "priority": 100 + index,
                 "status": "queued",
                 "seq": index,
             }
@@ -859,6 +941,20 @@ async def test_only_allowed_methods_reach_telegram() -> None:
         client.send_message  # noqa: B018
 
 
+def test_every_discovery_module_is_under_guard() -> None:
+    """Список `MODULES` обязан покрывать все модули разведки.
+
+    Без этой проверки страж закрытого списка обходится не правкой запрета, а
+    новым файлом: код переезжает в модуль, которого в списке нет, и запросы к
+    Telegram перестают проверяться молча. Ровно так и случилось бы при выносе
+    преобразований в `telegram_discover_convert`.
+    """
+    package = Path(str(telegram_discover.__file__)).parent
+    on_disk = {path.stem for path in package.glob("telegram_discover*.py")}
+    listed = {Path(str(module.__file__)).stem for module in MODULES}
+    assert on_disk == listed
+
+
 def test_modules_call_no_forbidden_method() -> None:
     """Страховка от будущей правки: запрет держится кодом, а не памятью."""
     for module in MODULES:
@@ -866,8 +962,8 @@ def test_modules_call_no_forbidden_method() -> None:
         assert not FORBIDDEN_CALL.search(path.read_text(encoding="utf-8")), path.name
 
 
-def test_only_six_telegram_requests_exist_in_the_code() -> None:
-    """Четыре чтения и два действия. Список закрытый (CLAUDE.md).
+def test_only_seven_telegram_requests_exist_in_the_code() -> None:
+    """Четыре чтения и три запроса на два действия (CLAUDE.md).
 
     Именно перечисление, а не запрет по образцу: запретный список пропускает
     то, чего в нём не додумались написать, а этот тест краснеет на любом новом
@@ -880,6 +976,21 @@ def test_only_six_telegram_requests_exist_in_the_code() -> None:
     assert used == ALLOWED_REQUESTS
 
 
+def test_only_two_outgoing_actions_exist_in_the_code() -> None:
+    """Чтение вправе расти, действий по-прежнему ровно два (CLAUDE.md).
+
+    Отдельно от общего списка запросов: закрытый список владельца ограничивает
+    именно исходящие действия. Новое чтение — вопрос инженерный, новое действие —
+    вопрос к владельцу, и смешивать их в одном тесте значит потерять эту разницу.
+    """
+    used: set[str] = set()
+    for module in MODULES:
+        path = Path(str(module.__file__))
+        used |= set(re.findall(r"\b(\w+Request)\b", path.read_text(encoding="utf-8")))
+    assert used & ALLOWED_ACTIONS == ALLOWED_ACTIONS
+    assert not used - ALLOWED_REQUESTS
+
+
 def test_the_joiner_protocol_has_no_extra_methods() -> None:
     """Дописать отправку молча не выйдет: у типа таких методов нет."""
     methods = {name for name in vars(TelegramJoiner) if not name.startswith("_")}
@@ -887,6 +998,7 @@ def test_the_joiner_protocol_has_no_extra_methods() -> None:
         "connect",
         "disconnect",
         "resolve_username",
+        "check_invite",
         "search_contacts",
         "join_public",
         "join_invite",
@@ -962,3 +1074,176 @@ def test_seed_tables_exist_in_the_schema() -> None:
     )
     for fragment in ("chat_candidates", "chat_rejects", "chat_join_events", "priority"):
         assert fragment in schema, fragment
+
+
+# ── приглашения: те же ворота, что у username ───────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("resolved", "reason"),
+    [
+        (invite("Нячанг новости", is_group=False), REJECT_CHANNEL),
+        (invite("Дананг барахолка"), REJECT_FOREIGN_CITY),
+        (invite("Частный клуб"), REJECT_CITY_UNKNOWN),
+        (invite("Барахолка Нячанг", request_needed=True), REJECT_REQUEST_NEEDED),
+        (invite("Барахолка Нячанг", already_member=True), REJECT_ALREADY_MEMBER),
+    ],
+)
+async def test_invite_is_rejected_before_any_join(resolved: ResolvedChat, reason: str) -> None:
+    """Владелец просил именно это: отбраковка происходит ДО вступления.
+
+    Раньше кандидат с хэшем ставился в очередь без единой проверки, а «ворота
+    вступления», на которые ссылался комментарий, не существовали. Проверять
+    после вступления нечем: выйти из чата закрытый список CLAUDE.md не
+    разрешает, поэтому ошибка была бы невозвратной.
+    """
+    db = FakeDb()
+    client = FakeTelegram(invites={"HaShAbCdEfGh1234": resolved})
+    added = await discovery(db, client).harvest([FakeMessage(1, "t.me/+HaShAbCdEfGh1234")])
+
+    assert added == 0
+    assert db.candidates == []
+    assert db.rejects["+HaShAbCdEfGh1234"] == reason
+    assert not any(call.startswith("join") for call in client.calls)
+
+
+async def test_unreadable_invite_is_rejected_not_queued() -> None:
+    """Telegram не рассказал о приглашении ничего — вступать вслепую нельзя."""
+    db = FakeDb()
+    client = FakeTelegram(invites={})
+    assert await discovery(db, client).harvest([FakeMessage(1, "t.me/+HaShAbCdEfGh1234")]) == 0
+    assert db.rejects["+HaShAbCdEfGh1234"] == REJECT_UNRESOLVED
+
+
+async def test_invite_with_our_city_is_queued_and_then_joined() -> None:
+    """Путь приглашения целиком: чтение → очередь → вступление → реестр.
+
+    До этого теста `join_invite` не вызывался ни разу ни одним тестом: в
+    очереди были только username-кандидаты, и вся ветка вступления по хэшу
+    существовала непроверенной.
+    """
+    db = FakeDb()
+    client = FakeTelegram(
+        invites={"GoOdHaShAbCdEf12": invite("Барахолка Нячанг", "аренда и продажа")}
+    )
+    added = await discovery(db, client).harvest([FakeMessage(1, "t.me/+GoOdHaShAbCdEf12")])
+    assert added == 1
+    assert [row["key"] for row in db.candidates] == ["+GoOdHaShAbCdEf12"]
+
+    chat = await joiner(db, client, now=NOON).join_next()
+
+    assert chat is not None
+    assert client.joined == ["GoOdHaShAbCdEf12"]
+    assert "join_invite:GoOdHaShAbCdEf12" in client.calls
+    # Город в записи реестра — не «по умолчанию», а тот, который отбор нашёл в
+    # названии приглашения. Именно за него потом фильтрует читающий адаптер.
+    assert chat.city == CITY
+    assert db.chats[chat.tg_id].city == CITY
+    assert db.candidates == []
+
+
+async def test_invite_hash_keeps_its_case_through_the_whole_path() -> None:
+    """`+AbC` и `+abc` — разные ссылки: хэш регистрозависим."""
+    db = FakeDb()
+    client = FakeTelegram(invites={"MiXeDCaSeAbCdEf1": invite("Нячанг барахолка")})
+    await discovery(db, client).harvest([FakeMessage(1, "t.me/+MiXeDCaSeAbCdEf1")])
+    assert [row["key"] for row in db.candidates] == ["+MiXeDCaSeAbCdEf1"]
+    await joiner(db, client, now=NOON).join_next()
+    assert client.joined == ["MiXeDCaSeAbCdEf1"]
+
+
+# ── заявка к модератору: слот потрачен ──────────────────────────────────────
+
+
+async def test_sent_join_request_spends_the_slot() -> None:
+    """`InviteRequestSent` — состоявшийся исходящий запрос, а не отказ.
+
+    Telegram записал его независимо от исхода, поэтому слот НЕ возвращается.
+    Возврат слота превращал суточный лимит из трёх запросов в двадцать четыре:
+    через час попытка снова свободна, и следующая модерируемая группа отправляет
+    ещё одну заявку.
+    """
+    db = seeded_invite_db("ModeratedAbCdEf1", "SecondAbCdEfGh12")
+    client = FakeTelegram(
+        invites={
+            "ModeratedAbCdEf1": invite("Барахолка Нячанг"),
+            "SecondAbCdEfGh12": invite("Нячанг аренда"),
+        },
+        join_errors={"ModeratedAbCdEf1": InviteRequestSentError(request=None)},
+    )
+
+    assert await joiner(db, client, now=NOON).join_next() is None
+
+    # Слот остался занятым: событие в журнале есть и никуда не делось.
+    assert len(db.events) == 1
+    # Кандидат выброшен насовсем — исход известен точно.
+    assert not any(row["key"] == "+ModeratedAbCdEf1" for row in db.candidates)
+    assert db.rejects["+ModeratedAbCdEf1"] == REJECT_JOIN_REQUEST_SENT
+
+
+async def test_three_sent_requests_exhaust_the_day() -> None:
+    """Ровно три исходящих запроса в сутки, даже если все ушли в заявки.
+
+    Это и есть регресс на посчитанные рецензентом 24 запроса вместо 3: пока слот
+    возвращался, каждый час освобождал новую попытку.
+    """
+    hashes = ("OneAbCdEfGhIjKl1", "TwoAbCdEfGhIjKl2", "ThreeAbCdEfGhIj3", "FourAbCdEfGhIjK4")
+    db = seeded_invite_db(*hashes)
+    client = FakeTelegram(
+        invites={name: invite("Барахолка Нячанг") for name in hashes},
+        join_errors={name: InviteRequestSentError(request=None) for name in hashes},
+    )
+
+    attempts = [
+        await joiner(db, client, now=NOON + timedelta(hours=hour)).join_next() for hour in range(4)
+    ]
+
+    assert attempts == [None, None, None, None]
+    # Наружу ушло ровно три запроса, четвёртый не состоялся.
+    assert [call for call in client.calls if call.startswith("join_invite")] == [
+        "join_invite:OneAbCdEfGhIjKl1",
+        "join_invite:TwoAbCdEfGhIjKl2",
+        "join_invite:ThreeAbCdEfGhIj3",
+    ]
+    assert len(db.events) == MAX_JOINS_PER_DAY
+    # Четвёртый кандидат остался в очереди — он ни в чём не виноват.
+    assert any(
+        row["key"] == "+FourAbCdEfGhIjK4" and row["status"] == "queued" for row in db.candidates
+    )
+
+
+# ── группа против вещания ───────────────────────────────────────────────────
+
+
+@dataclass
+class FakeChatFlags:
+    """Сущность Telegram в объёме флагов, по которым определяется тип."""
+
+    broadcast: bool = False
+    megagroup: bool = False
+    gigagroup: bool = False
+
+
+@pytest.mark.parametrize(
+    ("entity", "is_group", "what"),
+    [
+        (FakeChatFlags(), True, "обычная группа: ни одного флага нет"),
+        (FakeChatFlags(megagroup=True), True, "супергруппа"),
+        (FakeChatFlags(broadcast=True), False, "канал"),
+        # Гигагруппа — супергруппа, переведённая в режим вещания: пишут
+        # только администраторы, то есть объявлений от людей там столько же,
+        # сколько в канале. Оба сочетания флагов проверяются: в разных версиях
+        # схемы `megagroup` рядом с `gigagroup` ведёт себя по-разному.
+        (FakeChatFlags(broadcast=True, gigagroup=True), False, "гигагруппа"),
+        (
+            FakeChatFlags(broadcast=True, megagroup=True, gigagroup=True),
+            False,
+            "гигагруппа с обоими флагами",
+        ),
+    ],
+)
+def test_broadcast_is_never_taken_for_a_group(
+    entity: FakeChatFlags, is_group: bool, what: str
+) -> None:
+    """Вещание не группа: объявлений от людей в нём не бывает."""
+    assert telegram_discover_convert.is_group(entity) is is_group, what

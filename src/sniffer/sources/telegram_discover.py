@@ -8,10 +8,18 @@
 вернул бы `RawItem`, и притворяться источником выдачи было бы враньём в реестре
 адаптеров.
 
-Отбор устроен так, чтобы решение принималось **до** вступления. Вступить,
-посмотреть и выйти — это два исходящих действия вместо нуля, оба видны Telegram
-и оба считаются в суточный лимит. `resolve_username` отдаёт тип, название и
-описание, не вступая, и этого хватает.
+Отбор устроен так, чтобы решение принималось **до** вступления, и это не
+оптимизация, а единственная возможность: **выйти из чата нельзя**. Закрытый
+список CLAUDE.md знает два действия — вступление и беззвучный режим, — и
+`LeaveChannel` в него не входит. Ошибка вступления не откатывается ничем: она
+навсегда занимает место под потолком числа чатов и стоит одного из трёх
+суточных слотов.
+
+Читать, не вступая, Telegram даёт двумя способами, и оба здесь используются:
+`resolve_username` для публичной группы и `messages.checkChatInvite` для
+закрытой. Оба отдают тип, название и описание. Поэтому у приглашения нет
+поблажки: `screen()` один на оба пути, и кандидат по хэшу проходит те же
+ворота, что кандидат по имени.
 
 Кандидаты берутся из сообщений, которые и так проходят через воронку: отдельного
 обхода чатов ради разведки нет — он стоил бы тех же лимитов, что и поиск.
@@ -118,19 +126,15 @@ class ChatDiscovery:
         if candidate.username and await self._registry.has_chat(username=candidate.username):
             return False
 
-        if candidate.invite_hash:
-            # Приглашение не разрешается без вступления: за хэшем может быть
-            # что угодно, и узнать это можно только внутри. В очередь ставим —
-            # решение принимают ворота вступления, а не отбор.
-            await self._queue.push(candidate)
-            return True
-
         if resolved is None:
-            resolved = await self._resolve(candidate)
+            resolved = await self._look(candidate)
         if resolved is None:
             await self._rejected.reject(candidate.key, REJECT_UNRESOLVED)
             return False
-        if await self._registry.has_chat(tg_id=resolved.tg_id):
+        # Сверка по id — только когда id известен. У непройденного приглашения
+        # он нулевой: до вступления Telegram id закрытого чата не отдаёт, и
+        # `has_chat(tg_id=0)` спросил бы про несуществующий чат.
+        if resolved.tg_id and await self._registry.has_chat(tg_id=resolved.tg_id):
             return False
 
         reason = screen(resolved, city=self._city)
@@ -142,9 +146,16 @@ class ChatDiscovery:
         log.info("discover.queued", candidate=candidate.key, title=resolved.title)
         return True
 
-    async def _resolve(self, candidate: ChatCandidate) -> ResolvedChat | None:
+    async def _look(self, candidate: ChatCandidate) -> ResolvedChat | None:
+        """Что Telegram расскажет о кандидате, не вступая.
+
+        Две формы ссылки — два запроса на чтение, но одно значение на выходе:
+        дальше отбор не различает, откуда пришли название и тип.
+        """
         try:
+            if candidate.invite_hash:
+                return await self._client.check_invite(candidate.invite_hash)
             return await self._client.resolve_username(candidate.username)
         except Exception as exc:
-            log.warning("discover.resolve_failed", candidate=candidate.key, error=why(exc))
+            log.warning("discover.look_failed", candidate=candidate.key, error=why(exc))
             return None

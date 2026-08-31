@@ -46,6 +46,7 @@ from sniffer.sources.telegram_discover_reference import (
     MAX_TRACKED_CHATS,
     MIN_JOIN_PAUSE,
     REJECT_JOIN_REFUSED,
+    REJECT_JOIN_REQUEST_SENT,
     CandidateQueue,
     ChatCandidate,
     ChatRegistry,
@@ -72,9 +73,6 @@ CANDIDATE_REFUSED = (
     InviteHashExpiredError,
     InviteHashEmptyError,
     ChannelPrivateError,
-    # Заявка на вступление ушла и висит у модератора. Кандидат нам больше не
-    # интересен, а слот считаем потраченным: наружу действие уже отправилось.
-    InviteRequestSentError,
 )
 
 
@@ -173,6 +171,22 @@ class ChatJoiner:
                 blocked_until=blocked_until.isoformat(),
             )
             return None
+        except InviteRequestSentError:
+            # `ImportChatInvite` в группу «только по заявке» — это состоявшийся
+            # исходящий запрос: Telegram его записал, и заявка теперь висит у
+            # модератора. Поэтому слот НЕ возвращается, хотя чата мы не
+            # получили: вернуть его значит разрешить ещё одну такую же попытку
+            # через час, и суточный лимит из трёх запросов превращается в
+            # двадцать четыре.
+            #
+            # Кандидат при этом выбрасывается насовсем — исход известен точно, в
+            # отличие от обрыва связи ниже. Отбор такие группы отсекает заранее
+            # по `request_needed`, так что сюда попадает только та, что стала
+            # модерируемой между проверкой и вступлением.
+            await self._queue.drop(candidate.key)
+            await self._rejected.reject(candidate.key, REJECT_JOIN_REQUEST_SENT)
+            log.warning("discover.join_request_sent", candidate=candidate.key)
+            return None
         except CANDIDATE_REFUSED as exc:
             # Telegram сказал «такого нет» или «сюда нельзя»: вступления точно
             # не было, слот возвращаем, кандидата больше не разбираем.
@@ -195,6 +209,11 @@ class ChatJoiner:
         # начала, поэтому падение здесь не даст четвёртого вступления — только
         # безымянную строку в журнале.
         await self._ledger.confirm_join(event_id=event_id, tg_id=tg_id, username=candidate.username)
+        # Город берётся из настройки, и это честно ровно потому, что в очередь
+        # кандидат попадает только через `screen()`, где маркер города найден в
+        # названии или описании — по обеим формам ссылки, включая приглашение.
+        # Второй путь в очередь — сид `002_seed_candidates.sql`, где город выбрал
+        # владелец руками. Третьего нет: пока это так, запись не лжёт.
         chat = DiscoveredChat(
             tg_id=tg_id,
             username=candidate.username,

@@ -2,12 +2,16 @@
 
 Отделено от `telegram_discover.py` намеренно: «как позвать Telegram» и «кого и
 когда звать» меняются по разным поводам, а тесты второго не должны тащить за
-собой первое.
+собой первое. Разбор ответа вынесен ещё дальше — в
+`telegram_discover_convert.py`: он проверяется таблицей значений и без сети.
 
-Здесь же видно всю поверхность целиком — четыре чтения и два действия:
-`ResolveUsername`, `GetFullChannel`, `contacts.Search`, `JoinChannel`,
-`ImportChatInvite`, `UpdateNotifySettings`. Список закрытый (CLAUDE.md,
-«Работа с Telegram»); третьего действия не появляется без решения владельца.
+Здесь же видна вся поверхность целиком — семь запросов: четыре чтения
+и три на два действия:
+`ResolveUsername`, `GetFullChannel`, `CheckChatInvite`, `contacts.Search`,
+`JoinChannel`, `ImportChatInvite`, `UpdateNotifySettings`. Список закрытый
+(CLAUDE.md, «Работа с Telegram»); третьего **действия** не появляется без
+решения владельца, а `CheckChatInvite` — чтение: оно ничего не отправляет и в
+чате не видно.
 """
 
 from __future__ import annotations
@@ -18,6 +22,15 @@ from typing import Any
 import structlog
 
 from sniffer.config import Settings
+from sniffer.sources.telegram_discover_convert import (
+    first_chat,
+    first_user,
+    from_chat,
+    from_invite,
+    from_user,
+    marked_id,
+    with_details,
+)
 from sniffer.sources.telegram_discover_reference import ResolvedChat, TelegramJoiner
 
 log = structlog.get_logger(__name__)
@@ -49,39 +62,59 @@ class TelethonJoiner:
         from telethon.tl.functions.contacts import ResolveUsernameRequest
 
         result = await self._client(ResolveUsernameRequest(username=username.lstrip("@")))
-        chat = _first_chat(result)
+        chat = first_chat(result)
         if chat is None:
-            user = _first_user(result)
-            return _from_user(user) if user is not None else None
-        resolved = _from_chat(chat)
-        return _with_about(resolved, await self._about(chat))
+            user = first_user(result)
+            return from_user(user) if user is not None else None
+        resolved = from_chat(chat)
+        return with_details(resolved, about=await self._about(chat))
+
+    async def check_invite(self, invite_hash: str) -> ResolvedChat | None:
+        """То же, что `resolve_username`, но для закрытой группы — и тоже чтение.
+
+        `messages.checkChatInvite` отдаёт название, описание, тип и признак
+        «только по заявке», не вступая. Без него вступление по приглашению
+        уходило бы вслепую, а отменить его нечем: выйти из чата закрытый список
+        CLAUDE.md не разрешает.
+        """
+        from telethon.tl.functions.messages import CheckChatInviteRequest
+
+        result = await self._client(CheckChatInviteRequest(hash=invite_hash))
+        chat = getattr(result, "chat", None)
+        if chat is not None:
+            # `ChatInviteAlready` / `ChatInvitePeek`: мы уже внутри либо нам дали
+            # заглянуть. Id здесь есть, вступать больше некуда, и описание за
+            # вторым запросом не идёт — отбор всё равно остановится на этом
+            # признаке.
+            return with_details(from_chat(chat), already_member=True)
+        return from_invite(result)
 
     async def search_contacts(self, query: str, limit: int) -> Sequence[ResolvedChat]:
         """`contacts.Search` вместо перебора диалогов (spec-v2, 7)."""
         from telethon.tl.functions.contacts import SearchRequest
 
         result = await self._client(SearchRequest(q=query, limit=limit))
-        return [_from_chat(chat) for chat in getattr(result, "chats", ())]
+        return [from_chat(chat) for chat in getattr(result, "chats", ())]
 
     async def join_public(self, username: str) -> int:
         """Исключение 1 из «юзербот только читает» (CLAUDE.md)."""
         from telethon.tl.functions.channels import JoinChannelRequest
 
         result = await self._client(JoinChannelRequest(channel=username.lstrip("@")))
-        chat = _first_chat(result)
+        chat = first_chat(result)
         if chat is None:
             raise LookupError(f"вступили в {username}, но чат не вернулся")
-        return _marked_id(chat)
+        return marked_id(chat)
 
     async def join_invite(self, invite_hash: str) -> int:
         """Та же дверь, что и `join_public`, только для закрытой группы."""
         from telethon.tl.functions.messages import ImportChatInviteRequest
 
         result = await self._client(ImportChatInviteRequest(hash=invite_hash))
-        chat = _first_chat(result)
+        chat = first_chat(result)
         if chat is None:
             raise LookupError("вступили по приглашению, но чат не вернулся")
-        return _marked_id(chat)
+        return marked_id(chat)
 
     async def set_muted(self, tg_id: int) -> None:
         """Исключение 2: аккаунт рабочий, и два десятка барахолок его хоронят."""
@@ -138,66 +171,3 @@ def missing_joiner_settings(settings: Settings) -> list[str]:
         "TG_SESSION": bool(settings.tg_session.strip()),
     }
     return [name for name, filled in required.items() if not filled]
-
-
-def _first_chat(result: Any) -> Any | None:
-    chats = getattr(result, "chats", None) or ()
-    return chats[0] if chats else None
-
-
-def _first_user(result: Any) -> Any | None:
-    users = getattr(result, "users", None) or ()
-    return users[0] if users else None
-
-
-def _marked_id(chat: Any) -> int:
-    """Id в размеченной форме — той, что хранит реестр и ждёт `telegram_groups`.
-
-    Считает Telethon, а не мы: у супергруппы разметка `-100` + id, у обычной
-    группы просто `-id`, и своя арифметика на этом месте однажды уедет на
-    чужой чат. Знание о форме id принадлежит библиотеке.
-    """
-    from telethon import utils
-
-    return int(utils.get_peer_id(chat))
-
-
-def _from_chat(chat: Any) -> ResolvedChat:
-    """Сущность Telegram → запись отбора.
-
-    `megagroup` — то самое различие между «группой» и «каналом»: у канала он
-    ложный, и объявлений от людей там не бывает (docs/chats-nha-trang.md).
-    Обычный `Chat` (не супергруппа) канала не имеет вовсе — он группа по типу.
-    """
-    is_broadcast = bool(getattr(chat, "broadcast", False))
-    is_megagroup = bool(getattr(chat, "megagroup", False))
-    return ResolvedChat(
-        tg_id=_marked_id(chat),
-        username=str(getattr(chat, "username", "") or ""),
-        title=str(getattr(chat, "title", "") or ""),
-        is_group=is_megagroup or not is_broadcast,
-        participants=int(getattr(chat, "participants_count", 0) or 0),
-    )
-
-
-def _from_user(user: Any) -> ResolvedChat:
-    return ResolvedChat(
-        tg_id=int(getattr(user, "id", 0)),
-        username=str(getattr(user, "username", "") or ""),
-        title=str(getattr(user, "first_name", "") or ""),
-        is_bot=bool(getattr(user, "bot", False)),
-        is_user=True,
-    )
-
-
-def _with_about(chat: ResolvedChat, about: str) -> ResolvedChat:
-    return ResolvedChat(
-        tg_id=chat.tg_id,
-        username=chat.username,
-        title=chat.title,
-        about=about,
-        is_group=chat.is_group,
-        is_bot=chat.is_bot,
-        is_user=chat.is_user,
-        participants=chat.participants,
-    )
