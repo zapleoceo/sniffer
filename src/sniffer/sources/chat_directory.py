@@ -1,4 +1,4 @@
-"""Реестр чатов для источника: заглушка и обёртка над репозиторием.
+"""Реестр чатов для источника: обёртка над репозиторием, сборка и заглушка.
 
 Тонкая прослойка между `ChatRepository` (слой `db`) и адаптером. Нужна из-за
 трёх расхождений, каждое из которых иначе пришлось бы чинить правкой чужой
@@ -14,9 +14,11 @@
    применяется ПОСЛЕ выборки. Значит из базы берём с запасом, иначе десять
    чатов Нячанга превратились бы в два: восемь мест заняли бы чужие города.
 
-Импорта из `sniffer.db` здесь нет намеренно: репозиторий и фабрика сессии
-приходят снаружи. Так обёртка тестируется без базы и не ломается от того, в
-каком порядке вливаются ветки.
+Сам класс `sniffer.db` не импортирует: репозиторий и фабрика сессии приходят
+снаружи, поэтому обёртка тестируется без базы. Знание о слое `db` собрано в
+одной функции `new_directory` — это тот самый боевой реестр, который получает
+адаптер, когда его создают из реестра источников без аргументов. Импорт внутри
+функции, чтобы модуль остался импортируемым там, где базы нет вовсе.
 """
 
 from __future__ import annotations
@@ -28,7 +30,7 @@ from typing import Protocol
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sniffer.sources.telegram_reference import ChatLike
+from sniffer.sources.telegram_reference import ChatDirectory, ChatLike
 
 log = structlog.get_logger(__name__)
 
@@ -51,10 +53,16 @@ class ChatRecords(Protocol):
 
 
 class EmptyChatDirectory:
-    """Реестр не подключён: чатов нет.
+    """Реестр отключён явно: чатов нет.
 
     Пустой реестр — это «искать негде», а не поломка, поэтому источник молча
     отдаёт пустой список и остаётся в плане.
+
+    Заглушку теперь подставляют руками — тесты и инструменты, которым база не
+    нужна. Значением по умолчанию она была ровно один раз и стоила того, что
+    боевой поиск ходил по пустому списку, пока документация и тесты уверяли в
+    обратном: `get_source("telegram_groups")` аргументов не передаёт, а
+    источник получал заглушку и честно находил ноль.
     """
 
     async def list_active(self, *, city: str, limit: int) -> Sequence[ChatLike]:
@@ -85,16 +93,39 @@ class RepositoryChatDirectory:
         self._overfetch = overfetch
 
     async def list_active(self, *, city: str, limit: int) -> Sequence[ChatLike]:
+        asked = max(limit, 1) * self._overfetch
         # Читаем и ничего не меняем — коммит не нужен, сессия закрывается
         # выходом из `async with` (граница транзакции за вызывающим).
         async with self._session_factory() as session:
-            found = await self._repository_factory(session).list_active(
-                limit=max(limit, 1) * self._overfetch
-            )
+            found = await self._repository_factory(session).list_active(limit=asked)
         # Пустой город в записи означает «не указан» и поиск не сужает.
         of_city = [chat for chat in found if chat.city in ("", city)]
-        if len(of_city) < min(limit, len(found)):
-            # Запаса не хватило: чатов пришло достаточно, а нужного города в
-            # них меньше, чем просили. Значит пора за SQL-фильтром.
-            log.info("telegram.city_overfetch_tight", city=city, got=len(of_city), raw=len(found))
+        if len(of_city) < limit and len(found) >= asked:
+            # Запас упёрся в потолок: база отдала ровно столько, сколько
+            # просили, значит за обрезкой остались чаты, среди которых мог быть
+            # нужный город. Пора за SQL-фильтром.
+            #
+            # Условие требует ОБА признака. «Города мало» само по себе значит
+            # только, что чатов этого города в реестре мало, — и на живой базе
+            # (4 чата из 44 при запросе 50) это давало ложную тревогу о том,
+            # чего не было: ничего не отрезано, спасать нечего.
+            log.info(
+                "telegram.city_overfetch_tight",
+                city=city,
+                got=len(of_city),
+                raw=len(found),
+                asked=asked,
+            )
         return of_city[:limit]
+
+
+def new_directory() -> ChatDirectory:
+    """Боевой реестр чатов: таблица `chats` через `ChatRepository`.
+
+    Та самая сборка из spec-v2 4.4 — и единственное место, где сходятся слой
+    источников и слой доступа к данным. Именно её получает адаптер, созданный
+    реестром источников без аргументов, то есть на боевом пути.
+    """
+    from sniffer.db import ChatRepository, session_scope
+
+    return RepositoryChatDirectory(session_scope, ChatRepository)

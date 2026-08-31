@@ -9,10 +9,13 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
+
+from structlog.testing import capture_logs
 
 from sniffer.sources.chat_directory import CITY_OVERFETCH, RepositoryChatDirectory
 
@@ -127,6 +130,41 @@ async def test_chat_without_city_is_not_excluded() -> None:
     chats, _, _ = directory([chat(-100_1, ""), chat(-100_2, "da_nang")])
     found = await chats.list_active(city="nha_trang", limit=10)
     assert [c.tg_id for c in found] == [-100_1]
+
+
+def tight_warnings(logs: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    return [entry for entry in logs if entry["event"] == "telegram.city_overfetch_tight"]
+
+
+async def test_few_chats_of_the_city_is_not_a_tight_overfetch() -> None:
+    """«Города мало» и «запас упёрся в потолок» — разные вещи.
+
+    На живой базе предупреждение сработало при 4 чатах города из 44 в реестре,
+    хотя потолок 50 не достигнут и обрезка не отняла ни одной записи. Тревога
+    о том, чего не было, ничем не лучше молчания о том, что было.
+    """
+    registry = [chat(-100_0 - n, "da_nang") for n in range(40)]
+    registry += [chat(-200_0 - n, "nha_trang") for n in range(4)]
+    chats, _, _ = directory(registry)
+
+    with capture_logs() as logs:
+        found = await chats.list_active(city="nha_trang", limit=10)
+
+    assert len(found) == 4
+    assert tight_warnings(logs) == []
+
+
+async def test_overfetch_hitting_the_ceiling_is_reported() -> None:
+    """База отдала ровно столько, сколько просили, — за обрезкой остались чаты."""
+    registry = [chat(-100_0 - n, "da_nang") for n in range(10 * CITY_OVERFETCH)]
+    registry += [chat(-200_0 - n, "nha_trang") for n in range(10)]
+    chats, _, _ = directory(registry)
+
+    with capture_logs() as logs:
+        found = await chats.list_active(city="nha_trang", limit=10)
+
+    assert found == []
+    assert tight_warnings(logs), "запас упёрся в потолок — об этом надо сказать"
 
 
 async def test_session_is_opened_and_closed_per_call() -> None:

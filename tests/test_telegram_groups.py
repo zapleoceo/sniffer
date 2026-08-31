@@ -12,6 +12,7 @@ Telegram, проверяет не адаптер, а связь — и заод�
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import re
@@ -25,8 +26,9 @@ import pytest
 from telethon.errors import AuthKeyUnregisteredError, FloodWaitError, SessionRevokedError
 
 from sniffer.config import Settings
-from sniffer.sources import chat_directory, telegram_client, telegram_groups, telegram_reference
+from sniffer.sources import telegram_groups
 from sniffer.sources.base import get_source, registered_sources
+from sniffer.sources.chat_directory import EmptyChatDirectory
 from sniffer.sources.telegram_groups import TelegramGroupsSource
 from sniffer.sources.telegram_reference import (
     MAX_CHATS_PER_SEARCH,
@@ -214,6 +216,7 @@ async def test_search_maps_messages_to_items() -> None:
         "-1001657234891:55148",
         "-1001657234891:55160",
         "-1001902334455:4471",
+        "-1001902334455:4482",
     ]
     first = items[0]
     assert first.source == SOURCE_NAME
@@ -227,9 +230,9 @@ async def test_search_maps_messages_to_items() -> None:
 async def test_fields_absent_in_telegram_stay_empty() -> None:
     """Автора поста в группе API не отдаёт (spec-v2, 7) — не выдумываем его."""
     items = await adapter(FakeTelegram(replies=fixture_replies())).search("байк", {})
-    assert [item.seller_name for item in items] == [""] * 4
-    assert [item.title for item in items] == [""] * 4
-    assert [item.price_raw for item in items] == [""] * 4
+    assert [item.seller_name for item in items] == [""] * 5
+    assert [item.title for item in items] == [""] * 5
+    assert [item.price_raw for item in items] == [""] * 5
     assert all(item.price_vnd is None for item in items)
     assert all(item.images == [] for item in items)
 
@@ -275,11 +278,29 @@ async def test_album_is_not_repeated_by_the_next_task_of_the_plan() -> None:
 
 
 async def test_link_into_a_forum_topic_has_three_segments() -> None:
-    """В форумной супергруппе ссылка без номера темы ведёт в никуда."""
+    """В форумной супергруппе ссылка без номера темы ведёт в никуда.
+
+    Здесь редкая форма: ответ на чужое сообщение внутри темы, и тогда тема
+    лежит в `reply_to_top_id`, а `reply_to_msg_id` указывает на то сообщение.
+    """
     items = await adapter(FakeTelegram(replies=fixture_replies())).search("байк", {})
     forum = next(item for item in items if item.external_id == "-1001902334455:4471")
     assert forum.url == "https://t.me/c/1902334455/4400/4471"
     assert forum.raw["topic_id"] == 4400
+
+
+async def test_topic_root_reply_is_the_common_forum_form() -> None:
+    """Частая форма: `top_id` пуст, тема — в `reply_to_msg_id`.
+
+    Живая проверка на форумной группе показала, что так приходит бо́льшая часть
+    сообщений: пост в теме отвечает прямо в её корень. Раньше фикстура знала
+    только редкий вариант с непустым `top_id`, то есть тестами был закрыт как
+    раз тот случай, которого в выдаче почти не бывает.
+    """
+    items = await adapter(FakeTelegram(replies=fixture_replies())).search("байк", {})
+    post = next(item for item in items if item.external_id == "-1001902334455:4482")
+    assert post.url == "https://t.me/c/1902334455/4400/4482"
+    assert post.raw["topic_id"] == 4400
 
 
 async def test_plain_reply_is_not_a_topic() -> None:
@@ -299,7 +320,7 @@ async def test_flood_wait_within_budget_is_waited_out() -> None:
 
     assert sleeps.pauses == [7.0]
     assert source.degraded is False
-    assert len(items) == 4
+    assert len(items) == 5
 
 
 async def test_flood_pause_grows_with_each_hit() -> None:
@@ -368,12 +389,52 @@ async def test_exhausted_budget_stops_the_walk() -> None:
 async def test_chat_that_floods_twice_is_left_alone() -> None:
     """Две попытки на чат — потолок. Ретрая в цикле нет."""
     client = FakeTelegram(replies=fixture_replies(), floods=[3, 3, 0])
-    source = adapter(client, sleep=Sleeps())
+    sleeps = Sleeps()
+    source = adapter(client, sleep=sleeps)
     items = await source.search("байк", {})
 
     assert client.queried == ["nhatrang_baraholka", "nhatrang_baraholka", -1001902334455]
     assert source.degraded is False
-    assert [item.external_id for item in items] == ["-1001902334455:4471"]
+    assert [item.external_id for item in items] == [
+        "-1001902334455:4471",
+        "-1001902334455:4482",
+    ]
+    # Пауза только перед второй попыткой. После неё попыток нет, чат всё равно
+    # бросаем — вторая пауза была бы выброшенным бюджетом остальных чатов.
+    assert sleeps.pauses == [3.0]
+
+
+async def test_last_attempt_flood_over_budget_still_degrades() -> None:
+    """Не ждём — но вывод «просят больше, чем осталось» всё равно делаем.
+
+    Пауза после второго флуда не отсыпается, однако её размер продолжает
+    говорить о состоянии аккаунта: если Telegram просит больше остатка бюджета,
+    следующий чат этот флуд только усугубит, и обход прекращается.
+    """
+    client = FakeTelegram(replies=fixture_replies(), floods=[3, 30])
+    sleeps = Sleeps()
+    source = adapter(client, budget_s=10.0, sleep=sleeps)
+    await source.search("байк", {})
+
+    assert sleeps.pauses == [3.0], "вторая пауза не отсыпается"
+    assert source.degraded is True
+    # Второй чат не тронут: с флудом на аккаунте следующий запрос его усугубит.
+    assert client.calls.count("get_messages") == 2
+
+
+async def test_second_flood_on_the_same_chat_still_raises_the_next_pause() -> None:
+    """Невыжданный флуд из счётчика не исчезает: лимит у Telegram на аккаунт.
+
+    Первый чат флудит дважды и бросается без второй паузы. Флудов при этом уже
+    два, поэтому следующий чат ждёт вчетверо дольше названного минимума, а не
+    столько же, сколько первый.
+    """
+    client = FakeTelegram(replies=fixture_replies(), floods=[5, 5, 5, 0])
+    sleeps = Sleeps()
+    source = adapter(client, sleep=sleeps)
+    await source.search("байк", {})
+
+    assert sleeps.pauses == [5.0, 20.0]
 
 
 @pytest.mark.parametrize("dead", [AuthKeyUnregisteredError, SessionRevokedError])
@@ -446,10 +507,44 @@ async def test_only_read_methods_are_called() -> None:
         client.send_message  # noqa: B018
 
 
+def read_path_modules() -> list[Path]:
+    """Файлы, из которых собран путь чтения, — по графу импортов.
+
+    Список выведен механически, а не переписан руками, и повод конкретный: у
+    голого Telethon для mypy есть любой метод (библиотека без `py.typed`), то
+    есть отправку через него не поймают ни mypy, ни ruff. Единственная защита
+    от такой правки — этот тест, а перечисленный руками список модулей
+    отставал бы от кода: новый файл на пути чтения в него просто не попадал бы.
+    """
+    root = Path(str(telegram_groups.__file__)).parent.parent
+    seen: dict[str, Path] = {}
+    queue = [telegram_groups.__name__]
+    while queue:
+        name = queue.pop()
+        if name in seen:
+            continue
+        path = root.parent / (name.replace(".", "/") + ".py")
+        if not path.is_file():
+            path = root.parent / name.replace(".", "/") / "__init__.py"
+            if not path.is_file():
+                continue
+        seen[name] = path
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+                queue.append(node.module)
+            elif isinstance(node, ast.Import):
+                queue.extend(alias.name for alias in node.names)
+    return [path for name, path in seen.items() if name.startswith("sniffer.")]
+
+
 def test_adapter_never_calls_an_outgoing_method() -> None:
     """Страховка от будущей правки: запрет держится кодом, а не памятью."""
-    for module in (telegram_groups, telegram_reference, telegram_client, chat_directory):
-        path = Path(str(module.__file__))
+    modules = read_path_modules()
+    # Четыре модуля telegram_* плюс то, что они тянут: если граф внезапно
+    # схлопнулся до одного файла, тест проверяет не то, что должен.
+    assert len(modules) >= 4, [path.name for path in modules]
+    for path in modules:
         assert not OUTGOING_CALL.search(path.read_text(encoding="utf-8")), path.name
 
 
@@ -509,7 +604,10 @@ async def test_one_broken_chat_does_not_cost_the_others() -> None:
     source = adapter(client)
     items = await source.search("байк", {})
 
-    assert [item.external_id for item in items] == ["-1001902334455:4471"]
+    assert [item.external_id for item in items] == [
+        "-1001902334455:4471",
+        "-1001902334455:4482",
+    ]
     assert source.degraded is False
 
 
@@ -544,8 +642,13 @@ def test_registry_knows_the_source() -> None:
     assert isinstance(get_source(SOURCE_NAME), TelegramGroupsSource)
 
 
-async def test_source_without_chat_registry_stays_quiet() -> None:
-    """Пока реестр не подключён, источник просто ничего не находит."""
-    source = get_source(SOURCE_NAME)
+async def test_explicitly_disabled_registry_stays_quiet() -> None:
+    """Реестр отключён намеренно — источник молчит и остаётся в плане.
+
+    Заглушка теперь подставляется руками: по умолчанию адаптер получает боевой
+    реестр из базы, и проверяет это `test_source_wiring.py`. Ровно потому, что
+    раньше значением по умолчанию была заглушка, боевой поиск находил ноль.
+    """
+    source = TelegramGroupsSource(directory=EmptyChatDirectory(), client=FakeTelegram())
     assert await source.search("байк", {}) == []
     assert source.degraded is False

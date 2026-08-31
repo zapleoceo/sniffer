@@ -7,9 +7,12 @@
 
 Четыре вещи, которые определяют этот адаптер:
 
-- **Только чтение.** Разрешённые методы перечислены в `TelegramReader`
-  (`telegram_reference`), и других у клиента нет — ни отправки, ни реакции,
-  ни отметки о прочтении. Основание: spec-v2 6.1, аккаунт с `PEER_FLOOD`.
+- **Только чтение.** Клиент виден адаптеру через `TelegramReader`
+  (`telegram_reference`): ни отправки, ни реакции, ни отметки о прочтении в
+  этом типе нет, и mypy их не пропустит. Граница держит код, который ходит
+  через протокол; голый Telethon её обходит (он без `py.typed`, для mypy это
+  `Any`), поэтому вторая половина защиты — тест, который ищет исходящие вызовы
+  по всем модулям пути чтения. Основание: spec-v2 6.1, аккаунт с `PEER_FLOOD`.
 - **Бюджет.** Не больше десяти чатов на поиск (spec-v2, 2.3) и последовательный
   обход: параллелить запросы к одному хосту значит выглядеть как атака. Свои
   40 с из 90 с плана — на ВСЕ задачи источника, а не на каждую.
@@ -32,7 +35,7 @@ from telethon.errors import AuthKeyError, FloodWaitError, UnauthorizedError
 
 from sniffer.config import Settings, get_settings
 from sniffer.sources.base import RawItem, Source, register
-from sniffer.sources.chat_directory import EmptyChatDirectory
+from sniffer.sources.chat_directory import new_directory
 from sniffer.sources.telegram_client import missing_reader_settings, new_reader
 from sniffer.sources.telegram_mapping import album_key, chats_limit, messages_limit, to_item
 from sniffer.sources.telegram_reference import (
@@ -48,6 +51,7 @@ from sniffer.sources.telegram_reference import (
 log = structlog.get_logger(__name__)
 
 ReaderFactory = Callable[[Settings], TelegramReader]
+DirectoryFactory = Callable[[], ChatDirectory]
 Sleep = Callable[[float], Awaitable[None]]
 Clock = Callable[[], float]
 
@@ -67,11 +71,18 @@ class TelegramGroupsSource(Source):
         *,
         budget_s: float = SEARCH_BUDGET_S,
         reader_factory: ReaderFactory = new_reader,
+        directory_factory: DirectoryFactory = new_directory,
         sleep: Sleep = asyncio.sleep,
         clock: Clock = monotonic,
     ) -> None:
         super().__init__()
-        self._directory = directory or EmptyChatDirectory()
+        # По умолчанию — боевой реестр, а не заглушка: адаптер создаётся
+        # реестром источников без аргументов (`get_source(name)`), и всё, что
+        # не подставлено по умолчанию, на боевом пути не появится никогда.
+        # Фабрика, а не готовый объект: значение по умолчанию вычисляется один
+        # раз при импорте модуля, и тогда `sniffer.db` подтянулся бы даже там,
+        # где базы нет.
+        self._directory = directory or directory_factory()
         self._client = client
         self._owns_client = client is None
         self._budget_s = budget_s
@@ -184,12 +195,33 @@ class TelegramGroupsSource(Source):
         # username, а не id: по имени сущность разрешается с холодной сессии,
         # по голому id — только если чат уже лежит в кэше сессии.
         entity: int | str = chat.username or chat.tg_id
-        for _ in range(MAX_ATTEMPTS_PER_CHAT):
+        for attempt in range(MAX_ATTEMPTS_PER_CHAT):
             try:
                 messages = await client.get_messages(entity, search=query, limit=limit)
             except FloodWaitError as flood:
-                if not await self._wait_out(flood, chat):
+                # Флуд считаем всегда: лимит у Telegram на аккаунт, а не на
+                # чат, и следующему чату эта немилость достанется целиком.
+                self._floods += 1
+                pause = self._pause(flood)
+                if not self._fits(pause, chat):
+                    # Telegram просит больше времени, чем у источника осталось:
+                    # это состояние аккаунта, и обход прекращается целиком.
                     return None
+                if attempt == MAX_ATTEMPTS_PER_CHAT - 1:
+                    # Попыток больше нет, и пауза перед несуществующей попыткой
+                    # — выброшенный бюджет: чат всё равно бросаем, а остальные
+                    # чаты это время не получат.
+                    log.warning(
+                        "telegram.chat_flooded_out",
+                        chat=chat.tg_id,
+                        floods=self._floods,
+                        skipped_pause_s=pause,
+                    )
+                    return None
+                log.warning(
+                    "telegram.flood_wait", chat=chat.tg_id, pause_s=pause, floods=self._floods
+                )
+                await self._sleep(pause)
                 continue
             except SESSION_DEAD as dead:
                 # Дальше идти некуда: сессию чинит владелец командой auth, а
@@ -207,7 +239,7 @@ class TelegramGroupsSource(Source):
                 )
                 return None
             return self._items(chat, messages)
-        log.warning("telegram.chat_flooded_out", chat=chat.tg_id)
+        # Недостижимо: последняя попытка возвращает результат либо `None` выше.
         return None
 
     def _items(self, chat: ChatLike, messages: Sequence[Any]) -> list[RawItem]:
@@ -225,24 +257,34 @@ class TelegramGroupsSource(Source):
             items.append(item)
         return items
 
-    async def _wait_out(self, flood: FloodWaitError, chat: ChatLike) -> bool:
-        """Переждать FloodWait. `False` — ждать дольше, чем осталось бюджета."""
-        self._floods += 1
+    def _pause(self, flood: FloodWaitError) -> float:
+        """Сколько ждать после этого FloodWait.
+
+        Первый флуд ждёт ровно столько, сколько назвал Telegram, — названный
+        минимум мы уважаем. Дальше пауза удваивается: повтор подряд означает,
+        что минимума мало.
+        """
         wait_s = max(float(getattr(flood, "seconds", 0) or 0), 1.0)
-        pause = wait_s * FLOOD_BACKOFF_BASE ** (self._floods - 1)
+        return wait_s * FLOOD_BACKOFF_BASE ** (self._floods - 1)
+
+    def _fits(self, pause: float, chat: ChatLike) -> bool:
+        """Помещается ли пауза в остаток бюджета. `False` — источник выбывает.
+
+        Проверяется и на последней попытке, где ждать мы всё равно не станем:
+        «Telegram просит больше, чем у источника осталось» — это про аккаунт, а
+        не про чат, и следующий запрос его только усугубит.
+        """
         remaining = self._left()
-        if pause > remaining:
-            self.degraded = True
-            log.warning(
-                "telegram.flood_over_budget",
-                chat=chat.tg_id,
-                pause_s=pause,
-                remaining_s=remaining,
-            )
-            return False
-        log.warning("telegram.flood_wait", chat=chat.tg_id, pause_s=pause, floods=self._floods)
-        await self._sleep(pause)
-        return True
+        if pause <= remaining:
+            return True
+        self.degraded = True
+        log.warning(
+            "telegram.flood_over_budget",
+            chat=chat.tg_id,
+            pause_s=pause,
+            remaining_s=remaining,
+        )
+        return False
 
 
 def _valid(chat: ChatLike) -> bool:
