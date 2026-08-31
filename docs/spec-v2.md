@@ -451,3 +451,8 @@ Meta запретила автоматический сбор данных в To
 - [ ] project-key в AIbroker со своим дневным cap
 - [ ] каталог `/var/www/sniffer` на Hetzner и deploy-key
 - [ ] стартовый список чатов Нячанга — 25 штук уже известны, см. память проекта
+- [x] `OWNER_CHAT_ID` владельца — заполнен; нужен и интерфейсу, и уведомлениям
+- [ ] `DASHBOARD_SESSION_SECRET` и `SECRET_ENCRYPTION_KEY` — по
+      `openssl rand -hex 32` каждый, разные ([dashboard.md](dashboard.md#3-вход--telegram-login-widget))
+- [ ] Origin Rule Cloudflare для `lbot.zapleo.com` → порт 8443 и SSL **Full**
+      для этого хоста ([deploy.md, раздел 1](deploy.md#1-где-что-живёт))
