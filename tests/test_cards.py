@@ -10,7 +10,8 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from sniffer.bot.cards import MAX_CARDS, render_card, render_cards
+from sniffer.bot.cards import render_card, render_cards
+from sniffer.config import get_settings, reload_settings
 from sniffer.sources.base import RawItem
 from sniffer.verifier.liveness import STALE_AFTER_DAYS, Liveness, assess
 
@@ -93,12 +94,25 @@ def test_title_is_escaped_and_trimmed() -> None:
     assert "…" in card
 
 
-def test_outputs_no_more_than_five_cards() -> None:
+def test_outputs_no_more_than_the_free_tier_allows() -> None:
     items = [item(external_id=str(index)) for index in range(12)]
 
     cards = render_cards(items, now=NOW)
 
-    assert cards.count("открыть оригинал") == MAX_CARDS
+    assert get_settings().max_cards == 5, "лимит бесплатного тарифа (spec-v2, 5.1)"
+    assert cards.count("открыть оригинал") == 5
+
+
+def test_card_count_is_a_setting_not_a_constant(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Платный тариф отличается значением настройки, а не правкой кода."""
+    items = [item(external_id=str(index)) for index in range(12)]
+    monkeypatch.setenv("MAX_CARDS", "2")
+    reload_settings()
+    try:
+        assert render_cards(items, now=NOW).count("открыть оригинал") == 2
+    finally:
+        monkeypatch.undo()
+        reload_settings()
 
 
 def test_naive_timestamp_does_not_crash_the_answer() -> None:

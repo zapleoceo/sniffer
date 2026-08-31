@@ -10,7 +10,15 @@ from typing import Any
 
 from sniffer.db import models
 from sniffer.domain.passport import Budget, Category, Intent, Passport, PassportStatus
-from sniffer.domain.records import Chat, Job, Listing, RawMessage, StoredPassport, User
+from sniffer.domain.records import (
+    Chat,
+    Job,
+    Listing,
+    PassportEvent,
+    RawMessage,
+    StoredPassport,
+    User,
+)
 
 
 def to_chat(row: models.Chat) -> Chat:
@@ -134,6 +142,16 @@ def to_stored_passport(row: models.Passport) -> StoredPassport:
             missing_fields=list(row.missing_fields),
             status=PassportStatus(row.status),
         ),
+    )
+
+
+def to_passport_event(row: models.PassportEvent) -> PassportEvent:
+    return PassportEvent(
+        id=row.id,
+        passport_id=row.passport_id,
+        kind=row.kind,
+        payload=dict(row.payload),
+        created_at=row.created_at,
     )
 
 

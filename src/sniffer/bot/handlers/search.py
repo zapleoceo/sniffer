@@ -1,11 +1,8 @@
-"""Первый рабочий диалог: свободный текст → паспорт → план → карточки.
+"""Точка входа диалога: сообщение или нажатие кнопки → `Conversation`.
 
-Хендлер намеренно тонкий. Всё, что он делает сам, — переводит сообщение в
-вызовы поиска и обратно в текст; ни разбора запроса, ни бюджета поиска, ни
-знания об источниках здесь нет.
-
-Клиента ведём подтверждением того, что мы поняли: поиск идёт десятки секунд, и
-молчащий бот за это время успевает выглядеть сломанным.
+Хендлер намеренно тонкий. Всё, что он делает сам, — достаёт из апдейта
+клиента и текст, отдаёт их разговору и рисует его ответы кнопками. Ни разбора
+запроса, ни выбора вопросов, ни знания об источниках здесь нет.
 """
 
 from __future__ import annotations
@@ -13,15 +10,12 @@ from __future__ import annotations
 import structlog
 from aiogram import F, Router
 from aiogram.filters import CommandStart
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 
-from sniffer.bot.cards import MAX_CARDS, render_cards
-from sniffer.domain.passport import Passport
-from sniffer.search.intake import QueryIntake
-from sniffer.search.live import run_plan
-from sniffer.search.planner import SearchPlanner
-from sniffer.search.vocabulary import city_name
-from sniffer.sources.base import RawItem, registered_sources
+from sniffer.bot.conversation import Conversation, Reply, Send
+from sniffer.bot.keyboards import AnswerCallback, FeedbackCallback, markup
+from sniffer.bot.store import Client, PassportStore
+from sniffer.domain.dialogue import Feedback
 
 log = structlog.get_logger(__name__)
 
@@ -31,14 +25,20 @@ GREETING = (
     "Я ищу частные объявления по чатам и доскам Вьетнама и приношу ссылки на оригиналы.\n\n"
     "Напишите словами, что нужно: <i>ищу скутер в Нячанге до 400 долларов</i> "
     "или <i>сниму квартиру в Нячанге до 10 млн донгов</i>.\n\n"
-    "Объявление не перепечатываю — даю ссылку на источник и честно помечаю, "
+    "Если чего-то важного не хватает, уточню парой вопросов — отвечать можно кнопкой "
+    "или словами. Объявление не перепечатываю: даю ссылку на источник и честно помечаю, "
     "если лот старый и мог быть продан."
 )
-NOTHING_FOUND = (
-    "По этому запросу ничего не нашлось. Попробуйте иначе: без марки, "
-    "с другим бюджетом или другой формулировкой."
-)
-SEARCH_FAILED = "Не смог доискать: источники не ответили. Попробуйте ещё раз через пару минут."
+
+_conversation: Conversation | None = None
+
+
+def conversation() -> Conversation:
+    """Один разговор на процесс. Состояние всё равно в базе, а не в нём."""
+    global _conversation
+    if _conversation is None:
+        _conversation = Conversation(PassportStore())
+    return _conversation
 
 
 @router.message(CommandStart())
@@ -48,45 +48,55 @@ async def start(message: Message) -> None:
 
 @router.message(F.text)
 async def search(message: Message) -> None:
-    text = (message.text or "").strip()
-    if not text:
+    client = _client(message)
+    if client is None:
         return
+    await conversation().on_text(client, message.text or "", _sender(message))
 
-    passport = await QueryIntake().parse(text)
-    await message.answer(_accepted(passport))
 
+@router.callback_query(AnswerCallback.filter())
+async def answer(callback: CallbackQuery, callback_data: AnswerCallback) -> None:
+    """Ответ кнопкой на уточняющий вопрос."""
+    await callback.answer()
+    message = callback.message
+    if not isinstance(message, Message):
+        # Сообщение старше 48 часов Telegram отдаёт недоступным — отвечать не в что.
+        return
+    await conversation().on_answer(
+        Client(callback.from_user.id, callback.from_user.username),
+        callback_data.code,
+        callback_data.value,
+        _sender(message),
+    )
+
+
+@router.callback_query(FeedbackCallback.filter())
+async def feedback(callback: CallbackQuery, callback_data: FeedbackCallback) -> None:
+    """Обратная связь на карточках: уточняет паспорт и перезапускает подбор."""
+    await callback.answer()
+    message = callback.message
+    if not isinstance(message, Message):
+        return
     try:
-        items = await _find(passport)
-    except Exception:
-        # Граница запроса: неожиданная ошибка внутри поиска не должна оставлять
-        # клиента без ответа. Трейсбек уходит в лог целиком.
-        log.exception("bot.search_failed", chat_id=message.chat.id)
-        await message.answer(SEARCH_FAILED)
+        kind = Feedback(callback_data.kind)
+    except ValueError:
+        # Кнопка из старой версии бота: молча игнорировать честнее, чем падать.
+        log.warning("bot.unknown_feedback", kind=callback_data.kind)
         return
-
-    if not items:
-        await message.answer(NOTHING_FOUND)
-        return
-    await message.answer(render_cards(items, limit=MAX_CARDS))
+    await conversation().on_feedback(
+        Client(callback.from_user.id, callback.from_user.username), kind, _sender(message)
+    )
 
 
-async def _find(passport: Passport) -> list[RawItem]:
-    sources = sorted(registered_sources())
-    plan = await SearchPlanner().plan(passport, sources)
-    log.info("bot.plan", tasks=len(plan.tasks), fallback=plan.is_fallback, sources=plan.sources())
-    return await run_plan(plan)
+def _client(message: Message) -> Client | None:
+    if message.from_user is None:
+        # Пост от имени канала: паспорт привязывать не к кому.
+        return None
+    return Client(message.from_user.id, message.from_user.username)
 
 
-def _accepted(passport: Passport) -> str:
-    """Показываем, что поняли, — это дешевле уточняющего вопроса."""
-    parts: list[str] = []
-    if passport.category:
-        parts.append(passport.category.value)
-    city = city_name(passport.city, "ru")
-    if city:
-        parts.append(city)
-    if passport.budget.max:
-        currency = passport.budget.currency.value if passport.budget.currency else ""
-        parts.append(f"до {passport.budget.max:g} {currency}".strip())
-    understood = ", ".join(parts) if parts else "запрос как есть"
-    return f"Понял: {understood}. Ищу, это занимает до минуты."
+def _sender(message: Message) -> Send:
+    async def send(reply: Reply) -> None:
+        await message.answer(reply.text, reply_markup=markup(reply))
+
+    return send

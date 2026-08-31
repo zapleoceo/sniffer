@@ -16,12 +16,10 @@ from collections.abc import Sequence
 from datetime import datetime
 from html import escape
 
+from sniffer.config import get_settings
 from sniffer.sources.base import RawItem
 from sniffer.verifier.liveness import Liveness, as_utc, assess
 
-# Пять — не техническое ограничение, а продуктовое: длинная выдача не
-# просматривается, а пролистывается (architecture.md, раздел 11).
-MAX_CARDS = 5
 TITLE_LIMIT = 90
 
 
@@ -29,9 +27,17 @@ def render_cards(
     items: Sequence[RawItem],
     *,
     now: datetime | None = None,
-    limit: int = MAX_CARDS,
+    limit: int | None = None,
 ) -> str:
-    return "\n\n".join(render_card(item, now=now) for item in items[:limit])
+    """Длина выдачи — настройка (`MAX_CARDS`), а не константа в коде.
+
+    Пять карточек это лимит бесплатного тарифа (spec-v2, 5.1) и одновременно
+    продуктовый предел: длинная выдача не просматривается, а пролистывается
+    (architecture.md, раздел 11). Тарифов ещё нет, но платный будет отличаться
+    от бесплатного значением настройки, а не веткой здесь.
+    """
+    cap = get_settings().max_cards if limit is None else limit
+    return "\n\n".join(render_card(item, now=now) for item in items[:cap])
 
 
 def render_card(item: RawItem, *, now: datetime | None = None) -> str:

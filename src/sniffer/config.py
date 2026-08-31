@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     r2_bucket: str = "sniffer-media"
 
     # Поведение
+    # Пять карточек — лимит бесплатного тарифа (spec-v2, 5.1). Тарифов ещё нет,
+    # но число правится конфигом, а не правкой кода: платный тариф отличается
+    # от бесплатного значением, а не веткой в рендере.
+    max_cards: int = 5
     live_search_max_chats: int = 10
     live_search_cache_ttl_s: int = 300
     raw_retention_days: int = 30

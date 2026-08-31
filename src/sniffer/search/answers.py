@@ -1,0 +1,98 @@
+"""Ответ на уточняющий вопрос словами вместо кнопки.
+
+Кнопки — быстрый путь, но клиент пишет «до 400» или «механика» ровно так же
+часто, как нажимает. Не понять свой же вопрос — худший способ выглядеть
+роботом, поэтому свободный ввод разбирается тем же знанием, что и первичный
+запрос (`intake_rules`), а не отдельным набором правил.
+
+Почему это `search/`, а не `domain/`: здесь знание о том, какими словами
+клиент формулирует ответ, — то же самое знание, что и в разборе запроса.
+Домен решает, какой вопрос задать и что сделать с ответом; слова разбираются
+здесь.
+"""
+
+from __future__ import annotations
+
+import re
+
+from sniffer.domain.dialogue import AnswerValue
+from sniffer.search.budget_rules import parse_budget
+from sniffer.search.intake_rules import detect_brand, detect_category
+
+# «Не важно» в любом виде. Кнопка есть, но нажимают не всегда: половина людей
+# отвечает словами, и «да пофиг» обязано означать то же, что нажатие.
+_SKIP_RE = re.compile(
+    r"\b(?:не\s*важно|неважно|не\s*принципиально|всё\s*равно|все\s*равно|пофиг"
+    r"|без\s*разницы|люб(?:ой|ая|ое|ые)|как\s*получится|покажи|показывай|давай\s*что\s*есть"
+    r"|any|whatever|skip|don'?t\s*care)\b",
+    re.IGNORECASE,
+)
+
+# Порядок значим: «полуавтомат» содержит «автомат», и проверять его надо первым.
+_TRANSMISSION_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("semi", re.compile(r"\b(?:полуавтомат\w*|semi\w*)\b", re.IGNORECASE)),
+    (
+        "automatic",
+        re.compile(r"\b(?:автомат\w*|вариатор\w*|auto\w*|xe\s?ga)\b", re.IGNORECASE),
+    ),
+    ("manual", re.compile(r"\b(?:механик\w*|механ|ручк\w*|manual|xe\s?số)\b", re.IGNORECASE)),
+)
+
+_CONDITION_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("new", re.compile(r"\b(?:нов\w*|new)\b", re.IGNORECASE)),
+    ("good", re.compile(r"\b(?:хорош\w*|отличн\w*|good|ухожен\w*)\b", re.IGNORECASE)),
+    (
+        "worn",
+        re.compile(r"\b(?:убит\w*|потр[её]пан\w*|worn|под\s*восстановлен\w*)\b", re.IGNORECASE),
+    ),
+)
+
+# Разговорные названия квартир по числу комнат. «Студия» — одна комната.
+_ROOMS_RULES: tuple[tuple[int, re.Pattern[str]], ...] = (
+    (1, re.compile(r"\b(?:студи\w*|однушк\w*|одна|одну|1)\b", re.IGNORECASE)),
+    (2, re.compile(r"\b(?:двушк\w*|две|двух\w*|2)\b", re.IGNORECASE)),
+    (3, re.compile(r"\b(?:тр[её]шк\w*|три|тр[её]х\w*|3)\b", re.IGNORECASE)),
+)
+
+
+def is_skip(text: str) -> bool:
+    """Клиент сказал «не важно» словами, а не кнопкой."""
+    return bool(_SKIP_RE.search(text))
+
+
+def interpret(field: str, text: str) -> AnswerValue | None:
+    """Слова клиента → значение поля. `None` — «это не ответ на вопрос».
+
+    `None` важнее, чем кажется: на вопрос про бюджет клиент нередко отвечает
+    новым запросом («ладно, тогда квартиру»), и принять его за сумму значит
+    потерять запрос.
+    """
+    if field == "budget.max":
+        budget = parse_budget(text)
+        return budget if budget.max else None
+    if field == "category":
+        category = detect_category(text)
+        return category.value if category else None
+    if field == "attributes.brand":
+        return detect_brand(text)
+    if field == "attributes.transmission":
+        return _match(_TRANSMISSION_RULES, text)
+    if field == "attributes.condition":
+        return _match(_CONDITION_RULES, text)
+    if field == "attributes.rooms":
+        return _rooms(text)
+    return None
+
+
+def _match(rules: tuple[tuple[str, re.Pattern[str]], ...], text: str) -> str | None:
+    for value, pattern in rules:
+        if pattern.search(text):
+            return value
+    return None
+
+
+def _rooms(text: str) -> int | None:
+    for value, pattern in _ROOMS_RULES:
+        if pattern.search(text):
+            return value
+    return None

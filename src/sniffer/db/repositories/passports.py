@@ -7,13 +7,15 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from sqlalchemy import or_, select, update
 
 from sniffer.db import models
-from sniffer.db.mappers import passport_values, to_stored_passport
+from sniffer.db.mappers import passport_values, to_passport_event, to_stored_passport
 from sniffer.db.repositories.base import Repository
 from sniffer.domain.passport import Passport
-from sniffer.domain.records import StoredPassport
+from sniffer.domain.records import PassportEvent, StoredPassport
 
 
 class PassportRepository(Repository):
@@ -65,3 +67,27 @@ class PassportRepository(Repository):
         self._session.add(row)
         await self._session.flush()
         return to_stored_passport(row)
+
+    async def add_event(
+        self, passport_id: int, kind: str, payload: dict[str, Any] | None = None
+    ) -> PassportEvent:
+        """След диалога: заданный вопрос, ответ клиента, нажатая кнопка."""
+        row = models.PassportEvent(passport_id=passport_id, kind=kind, payload=payload or {})
+        self._session.add(row)
+        await self._session.flush()
+        return to_passport_event(row)
+
+    async def list_events(self, root: int) -> list[PassportEvent]:
+        """События всей цепочки версий, в порядке появления.
+
+        Именно цепочки, а не одной версии: клиент отвечает на вопрос — версия
+        меняется, а счётчик заданных вопросов обязан продолжиться, а не
+        начаться заново.
+        """
+        rows = await self._session.scalars(
+            select(models.PassportEvent)
+            .join(models.Passport, models.Passport.id == models.PassportEvent.passport_id)
+            .where(or_(models.Passport.id == root, models.Passport.root_id == root))
+            .order_by(models.PassportEvent.id)
+        )
+        return [to_passport_event(row) for row in rows]

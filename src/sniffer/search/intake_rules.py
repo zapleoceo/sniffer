@@ -130,9 +130,9 @@ def parse_query(text: str, *, default_city: str = "") -> Passport:
 
     budget = parse_budget(query, intent=intent)
     attributes: dict[str, Any] = {}
-    brand = _BRAND_RE.search(query)
+    brand = detect_brand(query)
     if brand:
-        attributes["brand"] = brand.group(0).lower()
+        attributes["brand"] = brand
 
     known_city = city or default_city or None
     return Passport(
@@ -160,6 +160,12 @@ def detect_category(text: str) -> Category | None:
         if pattern.search(text):
             return category
     return None
+
+
+def detect_brand(text: str) -> str | None:
+    """Марка техники. Пишется одинаково на всех трёх языках рынка."""
+    found = _BRAND_RE.search(text)
+    return found.group(0).lower() if found else None
 
 
 def detect_city(text: str) -> str | None:

@@ -14,6 +14,7 @@ from decimal import Decimal
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from sniffer.bot.store import Client, PassportStore
 from sniffer.db.repositories import (
     ChatRepository,
     JobRepository,
@@ -209,6 +210,51 @@ async def test_passport_revision_keeps_history(db_session: AsyncSession) -> None
     assert current.id == second.id
     assert current.passport.budget.max == 300
     assert current.passport.districts == ["Vinh Hai"]
+
+
+async def test_events_of_the_whole_chain_come_in_order(db_session: AsyncSession) -> None:
+    """Ответ клиента меняет версию — счётчик заданных вопросов продолжается."""
+    user = await UserRepository(db_session).get_or_create(42)
+    assert user.id is not None
+
+    repo = PassportRepository(db_session)
+    first = await repo.save_new(user.id, _passport(400))
+    await repo.add_event(first.id, "question_asked", {"field": "budget.max"})
+    second = await repo.save_revision(first, _passport(300))
+    await repo.add_event(second.id, "user_message", {"field": "budget.max", "text": "до 300"})
+    await db_session.commit()
+
+    events = await repo.list_events(first.id)
+    assert [(event.kind, event.payload.get("field")) for event in events] == [
+        ("question_asked", "budget.max"),
+        ("user_message", "budget.max"),
+    ]
+
+
+async def test_dialogue_state_is_read_back_after_a_restart(db_engine: AsyncEngine) -> None:
+    """Начатый разговор переживает перезапуск процесса.
+
+    Второй `PassportStore` со своей сессией — это и есть перезапуск бота:
+    общего с первым у них только содержимое таблиц.
+    """
+    sessions = async_sessionmaker(db_engine, expire_on_commit=False)
+
+    def scope() -> AsyncSession:
+        return sessions()
+
+    client = Client(tg_user_id=42, username="dima")
+    before = PassportStore(scope)
+    dialogue = await before.load(client)
+    dialogue = await before.start(dialogue, _passport(400))
+    await before.note(dialogue, kind="question_asked", payload={"field": "budget.max"})
+    assert dialogue.passport is not None
+
+    resumed = await PassportStore(scope).load(client)
+
+    assert resumed.passport is not None
+    assert resumed.passport.id == dialogue.passport.id
+    assert resumed.state.pending == "budget.max"
+    assert resumed.state.asked == ("budget.max",)
 
 
 # ── очередь ─────────────────────────────────────────────────────────────────

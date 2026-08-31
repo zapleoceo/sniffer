@@ -160,7 +160,10 @@ CREATE INDEX IF NOT EXISTS passports_root_idx ON passports (root_id, version DES
 CREATE TABLE IF NOT EXISTS passport_events (
     id           BIGSERIAL PRIMARY KEY,
     passport_id  BIGINT      NOT NULL REFERENCES passports(id) ON DELETE CASCADE,
-    kind         TEXT        NOT NULL,   -- user_message | feedback | agent_infer | manual_edit
+    -- user_message | feedback | agent_infer | manual_edit | question_asked
+    -- question_asked — не правка паспорта, а след диалога: из него собирается
+    -- счётчик заданных вопросов, который обязан пережить перезапуск бота.
+    kind         TEXT        NOT NULL,
     payload      JSONB       NOT NULL DEFAULT '{}',
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );

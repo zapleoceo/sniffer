@@ -125,6 +125,23 @@ class StoredPassport:
 
 
 @dataclass(frozen=True, slots=True)
+class PassportEvent:
+    """Что произошло с паспортом: вопрос агента, ответ клиента, обратная связь.
+
+    Заодно это и состояние диалога: сколько вопросов уже задано и ждём ли мы
+    ответ, выводится из этого лога, а не хранится отдельно. Отдельная колонка
+    рано или поздно разошлась бы с историей, а история нужна и без диалога —
+    объяснить клиенту, почему выдача изменилась.
+    """
+
+    passport_id: int
+    kind: str
+    payload: dict[str, Any] = field(default_factory=dict)
+    created_at: datetime | None = None
+    id: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class Job:
     """Задача внутренней очереди."""
 
