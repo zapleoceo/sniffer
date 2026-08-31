@@ -1,105 +1,49 @@
 """Разовая интерактивная авторизация юзербота: выдаёт `StringSession`.
 
-Нужна ровно один раз на аккаунт. Telethon умеет хранить сессию файлом, но
-файл не переживает пересоздание контейнера, поэтому владелец получает строку и
-кладёт её в `.env` как `TG_SESSION` — дальше коллектор стартует без вопросов.
+Нужна ровно один раз на аккаунт. Telethon умеет хранить сессию файлом своего
+формата, но такой файл не переживает пересоздание контейнера, поэтому владелец
+получает строку и кладёт её в `.env` как `TG_SESSION`.
 
-**Строка сессии — это полный доступ к аккаунту, не хуже пароля.** Поэтому она
-здесь нигде не логируется: ни через structlog, ни через `logging`, ни в тексте
-исключения. Единственный её выход наружу — одна строка в stdout. Подсказки и
-приглашения ввода идут в stderr, так что `... auth 2>/dev/null` даёт ровно
-строку сессии и ничего больше.
+**Строка сессии равносильна паролю от аккаунта, поэтому в stdout её нет:**
+весь вывод контейнера забирает докеровский `json-file`. Сессия уходит в файл с
+правами 0600, наружу — только путь к нему; где именно и почему — `session_file`
+(там же сказано, что файл промежуточный, а целевое место — БД).
 
-Юзербот только читает (CLAUDE.md, spec-v2 6.1). Из телеграм-методов здесь
-вызываются только те, без которых авторизации не существует: `connect`,
-`send_code_request`, `sign_in`, `disconnect`. Их список зафиксирован в
-протоколе `TelegramLike` — добавить сюда отправку сообщения молча не выйдет.
+Юзербот только читает (CLAUDE.md, spec-v2 6.1). Список доступных методов
+Telegram и то, как аккаунт подписан в «Устройствах», — в `client`.
 """
 
 from __future__ import annotations
 
 import asyncio
-import sys
-from collections.abc import Callable
-from dataclasses import dataclass
-from getpass import getpass
-from typing import Protocol
+import os
+from pathlib import Path
 
 from telethon.errors import RPCError, SessionPasswordNeededError
 
+from sniffer.collector.client import ClientFactory, TelegramLike, new_client
+from sniffer.collector.console import Console, NoTerminalError
+from sniffer.collector.session_file import (
+    DEFAULT_SESSION_FILE,
+    why_cannot_write,
+    write_session,
+)
 from sniffer.config import Settings, get_settings
 
 EXIT_OK = 0
 EXIT_NOT_CONFIGURED = 2
 EXIT_TELEGRAM_REFUSED = 3
+EXIT_NETWORK = 4
+EXIT_NO_OUTPUT_FILE = 5
+EXIT_NO_TERMINAL = 6
+# 128 + SIGINT — то, что оболочка ожидает увидеть после Ctrl+C.
+EXIT_INTERRUPTED = 130
 
 # Код подтверждения Telegram присылает СООБЩЕНИЕМ В САМ TELEGRAM, а не в SMS.
 # Без этой подсказки владелец полминуты смотрит в телефон и ждёт эсэмэску,
 # которой не будет.
 CODE_PROMPT = "Код подтверждения (придёт сообщением в Telegram, не в SMS): "
 PASSWORD_PROMPT = "Пароль двухфакторной защиты (ввод не отображается): "
-
-
-class SessionLike(Protocol):
-    """Хранилище сессии Telethon в той части, которой мы пользуемся."""
-
-    def save(self) -> str: ...
-
-
-class TelegramLike(Protocol):
-    """Ровно те методы Telethon, которые нужны для входа. Больше — нельзя."""
-
-    # Свойство, а не поле: изменяемый атрибут в протоколе инвариантен, и
-    # тогда ни один клиент со своим типом сессии в него не укладывается.
-    @property
-    def session(self) -> SessionLike: ...
-
-    async def connect(self) -> None: ...
-
-    async def disconnect(self) -> None: ...
-
-    async def send_code_request(self, phone: str) -> object: ...
-
-    async def sign_in(
-        self,
-        phone: str | None = ...,
-        code: str | None = ...,
-        *,
-        password: str | None = ...,
-    ) -> object: ...
-
-
-ClientFactory = Callable[[int, str], TelegramLike]
-
-
-def _new_client(api_id: int, api_hash: str) -> TelegramLike:
-    """Импорт внутри функции: тестам Telethon-клиент не нужен вовсе."""
-    from telethon import TelegramClient
-    from telethon.sessions import StringSession
-
-    client: TelegramLike = TelegramClient(StringSession(), api_id, api_hash)
-    return client
-
-
-def _say(text: str) -> None:
-    print(text, file=sys.stderr)
-
-
-def _ask(prompt: str) -> str:
-    # Приглашение — в stderr, иначе оно смешается со строкой сессии в stdout.
-    print(prompt, file=sys.stderr, end="", flush=True)
-    return input().strip()
-
-
-@dataclass(slots=True, frozen=True)
-class Console:
-    """Ввод-вывод команды одним объектом — чтобы тест не трогал терминал."""
-
-    say: Callable[[str], None] = _say
-    ask: Callable[[str], str] = _ask
-    # getpass сам печатает приглашение в stderr и гасит эхо: пароль
-    # двухфакторной защиты не должен оставаться в истории терминала.
-    ask_secret: Callable[[str], str] = getpass
 
 
 def missing_auth_settings(settings: Settings) -> list[str]:
@@ -115,11 +59,26 @@ def missing_auth_settings(settings: Settings) -> list[str]:
     return [name for name, filled in required.items() if not filled]
 
 
+async def _close_quietly(client: TelegramLike, console: Console) -> None:
+    """Закрытие соединения не вправе испортить уже полученную сессию.
+
+    Исключение из `finally` заменяет собой возвращаемое значение: оборвалась
+    сеть на `disconnect` — и владелец, уже прошедший код и двухфакторный
+    пароль, получает трейсбек вместо строки, а на аккаунте висит созданная
+    авторизация. Поэтому здесь широкий `except`: ошибку показываем, но ронять
+    ею результат нельзя.
+    """
+    try:
+        await client.disconnect()
+    except Exception as err:
+        console.say(f"Соединение закрылось с ошибкой ({type(err).__name__}); на сессию не влияет.")
+
+
 async def authorize(
     settings: Settings,
     console: Console,
     *,
-    client_factory: ClientFactory = _new_client,
+    client_factory: ClientFactory = new_client,
 ) -> str:
     """Проводит вход и возвращает строку сессии. Не печатает и не логирует её."""
     phone = settings.tg_phone.strip()
@@ -134,20 +93,23 @@ async def authorize(
             # Аккаунт с включённой двухфакторной защитой: код принят, но
             # Telegram ждёт ещё и облачный пароль.
             await client.sign_in(password=console.ask_secret(PASSWORD_PROMPT))
-        return client.session.save()
+        session = client.session.save()
     finally:
-        await client.disconnect()
+        await _close_quietly(client, console)
+    return session
 
 
 def run_auth(
     settings: Settings | None = None,
     console: Console | None = None,
     *,
-    client_factory: ClientFactory = _new_client,
+    out_path: str | os.PathLike[str] | None = None,
+    client_factory: ClientFactory = new_client,
 ) -> int:
-    """Команда целиком: проверка настроек, вход, печать строки. Код возврата."""
+    """Команда целиком: проверки, вход, запись файла. Возвращает код выхода."""
     settings = settings or get_settings()
     console = console or Console()
+    path = Path(out_path or DEFAULT_SESSION_FILE)
 
     missing = missing_auth_settings(settings)
     if missing:
@@ -157,15 +119,61 @@ def run_auth(
         )
         return EXIT_NOT_CONFIGURED
 
+    if settings.tg_session.strip():
+        console.say(
+            "Внимание: TG_SESSION уже заполнен. Новая авторизация создаст ВТОРУЮ "
+            "сессию на аккаунте — старую придётся отозвать вручную "
+            "(Telegram → Настройки → Устройства)."
+        )
+
+    if not console.is_interactive():
+        # Проверяем ДО отправки кода: Telegram уже прислал бы его, а прочитать
+        # было бы некому — и на следующую попытку прилетит FloodWait. Терминал
+        # даёт `docker compose run`; `exec` без `-it` и `up` — нет.
+        console.say(
+            "Нужен интерактивный терминал: код подтверждения вводит человек. "
+            "На сервере запускайте через `docker compose run` (не `exec` и не `up`)."
+        )
+        return EXIT_NO_TERMINAL
+
+    blocked = why_cannot_write(path)
+    if blocked:
+        console.say(f"Записывать сессию некуда: {blocked}.")
+        return EXIT_NO_OUTPUT_FILE
+
     try:
         session = asyncio.run(authorize(settings, console, client_factory=client_factory))
     except RPCError as err:
-        # Печатаем класс и текст ошибки Telegram, но не трейсбек: владельцу
-        # нужно знать «код неверный» или «подождите N секунд», а не стек.
+        # Класс и текст ошибки Telegram, но не трейсбек: владельцу нужно
+        # «код неверный» или «подождите N секунд», а не стек.
         console.say(f"Telegram отказал: {type(err).__name__}: {err}")
         return EXIT_TELEGRAM_REFUSED
+    except OSError as err:
+        # Сеть и таймауты: TimeoutError с версии 3.3 — наследник OSError.
+        console.say(f"Не достучаться до Telegram: {type(err).__name__}: {err}")
+        return EXIT_NETWORK
+    except NoTerminalError as err:
+        console.say(f"Некому ввести код: {err}. Запускайте через `docker compose run`.")
+        return EXIT_NO_TERMINAL
+    except KeyboardInterrupt:
+        # Ctrl+C на интерактивной команде — обычный способ передумать.
+        console.say("Прервано, сессия не создана.")
+        return EXIT_INTERRUPTED
 
-    console.say("Строка сессии ниже. Впишите её в .env как TG_SESSION и никому не показывайте:")
-    # Единственное место, где сессия покидает процесс. В лог — никогда.
-    print(session)
+    try:
+        write_session(path, session)
+    except OSError as err:
+        # Сессию не печатаем даже здесь: докер-логгер заберёт её так же, как
+        # из любой другой строки stdout. Повтор команды создаст новую.
+        console.say(
+            f"Сессия получена, но записать её в {path} не вышло: {err}. "
+            "Повторите команду; неудачную авторизацию отзовите в «Устройствах»."
+        )
+        return EXIT_NO_OUTPUT_FILE
+
+    console.say(
+        f"Строка сессии записана в {path} (права 0600). Впишите её в .env как "
+        "TG_SESSION и удалите файл: shred -u или rm."
+    )
+    print(path)
     return EXIT_OK

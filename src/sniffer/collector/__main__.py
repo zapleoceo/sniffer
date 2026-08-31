@@ -64,9 +64,14 @@ SERVICE = Service(name=NAME, requires=missing_settings, run=run)
 
 
 def main(argv: Sequence[str]) -> int:
-    """Без аргументов — обычный процесс; `auth` — разовая авторизация."""
+    """Без аргументов — обычный процесс; `auth [файл]` — разовая авторизация.
+
+    Путь приходит аргументом, а не переменной окружения: в контейнере он
+    указывает на смонтированный каталог, и это решение места запуска, а не
+    конфигурация сервиса.
+    """
     if argv and argv[0] == AUTH_COMMAND:
-        return run_auth()
+        return run_auth(out_path=argv[1] if len(argv) > 1 else None)
     run_service(SERVICE)
     return 0
 
