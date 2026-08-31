@@ -4,88 +4,103 @@
 фолбэк строит из него готовый план. Продублировать его в обоих местах — значит
 однажды поправить только одно.
 
-Источник данных не догадки, а ручной поиск байка в Нячанге 14–17 августа 2026
-(spec-v2, раздел 7): «скутер» не находил половину лотов, «инжектор» и
-«блюкарт» находили; вьетнамцы в Telegram байки не продают вообще.
+Здесь профили источников и функции доступа; сами слова — в `market_terms`.
+
+Доступ двойной, и это не удобство, а защита: `attribute_phrases()` отдаёт слова
+для прозы, `board_attribute_phrases()` — измеренное подмножество, которое можно
+отправить в `q` источнику, ищущему полями. Одна функция на оба случая означала бы
+жаргон в запросе к структурной доске, а это не «менее точная выдача», а пустая.
+
+Профиль источника — это данные, а не ветвление. Ни планировщик, ни фолбэк не
+знают слова «chotot»: они спрашивают у профиля «принимает ли этот источник
+жаргон» и «нужен ли ему город в тексте». Новый источник — строка в
+SOURCE_PROFILES; забыли строку — работает по осторожному DEFAULT_PROFILE.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
+
 from sniffer.domain.passport import Category, Intent
+from sniffer.search.market_terms import (
+    ALL_CITY_NAMES,
+    ATTRIBUTE_TERMS,
+    BOARD_ATTRIBUTE_TERMS,
+    BOARD_QUERY_HITS,
+    BOARD_QUERY_TOTAL,
+    BOARD_SAFE_QUERIES,
+    CATEGORY_TERMS,
+    CITY_ALIASES,
+    CITY_NAMES,
+    INTENT_TERMS,
+    JARGON,
+    MARKET_LANGS,
+    LangTerms,
+)
 
-# Языки рынка Нячанга. Порядок = порядок убывания плотности объявлений.
-MARKET_LANGS: tuple[str, ...] = ("ru", "vi", "en")
 
-# На каком языке пишут продавцы конкретного источника. Русский на Chotot и
-# вьетнамский в русском чате Нячанга одинаково возвращают ноль, поэтому язык
-# выбирается по источнику, а не по языку клиента.
-SOURCE_LANGS: dict[str, tuple[str, ...]] = {
-    "telegram_groups": ("ru", "en"),
-    "telegram_discover": ("ru", "en"),
-    "chotot": ("vi",),
-    "web": ("vi", "ru"),
-    "facebook": ("vi", "en"),
+@dataclass(frozen=True, slots=True)
+class SourceProfile:
+    """Чем этот источник отличается для составителя запроса.
+
+    Три факта, и все три выведены из провалов, а не из вкуса:
+
+    `langs` — на чём пишут продавцы ИМЕННО здесь. Русский запрос к вьетнамской
+    доске возвращает ноль, вьетнамский в русском чате Нячанга — тоже ноль.
+
+    `free_text` — свободный ли это текст. В чате объявление пишут прозой, и
+    жаргон («инжектор», «блюкарт») вытаскивает лоты, которых не видно по
+    названию предмета. Структурная доска жаргона не знает: замер по Chotot —
+    «скутер» 0, «инжектор» 0, «блюкарт» 0 объявлений.
+
+    Флаг решает судьбу ВСЕГО текста, а не только жаргона. У доски `q` живёт не
+    вместо фильтров, а вместе с ними, через И: слово о свойстве гасит верный
+    фильтр в ноль (`motorbiketype=3` — 12 объявлений, он же с `q='côn tay'` —
+    ноль). Поэтому `free_text=False` означает «в `q` пускать только измеренное»,
+    и обычно это пустой `q`: отбор делают поля.
+
+    `city_in_query` — надо ли вклеивать город в текст. Источнику, который ищет
+    по всему интернету, город необходим; чату конкретного города он только
+    режет выдачу, потому что в объявлениях его не пишут.
+    """
+
+    langs: tuple[str, ...]
+    free_text: bool
+    city_in_query: bool
+
+
+# Незнакомый источник получает все языки рынка, жаргон и город: без записи в
+# профиле новый адаптер должен работать, пусть и вслепую. Осторожность здесь —
+# в сторону полноты выдачи, а не точности: пустой результат хуже шумного.
+DEFAULT_PROFILE = SourceProfile(langs=MARKET_LANGS, free_text=True, city_in_query=True)
+
+SOURCE_PROFILES: dict[str, SourceProfile] = {
+    "telegram_groups": SourceProfile(langs=("ru", "en"), free_text=True, city_in_query=False),
+    "telegram_discover": SourceProfile(langs=("ru", "en"), free_text=True, city_in_query=False),
+    # Chotot — структурная доска: тип, объём и бренд там отдельные поля, а `q`
+    # ведёт себя непредсказуемо (замер: «tay ga» 41, «xe ga» 0, «xe máy» 59,
+    # то есть столько же, сколько без запроса вообще). Отбор делают params.
+    "chotot": SourceProfile(langs=("vi",), free_text=False, city_in_query=False),
+    "web": SourceProfile(langs=("vi", "ru"), free_text=True, city_in_query=True),
+    "facebook": SourceProfile(langs=("vi", "en"), free_text=True, city_in_query=True),
 }
 
-# Существительные и жаргон предмета. Глаголы сделки живут отдельно, в
-# INTENT_TERMS: одно и то же «xe ga» ищется и в продаже, и в аренде.
-CATEGORY_TERMS: dict[Category, dict[str, tuple[str, ...]]] = {
-    Category.MOTORBIKE: {
-        "ru": ("скутер", "байк", "инжектор", "блюкарт"),
-        "vi": ("xe ga", "xe máy cũ", "xe tay ga"),
-        "en": ("scooter", "used motorbike"),
-    },
-    Category.BICYCLE: {
-        "ru": ("велосипед", "велик"),
-        "vi": ("xe đạp",),
-        "en": ("bicycle",),
-    },
-    Category.CAR: {
-        "ru": ("машина", "авто"),
-        "vi": ("ô tô cũ", "xe hơi"),
-        "en": ("used car",),
-    },
-    Category.APARTMENT: {
-        "ru": ("квартира", "апартаменты", "студия"),
-        "vi": ("căn hộ", "chung cư"),
-        "en": ("apartment", "studio"),
-    },
-    Category.ROOM: {
-        "ru": ("комната",),
-        "vi": ("phòng trọ", "phòng cho thuê"),
-        "en": ("room",),
-    },
-    Category.HOUSE: {
-        "ru": ("дом", "вилла"),
-        "vi": ("nhà nguyên căn", "biệt thự"),
-        "en": ("house", "villa"),
-    },
-}
 
-# Намерение клиента переворачивается в намерение автора объявления: клиент
-# покупает — ищем тех, кто продаёт.
-INTENT_TERMS: dict[Intent, dict[str, tuple[str, ...]]] = {
-    Intent.BUY: {"ru": ("продам",), "vi": ("bán",), "en": ("for sale",)},
-    Intent.RENT: {"ru": ("сдам",), "vi": ("cho thuê",), "en": ("for rent",)},
-    Intent.SELL: {"ru": ("куплю",), "vi": ("cần mua",), "en": ("wanted",)},
-    Intent.RENT_OUT: {"ru": ("сниму",), "vi": ("cần thuê",), "en": ("looking to rent",)},
-}
-
-# Город в паспорте нормализован (`nha_trang`), а искать надо тем написанием,
-# которым его пишут в объявлениях.
-CITY_NAMES: dict[str, dict[str, str]] = {
-    "nha_trang": {"ru": "Нячанг", "vi": "Nha Trang", "en": "Nha Trang"},
-    "da_nang": {"ru": "Дананг", "vi": "Đà Nẵng", "en": "Da Nang"},
-}
+def source_profile(source: str) -> SourceProfile:
+    return SOURCE_PROFILES.get(source, DEFAULT_PROFILE)
 
 
 def source_langs(source: str) -> tuple[str, ...]:
-    """Незнакомому источнику отдаём все языки рынка.
+    return source_profile(source).langs
 
-    Добавление источника — строка в таблице `sources`, а не правка этого файла:
-    без языка в словаре новый адаптер должен работать, пусть и вслепую.
-    """
-    return SOURCE_LANGS.get(source, MARKET_LANGS)
+
+def accepts_jargon(source: str) -> bool:
+    return source_profile(source).free_text
+
+
+def wants_city_in_query(source: str) -> bool:
+    return source_profile(source).city_in_query
 
 
 def plan_langs(sources: list[str]) -> list[str]:
@@ -106,11 +121,182 @@ def intent_terms(intent: Intent | None, lang: str) -> tuple[str, ...]:
     return INTENT_TERMS.get(intent, {}).get(lang, ())
 
 
+def jargon_terms(category: Category | None, lang: str) -> tuple[str, ...]:
+    if category is None:
+        return ()
+    return JARGON.get(category, {}).get(lang, ())
+
+
+def attribute_terms(
+    category: Category | None, attribute: str, value: object, lang: str
+) -> tuple[str, ...]:
+    """Как значение атрибута звучит на языке рынка — для ПРОЗЫ.
+
+    Булев атрибут в паспорте лежит как `True`, а в таблице ключ — строка
+    `"true"`: словарь остаётся данными и не зависит от типов паспорта.
+
+    Источнику, который ищет полями, эти слова отправлять нельзя — для него есть
+    `board_attribute_phrases()`.
+    """
+    return _terms(ATTRIBUTE_TERMS, category, attribute, value, lang)
+
+
+def attribute_phrases(
+    category: Category | None, attributes: dict[str, object], lang: str
+) -> list[str]:
+    """Слова всех заполненных атрибутов паспорта — по одному разу и по порядку."""
+    return _phrases(attribute_terms, category, attributes, lang)
+
+
+def board_attribute_terms(
+    category: Category | None, attribute: str, value: object, lang: str
+) -> tuple[str, ...]:
+    """То же, но только измеренное подмножество, безопасное как `q` у доски.
+
+    Структурная доска складывает `q` со своими фильтрами через И, поэтому слово
+    о свойстве, которое доска отбирает полем, гасит верный фильтр в ноль:
+    `motorbiketype=3` даёт 12 объявлений, а он же с `q='côn tay'` — ноль. Пустой
+    ответ здесь — норма и правильный результат замера, а не пробел в словаре.
+    """
+    return _terms(BOARD_ATTRIBUTE_TERMS, category, attribute, value, lang)
+
+
+def board_attribute_phrases(
+    category: Category | None, attributes: dict[str, object], lang: str
+) -> list[str]:
+    """Слова атрибутов, которые доске отправить измеренно безопасно."""
+    return _phrases(board_attribute_terms, category, attributes, lang)
+
+
+def board_query_hits(term: str) -> int | None:
+    """Сколько объявлений слово отдало как `q` структурной доске. None — не мерили."""
+    return BOARD_QUERY_HITS.get(term.strip().casefold())
+
+
+def is_board_safe(term: str) -> bool:
+    """Годится ли слово в `q` доски: измерено, число в границах и число СВОЁ.
+
+    Неизмеренное слово безопасным не считается — это и есть гейт против
+    «казалось бы, подходит»: цена ошибки не «выдача чуть уже», а пустота.
+
+    Третье условие добавлено по разбору «xe mới»: 8 из 59 — не ноль и не вся
+    выдача, прежним двум условиям слово удовлетворяло, а фильтром не было. Его
+    находки совпали с `q='xe'` до последнего id, «mới» отдельно отдавало все 59,
+    и все восемь были помечены б/у при запросе НОВОГО. Проверять «значит ли
+    слово то, что написано» по одному числу нельзя, зато видно механически:
+    фраза, чьё число равно числу её же измеренной части, ничего не добавляет к
+    этой части. Это и проверяется — данными той же таблицы, а не списком
+    исключений, который пришлось бы дописывать после каждого следующего случая.
+    """
+    hits = board_query_hits(term)
+    if hits is None or not 0 < hits < BOARD_QUERY_TOTAL:
+        return False
+    return borrowed_from(term) is None
+
+
+def borrowed_from(term: str) -> str | None:
+    """Измеренная часть фразы, чьё число фраза повторяет. `None` — число своё.
+
+    Возвращается сама часть, а не флаг: в логе и в тесте нужно видеть, У ЧЕГО
+    слово заняло число, иначе разбираться придётся заново.
+    """
+    hits = board_query_hits(term)
+    if hits is None:
+        return None
+    for part in _measured_parts(term):
+        if BOARD_QUERY_HITS[part] == hits:
+            return part
+    return None
+
+
+def board_query_allowed(query: str) -> bool:
+    """Можно ли отправить эту строку в `q` источнику, который ищет полями.
+
+    Список закрытый (`BOARD_SAFE_QUERIES`) и сейчас пустой: доска отбирает
+    свойства полями, а слово о свойстве с чужим значением поля даёт ноль. Гейт
+    нужен потому, что `q` приходит не только из нашего словаря — его присылает
+    модель, и её текст к доске без замера пускать нельзя.
+    """
+    return query.strip().casefold() in {
+        allowed.strip().casefold() for allowed in BOARD_SAFE_QUERIES
+    }
+
+
+def _measured_parts(term: str) -> list[str]:
+    """Собственные подфразы термина, у которых есть свой замер."""
+    words = term.strip().casefold().split()
+    whole = " ".join(words)
+    parts = []
+    for start in range(len(words)):
+        for end in range(start + 1, len(words) + 1):
+            part = " ".join(words[start:end])
+            if part != whole and part in BOARD_QUERY_HITS:
+                parts.append(part)
+    return parts
+
+
+def _terms(
+    table: dict[Category, dict[str, dict[str, LangTerms]]],
+    category: Category | None,
+    attribute: str,
+    value: object,
+    lang: str,
+) -> tuple[str, ...]:
+    if category is None or value is None:
+        return ()
+    key = str(value).strip().lower()
+    if not key:
+        return ()
+    return table.get(category, {}).get(attribute, {}).get(key, {}).get(lang, ())
+
+
+def _phrases(
+    terms: Callable[[Category | None, str, object, str], tuple[str, ...]],
+    category: Category | None,
+    attributes: dict[str, object],
+    lang: str,
+) -> list[str]:
+    phrases: list[str] = []
+    for attribute, value in attributes.items():
+        phrases += terms(category, attribute, value, lang)
+    return list(dict.fromkeys(phrases))
+
+
 def city_name(city: str | None, lang: str) -> str:
-    """Незнакомый город разворачиваем из слага: `da_lat` → `Da Lat`."""
+    """Незнакомый город разворачиваем из слага: `da_lat` → `Da Lat`.
+
+    Берётся полный справочник, а не только обслуживаемые города: назвать Хойан
+    Хойаном надо и в отказе «пока работаю только по Нячангу».
+    """
     if not city:
         return ""
-    known = CITY_NAMES.get(city)
+    known = ALL_CITY_NAMES.get(city)
     if known:
         return known.get(lang, known.get("en", city))
     return city.replace("_", " ").title()
+
+
+def city_variants(slug: str) -> tuple[str, ...]:
+    """Все написания города — этим ищут название в тексте клиента.
+
+    Слаг тоже вариант: «nha trang» клиент пишет и латиницей.
+    """
+    names = ALL_CITY_NAMES.get(slug, {})
+    return tuple(sorted({*names.values(), *CITY_ALIASES.get(slug, ()), slug.replace("_", " ")}))
+
+
+def is_served(city: str | None) -> bool:
+    """Ищем ли мы в этом городе.
+
+    Пустой город — да: его подставит `default_city`, отказывать не за что.
+    """
+    return not city or city in CITY_NAMES
+
+
+def served_cities(lang: str) -> tuple[str, ...]:
+    """Названия обслуживаемых городов — для ответа «пока работаю только по …».
+
+    Из того же словаря, что и поиск: список городов в тексте бота, набранный
+    руками, разъехался бы с реальностью на первом же новом городе.
+    """
+    return tuple(city_name(slug, lang) for slug in CITY_NAMES)

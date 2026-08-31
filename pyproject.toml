@@ -16,6 +16,15 @@ dependencies = [
     "aioboto3>=13.2",
     "tzdata>=2024.1",
     "pgvector>=0.3",
+    # Веб-интерфейс владельца: FastAPI уже в экосистеме (AIbroker, дашборд
+    # Веры), второй веб-фреймворк тащить незачем. python-multipart нужен
+    # FastAPI для form-data: без него форма переавторизации отдаёт 500.
+    "fastapi>=0.115",
+    "uvicorn>=0.32",
+    "python-multipart>=0.0.12",
+    # Fernet для строки сессии юзербота в БД. Единственный секрет проекта,
+    # который лежит в хранилище, — и лежать он должен зашифрованным.
+    "cryptography>=43.0",
 ]
 
 [project.optional-dependencies]

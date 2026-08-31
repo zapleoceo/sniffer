@@ -12,6 +12,10 @@ from sniffer.db.mappers import to_user
 from sniffer.db.repositories.base import Repository
 from sniffer.domain.records import User
 
+# Дашборд — страница для одного человека, но список клиентов растёт. Потолок
+# нужен, чтобы через год страница не начала тянуть всю таблицу.
+PAGE_LIMIT = 200
+
 
 class UserRepository(Repository):
     async def get_by_tg_id(self, tg_user_id: int) -> User | None:
@@ -19,6 +23,19 @@ class UserRepository(Repository):
             select(models.User).where(models.User.tg_user_id == tg_user_id)
         )
         return to_user(row) if row is not None else None
+
+    async def get(self, user_id: int) -> User | None:
+        row = await self._session.get(models.User, user_id)
+        return to_user(row) if row is not None else None
+
+    async def recent(self, *, limit: int = PAGE_LIMIT) -> list[User]:
+        """Клиенты, свежие сверху. Для таблицы пользователей в дашборде."""
+        rows = await self._session.scalars(
+            select(models.User)
+            .order_by(models.User.created_at.desc(), models.User.id.desc())
+            .limit(min(limit, PAGE_LIMIT))
+        )
+        return [to_user(row) for row in rows]
 
     async def get_or_create(
         self, tg_user_id: int, *, username: str | None = None, lang: str = "ru"

@@ -12,6 +12,8 @@ GIN-индексами и `vector(1024)` в декларативных моде�
 
 Разбиение по модулям повторяет разделы самого DDL: источники, разведка чатов,
 предложения, клиенты и паспорта, подписки и доставка, очередь.
+Разбиение по модулям повторяет разделы самого DDL: источники, предложения,
+клиенты и паспорта, подписки и доставка, очередь, наблюдаемость и сессии.
 """
 
 from sniffer.db.models.base import EMBEDDING_DIM, Base, BigIdMixin
@@ -20,16 +22,25 @@ from sniffer.db.models.delivery import Notification, Outbox, Subscription
 from sniffer.db.models.discovery import ChatCandidate, ChatJoinEvent, ChatReject
 from sniffer.db.models.jobs import Job
 from sniffer.db.models.listings import Listing, ListingMedia
+from sniffer.db.models.observability import (
+    BrokerCall,
+    ClientRequest,
+    DialogMessage,
+    TelegramSession,
+)
 from sniffer.db.models.sources import Chat, RawMessage, Seller
 
 __all__ = [
     "EMBEDDING_DIM",
     "Base",
     "BigIdMixin",
+    "BrokerCall",
     "Chat",
     "ChatCandidate",
     "ChatJoinEvent",
     "ChatReject",
+    "ClientRequest",
+    "DialogMessage",
     "Job",
     "Listing",
     "ListingMedia",
@@ -40,5 +51,6 @@ __all__ = [
     "RawMessage",
     "Seller",
     "Subscription",
+    "TelegramSession",
     "User",
 ]

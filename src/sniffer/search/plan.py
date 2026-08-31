@@ -11,9 +11,13 @@ from __future__ import annotations
 from collections.abc import Collection, Mapping, Sequence
 from typing import Any
 
+import structlog
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from sniffer.domain.passport import Passport
+from sniffer.search.vocabulary import board_query_allowed, source_profile
+
+log = structlog.get_logger(__name__)
 
 # spec-v2, раздел 2.3: свобода источников не означает свободу расходов.
 MAX_TASKS = 12
@@ -45,13 +49,15 @@ class SearchTask(BaseModel):
 
     @field_validator("query")
     @classmethod
-    def _query_filled(cls, value: str) -> str:
-        stripped = " ".join(value.split())
-        if not stripped:
-            raise ValueError("пустой запрос")
+    def _normalise_query(cls, value: str) -> str:
+        # Пустой запрос — законная задача для источника, который ищет полями:
+        # `q` складывается там с фильтрами через И, и слово о свойстве гасит
+        # верный фильтр в ноль (spec-v2 4.1.1). Осмысленность пустоты проверяет
+        # `parse_tasks` — она знает источник, а модель `SearchTask` не знает.
+        #
         # Модель иногда выдаёт вместо запроса пересказ объявления. Источники на
         # такое отвечают нулём совпадений, поэтому режем по длине.
-        return stripped[:MAX_QUERY_LEN]
+        return " ".join(value.split())[:MAX_QUERY_LEN]
 
     @field_validator("lang")
     @classmethod
@@ -110,13 +116,43 @@ def context_params(passport: Passport) -> dict[str, Any]:
     Город намеренно не вклеивается в текст запроса: в чате Нячанга слово
     «Нячанг» в объявлениях не пишут, и в поисковой строке оно только режет
     выдачу. Адаптеру, которому город нужен, он приезжает параметром.
+
+    Атрибуты и бюджет едут в НЕЙТРАЛЬНОМ виде — как их сформулировал паспорт, а
+    не как их называет источник. Перевод в чужие имена полей делает адаптер:
+    `transmission=automatic` становится `motorbiketype=1` внутри Chotot, а
+    планировщик про такое поле не знает и знать не должен. Иначе каждый новый
+    источник правил бы планировщик, а это ровно то, что здесь запрещено.
+
+    Едет всё, что заполнено, а не только то, что кто-то умеет отбирать: адаптер
+    берёт понятное и молча игнорирует остальное.
     """
     params: dict[str, Any] = {}
     if passport.city:
         params["city"] = passport.city
     if passport.category:
         params["category"] = passport.category.value
+    attributes = {
+        key: value for key, value in passport.attributes.items() if value not in (None, "", [], {})
+    }
+    if attributes:
+        params["attributes"] = attributes
+    budget = _budget_params(passport)
+    if budget:
+        params["budget"] = budget
     return params
+
+
+def _budget_params(passport: Passport) -> dict[str, Any]:
+    """Бюджет без валюты бесполезен: «до 400» это и доллары, и донги."""
+    budget = passport.budget
+    if budget.currency is None or (budget.min is None and budget.max is None):
+        return {}
+    return {
+        "min": budget.min,
+        "max": budget.max,
+        "currency": budget.currency.value,
+        "period": budget.period.value,
+    }
 
 
 def parse_tasks(raw: Any, available: Collection[str]) -> list[SearchTask]:
@@ -138,11 +174,29 @@ def parse_tasks(raw: Any, available: Collection[str]) -> list[SearchTask]:
         source = str(item.get("source", "")).strip()
         if source not in known:
             continue
+        profile = source_profile(source)
+        query = str(item.get("query", ""))
+        if not query.strip() and profile.free_text:
+            # Источнику, который ищет только текстом, пустой запрос искать
+            # нечем — задача уйдёт впустую. Источнику, который ищет полями,
+            # пустой `q` наоборот лучший запрос: фильтры отбирают, а лишнее
+            # слово гасит их в ноль (spec-v2 4.1.1).
+            continue
+        if query.strip() and not profile.free_text and not board_query_allowed(query):
+            # Источник ищет полями, а модель прислала слово. Слово о свойстве
+            # складывается с фильтром через И и гасит его в НОЛЬ: замер —
+            # `motorbiketype=3` даёт 12 объявлений, он же с `q='côn tay'` ноль.
+            # Выбрасываем текст, а не задачу: фильтры остаются и отбирают, а
+            # клиент получает 12 объявлений вместо пустоты, прочитанной как «на
+            # рынке нет». Разрешены только строки с замером (BOARD_SAFE_QUERIES),
+            # и сейчас там пусто — ни одно слово замер не прошло.
+            log.warning("plan.board_query_dropped", source=source, query=query.strip())
+            query = ""
         try:
             tasks.append(
                 SearchTask(
                     source=source,
-                    query=str(item.get("query", "")),
+                    query=query,
                     lang=str(item.get("lang", DEFAULT_LANG)),
                     params=_as_params(item.get("params")),
                     priority=_as_priority(item.get("priority")),

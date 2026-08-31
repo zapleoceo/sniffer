@@ -146,6 +146,13 @@ FIELD_INFORMATIVENESS: dict[Category, dict[str, float]] = {
 
 MAX_CLARIFYING_QUESTIONS = 3
 
+# Обратная связь на карточках вправе спросить на один вопрос больше: три —
+# защита от допроса ДО выдачи, а здесь клиент сам нажал кнопку и ждёт
+# уточнения. Потолок абсолютный, а не «на один больше уже заданных»: иначе
+# каждое нажатие поднимало бы его ещё на один, и правило превратилось бы в
+# «сколько нажмёшь, столько и спросим».
+MAX_FEEDBACK_QUESTIONS = MAX_CLARIFYING_QUESTIONS + 1
+
 
 def next_questions(passport: Passport, limit: int = MAX_CLARIFYING_QUESTIONS) -> list[str]:
     """Какие поля спросить: только те, что реально сужают выдачу.
@@ -159,12 +166,13 @@ def next_questions(passport: Passport, limit: int = MAX_CLARIFYING_QUESTIONS) ->
         return ["category"]
 
     weights = FIELD_INFORMATIVENESS.get(passport.category, {})
-    unfilled = [field for field in weights if not _has_value(passport, field)]
+    unfilled = [field for field in weights if not has_value(passport, field)]
     unfilled.sort(key=lambda field: weights[field], reverse=True)
     return unfilled[:limit]
 
 
-def _has_value(passport: Passport, path: str) -> bool:
+def has_value(passport: Passport, path: str) -> bool:
+    """Заполнено ли поле по пути вида `budget.max` / `attributes.transmission`."""
     head, _, tail = path.partition(".")
     value = getattr(passport, head, None)
     if tail:

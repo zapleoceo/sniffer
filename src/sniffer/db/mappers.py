@@ -10,7 +10,19 @@ from typing import Any
 
 from sniffer.db import models
 from sniffer.domain.passport import Budget, Category, Intent, Passport, PassportStatus
-from sniffer.domain.records import Chat, Job, Listing, RawMessage, StoredPassport, User
+from sniffer.domain.records import (
+    BrokerCall,
+    Chat,
+    ClientRequest,
+    DialogMessage,
+    Job,
+    Listing,
+    PassportEvent,
+    RawMessage,
+    SessionState,
+    StoredPassport,
+    User,
+)
 
 
 def to_chat(row: models.Chat) -> Chat:
@@ -134,6 +146,98 @@ def to_stored_passport(row: models.Passport) -> StoredPassport:
             missing_fields=list(row.missing_fields),
             status=PassportStatus(row.status),
         ),
+    )
+
+
+def to_passport_event(row: models.PassportEvent) -> PassportEvent:
+    return PassportEvent(
+        id=row.id,
+        passport_id=row.passport_id,
+        kind=row.kind,
+        payload=dict(row.payload),
+        created_at=row.created_at,
+    )
+
+
+def to_client_request(row: models.ClientRequest) -> ClientRequest:
+    return ClientRequest(
+        id=row.id,
+        user_id=row.user_id,
+        raw_query=row.raw_query,
+        status=row.status,
+        passport_id=row.passport_id,
+        # Значения этапов — миллисекунды. В JSONB могло приехать что угодно,
+        # поэтому приводим здесь: дашборд обязан считать сумму, а не спорить о
+        # типе на строке из базы.
+        stages={str(key): int(value) for key, value in dict(row.stages).items()},
+        plan_fallback=row.plan_fallback,
+        sources=list(row.sources),
+        result_count=row.result_count,
+        error=row.error,
+        started_at=row.started_at,
+        finished_at=row.finished_at,
+        duration_ms=row.duration_ms,
+    )
+
+
+def to_dialog_message(row: models.DialogMessage) -> DialogMessage:
+    return DialogMessage(
+        id=row.id,
+        user_id=row.user_id,
+        direction=row.direction,
+        text=row.text,
+        request_id=row.request_id,
+        created_at=row.created_at,
+    )
+
+
+def to_broker_call(row: models.BrokerCall) -> BrokerCall:
+    return BrokerCall(
+        id=row.id,
+        request_id=row.request_id,
+        broker_request_id=row.broker_request_id,
+        capability=row.capability,
+        provider=row.provider,
+        model=row.model,
+        tokens_in=row.tokens_in,
+        tokens_out=row.tokens_out,
+        cost_usd=row.cost_usd,
+        latency_ms=row.latency_ms,
+        created_at=row.created_at,
+    )
+
+
+def broker_call_values(call: BrokerCall) -> dict[str, Any]:
+    """Колонки под вставку расхода. `id` выдаёт BIGSERIAL."""
+    return {
+        "request_id": call.request_id,
+        "broker_request_id": call.broker_request_id,
+        "capability": call.capability,
+        "provider": call.provider,
+        "model": call.model,
+        "tokens_in": call.tokens_in,
+        "tokens_out": call.tokens_out,
+        "cost_usd": call.cost_usd,
+        "latency_ms": call.latency_ms,
+    }
+
+
+def to_session_state(row: models.TelegramSession) -> SessionState:
+    """Состояние сессии БЕЗ шифртекста.
+
+    `session_enc` сюда не попадает намеренно: доменная запись уезжает в
+    дашборд, а строка сессии нужна только коллектору и читается отдельным
+    методом репозитория.
+    """
+    return SessionState(
+        id=row.id,
+        phone=row.phone,
+        is_active=row.is_active,
+        last_ok_at=row.last_ok_at,
+        last_error=row.last_error,
+        last_error_at=row.last_error_at,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
     )
 
 

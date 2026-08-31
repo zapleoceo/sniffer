@@ -17,6 +17,7 @@ from typing import Any
 import httpx
 import structlog
 
+from sniffer.broker.usage import UsageSink, default_usage_sink
 from sniffer.config import get_settings
 
 log = structlog.get_logger(__name__)
@@ -36,18 +37,41 @@ class BrokerCapError(BrokerError):
 
 @dataclass(slots=True)
 class BrokerResult:
+    """Ответ брокера целиком, вместе с учётными полями.
+
+    `request_id` — идентификатор строки в `usage_log` брокера. Без него связать
+    наш запрос с расходом можно только по времени, то есть неверно при
+    параллельных запросах (docs/dashboard.md). Ради него результат и расширен:
+    раньше он нёс только текст, провайдера и стоимость.
+    """
+
     text: str
     provider: str | None = None
     cost_usd: float | None = None
+    request_id: int | None = None
+    model: str | None = None
+    tokens_in: int = 0
+    tokens_out: int = 0
+    latency_ms: int | None = None
 
 
 class BrokerClient:
-    def __init__(self, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        client: httpx.AsyncClient | None = None,
+        *,
+        usage: UsageSink | None = None,
+    ) -> None:
         settings = get_settings()
         self._base_url = settings.broker_url.rstrip("/")
         self._key = settings.broker_project_key
         self._timeout_s = settings.broker_timeout_s
         self._client = client or httpx.AsyncClient(timeout=30.0)
+        # Приёмник учёта внедряется, а не создаётся здесь: клиент брокера не
+        # должен знать ни про базу, ни про репозитории — иначе его нельзя
+        # собрать в тесте без Postgres. `None` означает «учёт по умолчанию»,
+        # который сам решает, есть ли куда писать.
+        self._usage = usage
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -70,7 +94,9 @@ class BrokerClient:
             payload["response_format"] = response_format
 
         job_id = await self._submit(capability, payload)
-        return await self._poll(job_id)
+        result = await self._poll(job_id)
+        await self._account(capability, result)
+        return result
 
     async def structured(
         self,
@@ -143,6 +169,11 @@ class BrokerClient:
                     text=body.get("text", ""),
                     provider=body.get("provider"),
                     cost_usd=body.get("cost_usd"),
+                    request_id=_as_int(body.get("request_id")),
+                    model=body.get("model"),
+                    tokens_in=_as_int(body.get("tokens_in")) or 0,
+                    tokens_out=_as_int(body.get("tokens_out")) or 0,
+                    latency_ms=_as_int(body.get("latency_ms")),
                 )
             if status == "error":
                 error = str(body.get("error", ""))
@@ -156,3 +187,25 @@ class BrokerClient:
             wait_s = float(body.get("poll_after_s", wait_s))
 
         raise BrokerError(f"job {job_id} не завершился за {self._timeout_s}s")
+
+    async def _account(self, capability: str, result: BrokerResult) -> None:
+        """Записать расход. Ошибка учёта не отменяет полученный ответ.
+
+        Учёт — служебная запись, а ответ модели уже оплачен: падать здесь
+        значило бы выбрасывать то, за что заплатили, из-за недоступной базы.
+        Поэтому ошибка идёт в лог, а не наружу.
+        """
+        sink = self._usage if self._usage is not None else default_usage_sink
+        try:
+            await sink(capability, result)
+        # Широкий except намеренно: см. докстринг — ответ уже оплачен.
+        except Exception as exc:
+            log.warning("broker.usage_not_recorded", kind=type(exc).__name__, error=str(exc))
+
+
+def _as_int(value: Any) -> int | None:
+    """Число из ответа брокера. Провайдеры присылают то `12`, то `"12"`."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

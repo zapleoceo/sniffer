@@ -9,6 +9,9 @@ __pycache__/
 htmlcov/
 *.session
 *.session-journal
+# Промежуточный файл от `python -m sniffer.collector auth`: внутри строка,
+# равносильная паролю от аккаунта. Удаляется сразу после переноса в .env.
+tg_session.txt
 dist/
 build/
 *.egg-info/
@@ -16,3 +19,6 @@ build/
 # Рабочие каталоги агентов: это git-worktree, а не файлы проекта.
 # Попали в индекс один раз через `git add -A` — гейт от повтора.
 .claude/worktrees/
+
+# Телеметрия процесса: токены и время сабагентов, не код
+docs/tasks/*.agent-metrics.tsv

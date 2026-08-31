@@ -4,12 +4,18 @@
 настроек нет» — это не то же самое, что «как искать по чатам», и меняются эти
 две вещи по разным поводам. Реестр чатов живёт по соседству, в
 `chat_directory.py`.
+
+Подпись клиента берётся из `sniffer.telegram_identity` — та же, что у разовой
+команды `auth`. Разойдись они, и Telegram покажет в «Устройствах» ВТОРУЮ строку
+на одну и ту же сессию: список устройств — это пара (auth key, подпись
+клиента), а не только ключ.
 """
 
 from __future__ import annotations
 
 from sniffer.config import Settings
 from sniffer.sources.telegram_reference import TelegramReader
+from sniffer.telegram_identity import IDENTITY
 
 
 def new_reader(settings: Settings) -> TelegramReader:
@@ -28,6 +34,7 @@ def new_reader(settings: Settings) -> TelegramReader:
         settings.tg_api_id,
         settings.tg_api_hash,
         flood_sleep_threshold=0,
+        **IDENTITY,
     )
     return client
 

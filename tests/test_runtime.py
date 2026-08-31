@@ -16,6 +16,7 @@ from structlog.testing import capture_logs
 from sniffer.bot import app as bot_app
 from sniffer.collector import __main__ as collector_main
 from sniffer.config import Settings
+from sniffer.dashboard import __main__ as dashboard_main
 from sniffer.notifier import __main__ as notifier_main
 from sniffer.runtime.service import Service, idle_loop, serve, sleep_or_stop
 from sniffer.worker import __main__ as worker_main
@@ -161,6 +162,28 @@ async def test_sleep_is_interrupted_by_stop() -> None:
         # У воркера обязательных секретов нет: без базы он просто не найдёт
         # задач, и это не повод не запускаться.
         (worker_main.SERVICE, Settings(), []),
+        # Дашборд без секретов не падает, а ждёт: контейнер в crash-loop
+        # выглядел бы как сломанный деплой, хотя не заведён `.env`. Имена те же,
+        # что проверяет вход, — один источник правды на процесс и на страницу.
+        (
+            dashboard_main.SERVICE,
+            Settings(bot_token="", dashboard_session_secret="", owner_chat_id=0),
+            ["BOT_TOKEN", "DASHBOARD_SESSION_SECRET", "OWNER_CHAT_ID"],
+        ),
+        (
+            dashboard_main.SERVICE,
+            Settings(bot_token="123:AA", dashboard_session_secret="secret", owner_chat_id=0),
+            ["OWNER_CHAT_ID"],
+        ),
+        (
+            dashboard_main.SERVICE,
+            Settings(
+                bot_token="123:AA",
+                dashboard_session_secret="secret",
+                owner_chat_id=169510539,
+            ),
+            [],
+        ),
     ],
     ids=[
         "bot_no_token",
@@ -171,6 +194,9 @@ async def test_sleep_is_interrupted_by_stop() -> None:
         "collector_no_session",
         "collector_ready",
         "worker_always_ready",
+        "dashboard_empty",
+        "dashboard_no_owner",
+        "dashboard_ready",
     ],
 )
 def test_each_process_names_what_it_misses(
@@ -183,10 +209,13 @@ def test_each_process_names_what_it_misses(
 
 
 def test_every_compose_command_has_an_entry_point() -> None:
-    """docker-compose запускает четыре модуля — все четыре обязаны существовать."""
+    """docker-compose запускает пять модулей — все пять обязаны существовать.
+
+    Список сверен с `command:` в `docker-compose.yml`: пятым стал `dashboard`.
+    """
     from importlib.util import find_spec
 
-    for process in ("bot", "collector", "worker", "notifier"):
+    for process in ("bot", "collector", "worker", "notifier", "dashboard"):
         assert find_spec(f"sniffer.{process}.__main__") is not None
 
 
