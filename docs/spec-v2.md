@@ -1056,7 +1056,9 @@ Meta запретила автоматический сбор данных в To
 - [x] `DASHBOARD_SESSION_SECRET` и `SECRET_ENCRYPTION_KEY` — сгенерированы
       **на самом сервере** (`secrets.token_hex(32)`, разные), в чат и в браузер
       не попадали ([dashboard.md](dashboard.md#3-вход--telegram-login-widget))
-- [ ] Origin Rule Cloudflare для `lbot.zapleo.com` → порт 8443 и SSL **Full**
-      для этого хоста ([deploy.md, раздел 1](deploy.md#1-где-что-живёт))
+- [x] Cloudflare для `lbot.zapleo.com`: Origin Rule → порт 8443 и
+      Configuration Rule → SSL **Strict** (не Full: Strict проверяет сам
+      сертификат, а Origin CA в этом режиме доверен). Зонный режим не тронут —
+      соседи на открытом HTTP ([deploy.md, раздел 1](deploy.md#1-где-что-живёт))
 - [ ] источник курса USD→VND с суточным кэшем (см. 2.2: без него ценовой фильтр
       Chotot пуст в большинстве запросов, потому что клиент говорит в долларах)
