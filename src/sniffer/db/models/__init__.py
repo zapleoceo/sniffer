@@ -10,6 +10,8 @@ GIN-индексами и `vector(1024)` в декларативных моде�
 `tests/test_db_models.py` сверяет имена таблиц и колонок прямо с SQL-файлом —
 без базы, поэтому дрейф ловится на любой машине.
 
+Разбиение по модулям повторяет разделы самого DDL: источники, разведка чатов,
+предложения, клиенты и паспорта, подписки и доставка, очередь.
 Разбиение по модулям повторяет разделы самого DDL: источники, предложения,
 клиенты и паспорта, подписки и доставка, очередь, наблюдаемость и сессии.
 """
@@ -17,6 +19,7 @@ GIN-индексами и `vector(1024)` в декларативных моде�
 from sniffer.db.models.base import EMBEDDING_DIM, Base, BigIdMixin
 from sniffer.db.models.clients import Passport, PassportEvent, User
 from sniffer.db.models.delivery import Notification, Outbox, Subscription
+from sniffer.db.models.discovery import ChatCandidate, ChatJoinEvent, ChatReject
 from sniffer.db.models.jobs import Job
 from sniffer.db.models.listings import Listing, ListingMedia
 from sniffer.db.models.observability import (
@@ -33,6 +36,9 @@ __all__ = [
     "BigIdMixin",
     "BrokerCall",
     "Chat",
+    "ChatCandidate",
+    "ChatJoinEvent",
+    "ChatReject",
     "ClientRequest",
     "DialogMessage",
     "Job",
