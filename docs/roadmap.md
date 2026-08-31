@@ -62,7 +62,7 @@ merge в master → CI: quality → docs-gate → deploy
 | `pipeline/gate.py` | мультиязычный regex-гейт |
 | CI | `quality.yml`, `deploy.yml` |
 
-144 теста, все зелёные (один — проверка прав файла — идёт только под Linux).
+148 тестов, все зелёные (один — проверка прав файла — идёт только под Linux).
 
 ### Не сделано
 

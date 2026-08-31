@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sys
@@ -21,8 +22,16 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 import pytest
+import telethon.errors
 from structlog.testing import capture_logs
-from telethon.errors import FloodWaitError, SessionPasswordNeededError
+from telethon.errors import (
+    FloodWaitError,
+    InvalidChecksumError,
+    RPCError,
+    SecurityError,
+    SessionPasswordNeededError,
+    TypeNotFoundError,
+)
 
 from sniffer.collector import __main__ as collector_main
 from sniffer.collector.auth import (
@@ -32,6 +41,7 @@ from sniffer.collector.auth import (
     EXIT_NO_TERMINAL,
     EXIT_NOT_CONFIGURED,
     EXIT_OK,
+    EXIT_PROTOCOL,
     EXIT_TELEGRAM_REFUSED,
     run_auth,
 )
@@ -500,3 +510,42 @@ def test_client_introduces_itself_in_the_devices_list(monkeypatch: pytest.Monkey
     assert seen["system_version"] == client_module.SYSTEM_VERSION
     assert seen["app_version"] == client_module.APP_VERSION
     assert "SnifferBot" in client_module.DEVICE_MODEL
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        SecurityError("server sent invalid data"),
+        InvalidChecksumError(1, 2),
+        TypeNotFoundError(0xDEADBEEF, b""),
+    ],
+    ids=["security", "checksum", "unknown_tl_type"],
+)
+def test_protocol_error_is_a_documented_code_not_a_traceback(
+    tmp_path: Path,
+    failure: Exception,
+) -> None:
+    """Половина ошибок MTProto — ни `RPCError`, ни `OSError`, а прямо `Exception`.
+
+    Рассинхрон msg_id, битый пакет, несовпадение TL-схемы: на машине с чужим
+    прокси или инспекцией трафика это не экзотика. Без обработки владелец
+    получает трейсбек и код 1, которого нет в таблице кодов `deploy.md`.
+    """
+    client = FakeClient(fails_to_connect=failure)
+    recorder = Recorder()
+
+    code, out = _run(tmp_path, client, recorder)
+
+    assert code == EXIT_PROTOCOL
+    assert type(failure).__name__ in recorder.transcript
+    assert not out.exists()
+
+
+def test_protocol_handler_does_not_swallow_the_interrupt() -> None:
+    """`except Exception` не должен проглотить Ctrl+C: тот от `BaseException`."""
+    assert not issubclass(KeyboardInterrupt, Exception)
+    assert not issubclass(asyncio.CancelledError, Exception)
+    for name in ("SecurityError", "InvalidChecksumError", "TypeNotFoundError"):
+        failure = getattr(telethon.errors, name)
+        assert not issubclass(failure, RPCError), f"{name} мимо RPCError"
+        assert not issubclass(failure, OSError), f"{name} мимо OSError"

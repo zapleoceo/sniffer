@@ -36,6 +36,7 @@ EXIT_TELEGRAM_REFUSED = 3
 EXIT_NETWORK = 4
 EXIT_NO_OUTPUT_FILE = 5
 EXIT_NO_TERMINAL = 6
+EXIT_PROTOCOL = 7
 # 128 + SIGINT — то, что оболочка ожидает увидеть после Ctrl+C.
 EXIT_INTERRUPTED = 130
 
@@ -159,6 +160,20 @@ def run_auth(
         # Ctrl+C на интерактивной команде — обычный способ передумать.
         console.say("Прервано, сессия не создана.")
         return EXIT_INTERRUPTED
+    except Exception as err:
+        # Половина ошибок MTProto не наследует ни RPCError, ни OSError:
+        # SecurityError, BadMessageError, InvalidChecksumError,
+        # TypeNotFoundError, AuthKeyNotFound, MultiError, ReadCancelledError —
+        # все прямо от Exception. Это рассинхрон msg_id, битый пакет,
+        # несовпадение TL-схемы; на машине с чужим прокси или инспекцией
+        # трафика они реальны. Без этой ветки владелец получает трейсбек и
+        # код 1, которого нет в таблице кодов. KeyboardInterrupt и
+        # CancelledError сюда не попадают: они от BaseException.
+        console.say(
+            f"Неожиданная ошибка протокола: {type(err).__name__}: {err}. "
+            "Повторите; если повторяется — дело в сети или прокси между нами и Telegram."
+        )
+        return EXIT_PROTOCOL
 
     try:
         write_session(path, session)
