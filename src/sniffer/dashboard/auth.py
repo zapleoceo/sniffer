@@ -190,6 +190,11 @@ def verify_widget(data: Mapping[str, str], *, now: float | None = None) -> int:
         raise AuthError(400, "в ответе виджета нет id") from exc
 
 
+def forget_used_widget_hashes() -> None:
+    """Забыть использованные подписи. Нужно тестам между случаями."""
+    _used_widget_hashes.clear()
+
+
 def _consume_widget_hash(widget_hash: str, moment: float) -> None:
     """Один и тот же набор параметров принимается однажды."""
     for old, seen_at in list(_used_widget_hashes.items()):
