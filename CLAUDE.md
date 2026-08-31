@@ -15,7 +15,7 @@
 - Каталог на сервере: `/var/www/sniffer` (соседи: `vera3`, `stepan2`, `aibroker`)
 - Репозиторий: https://github.com/zapleoceo/sniffer
 - БД: `docker exec sniffer-postgres psql -U sniffer -d sniffer`
-- Порт БД на хосте: **5433**, только `127.0.0.1`
+- Порт БД на хосте: **5434**, только `127.0.0.1`
 
 **Машина общая — отдельного сервера у SnifferBot нет** (2026-08-31: выделенный
 `135.181.87.140` удалён). Здесь же живут Вера, Степан и AIbroker — 27
