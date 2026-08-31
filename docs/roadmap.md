@@ -54,19 +54,20 @@ merge в master → CI: quality → docs-gate → deploy
 | `domain/passport.py` | паспорт запроса, выбор уточняющих вопросов |
 | `search/` | intake (LLM + правила), планировщик, план, бюджет, фолбэк, исполнение |
 | `sources/chotot.py` | адаптер Chotot, параметры сняты живыми запросами |
+| `sources/telegram_*.py` | адаптер telegram_groups: `messages.search` по чатам реестра, бюджет 10 чатов, последовательный обход, FloodWait с растущей паузой |
 | `bot/` | первый диалог, карточки выдачи |
 | `verifier/liveness.py` | возраст лота, пометка `stale` |
 | `pipeline/gate.py` | мультиязычный regex-гейт |
 | CI | `quality.yml`, `deploy.yml` |
 
-123 теста зелёные.
+150 тестов зелёные.
 
 ### Не сделано
 
 | Пробел | Почему это блокирует |
 |---|---|
 | `db/` пустой | SQL-схема есть, кода доступа нет; без него нет ни ингеста, ни подписок, ни квот |
-| адаптер `telegram_groups` | главный источник продукта; сейчас ищет только Chotot |
+| реестр чатов для `telegram_groups` | адаптер написан, но `ChatDirectory` подставлена заглушка: без таблицы `chats` и слоя `db` главный источник ищет по пустому списку |
 | таблицы `sources`, `listing_verifications`, `usage_counters`, `payments`, `price_history`, `users.tier` | описаны в spec-v2, в `001_init.sql` отсутствуют |
 | `collector/`, `worker/`, `notifier/` | только точки входа, тела нет |
 | `pipeline`: prefilter, extract, dedup | воронка обрывается на гейте |
@@ -86,9 +87,15 @@ merge в master → CI: quality → docs-gate → deploy
 |---|---|---|
 | `feat/db-layer` | async engine, модели, репозитории, единственное место с SQL | — |
 | `feat/schema-v2` | недостающие таблицы + `users.tier`, миграция на живой базе | `db-layer` |
-| `feat/telegram-groups-adapter` | `messages.search` по известным чатам, FloodWait с экспоненциальной паузой | — |
+| ~~`feat/telegram-groups-adapter`~~ | **сделано:** `messages.search` по известным чатам, FloodWait с экспоненциальной паузой, детали Telethon — [spec-v2, 4.4](spec-v2.md#44-telegram-группы--что-стоило-дорого-узнать) | — |
 
 `db-layer` блокирует почти всё, поэтому идёт первым и один.
+
+Адаптер `telegram_groups` слоя `db` не ждал: реестр чатов объявлен протоколом
+`ChatDirectory` и подставляется снаружи. Когда `db-layer` вольётся, `db`
+остаётся реализовать один метод `active_chats(city, limit)` — контракт и
+порядок по `search_rank` описаны в [spec-v2, 4.4](spec-v2.md#44-telegram-группы--что-стоило-дорого-узнать).
+До этого момента источник в плане живёт, но находит ноль.
 
 ### Волна 2 — воронка и проверка
 
