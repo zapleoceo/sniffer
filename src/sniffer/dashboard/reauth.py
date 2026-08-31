@@ -124,7 +124,6 @@ async def verify(flow_id: str, *, code: str = "", password: str = "") -> str:
         raise ReauthError("поток истёк — начните заново")
 
     from telethon.errors import SessionPasswordNeededError
-    from telethon.sessions import StringSession
 
     flow.touched_at = time.monotonic()
     try:
@@ -147,12 +146,25 @@ async def verify(flow_id: str, *, code: str = "", password: str = "") -> str:
 
     # Строка сессии живёт в локальной переменной до шифрования и наружу не
     # возвращается ни при каком исходе.
-    session_string = StringSession.save(flow.client.session)
+    session_string = session_string_of(flow.client)
     await flow.client.disconnect()
     _flows.pop(flow_id, None)
     await data.save_session(flow.phone, session_string)
     log.info("reauth.session_saved", phone=flow.phone)
     return flow.phone
+
+
+def session_string_of(client: Any) -> str:
+    """Строка сессии из подключённого клиента.
+
+    Отдельной функцией, чтобы тест мог подменить ровно её: без Telegram
+    настоящую сессию не получить, а проверить, что строка уходит в хранилище и
+    НЕ уходит в ответ, надо обязательно.
+    """
+    from telethon.sessions import StringSession
+
+    saved: str = StringSession.save(client.session)
+    return saved
 
 
 class NeedsPassword(Exception):
