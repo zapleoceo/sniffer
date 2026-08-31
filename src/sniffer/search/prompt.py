@@ -12,7 +12,14 @@ from typing import Any
 
 from sniffer.domain.passport import Budget, Passport, PricePeriod
 from sniffer.search.plan import LOW_PRIORITY, MAX_TASKS, TOP_PRIORITY
-from sniffer.search.vocabulary import category_terms, city_name, plan_langs, source_langs
+from sniffer.search.vocabulary import (
+    attribute_phrases,
+    category_terms,
+    city_name,
+    jargon_terms,
+    plan_langs,
+    source_profile,
+)
 
 # Паспорт хранит период машинным значением; модели читать «за once» незачем.
 _PERIOD_RU: dict[PricePeriod, str] = {
@@ -44,10 +51,22 @@ SYSTEM_PROMPT = f"""Ты планировщик поиска частных об
 источника ниже указано, на чём там пишут; если у источника несколько языков,
 покрой запросами каждый.
 
-ГОРОД в текст запроса добавляй только тем источникам, которые ищут по всему
-интернету. В чате конкретного города название города в объявлениях почти не
-пишут, и в поисковой строке оно только режет выдачу. Город и категория из
-паспорта передаются исполнителю отдельно в любом случае.
+ГОРОД в текст запроса добавляй только тем источникам, у которых ниже помечено
+«город в запрос: да» — это те, что ищут по всему интернету. В чате конкретного
+города название города в объявлениях почти не пишут, и в поисковой строке оно
+только режет выдачу. Город и категория передаются исполнителю отдельно всегда.
+
+ЖАРГОН — только источникам с пометкой «жаргон: да», то есть тем, где объявление
+написано прозой. У структурной доски объявление собрано из полей, жаргона там
+нет ни в одном: запрос «инжектор» вернул на такой доске ноль объявлений, и
+задача из бюджета плана пропала впустую.
+
+АТРИБУТЫ ПАСПОРТА В ТЕКСТ ЗАПРОСА НЕ ВПИСЫВАЙ. Коробка передач, объём двигателя,
+бренд, год и бюджет уезжают исполнителю отдельно и превращаются в фильтры того
+источника, у которого такие поля есть — это точнее любого слова. Замерено: общий
+запрос по категории мотобайков в Нячанге даёт 71% настоящих скутеров-автоматов,
+а тот же запрос со структурным фильтром типа кузова — 100%. Твоя работа — слова
+предмета; отбор по свойствам делает исполнитель.
 
 ОГРАНИЧЕНИЯ:
 - не больше {MAX_TASKS} задач: каждая стоит запроса к источнику и времени;
@@ -149,18 +168,51 @@ def _budget_line(budget: Budget) -> str:
 
 
 def _sources_block(sources: Sequence[str]) -> str:
-    return "\n".join(f"- {source}: {', '.join(source_langs(source))}" for source in sources)
+    """Профиль источника целиком: язык, жаргон, город. Всё из словаря рынка."""
+    rows = []
+    for source in sources:
+        profile = source_profile(source)
+        rows.append(
+            f"- {source}: языки {', '.join(profile.langs)}"
+            f"; жаргон: {_yes_no(profile.free_text)}"
+            f"; город в запрос: {_yes_no(profile.city_in_query)}"
+        )
+    return "\n".join(rows)
+
+
+def _yes_no(value: bool) -> str:
+    return "да" if value else "нет"
 
 
 def _vocabulary_block(passport: Passport, sources: Sequence[str]) -> str:
     """Известный словарь рынка — затравка, чтобы модель не начинала с нуля."""
-    lines = []
-    for lang in plan_langs(list(sources)):
-        terms = category_terms(passport.category, lang)
-        if terms:
-            lines.append(f"- {lang}: {', '.join(terms)}")
+    langs = plan_langs(list(sources))
+    lines = [
+        line
+        for lang in langs
+        if (line := _lang_line(f"{lang}, предмет", category_terms(passport.category, lang)))
+    ]
+    lines += [
+        line
+        for lang in langs
+        if (
+            line := _lang_line(
+                f"{lang}, свойства из паспорта",
+                tuple(attribute_phrases(passport.category, passport.attributes, lang)),
+            )
+        )
+    ]
+    lines += [
+        line
+        for lang in langs
+        if (line := _lang_line(f"{lang}, жаргон", jargon_terms(passport.category, lang)))
+    ]
     if not lines:
         return ""
     return "\n".join(
         ["Известный словарь рынка по этой категории — отправная точка, а не список:", *lines]
     )
+
+
+def _lang_line(label: str, terms: tuple[str, ...]) -> str:
+    return f"- {label}: {', '.join(terms)}" if terms else ""

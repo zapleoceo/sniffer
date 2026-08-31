@@ -206,7 +206,9 @@ def test_fallback_speaks_russian_and_vietnamese() -> None:
     queries = [task.query for task in plan.tasks]
 
     assert any("скутер" in query for query in queries)
-    assert any("xe ga" in query for query in queries)
+    # «tay ga», не «xe ga»: замер по Нячангу — «tay ga» 41 объявление,
+    # «xe ga» ровно ноль. Словарь чинён по живой выдаче, см. market_terms.
+    assert any("tay ga" in query for query in queries)
     assert {"ru", "vi"} <= {task.lang for task in plan.tasks}
     assert len(plan.tasks) <= MAX_TASKS
     # Вьетнамский идёт на Chotot: вьетнамцы в Telegram байки не продают.
@@ -242,10 +244,10 @@ def test_fallback_without_category_uses_client_words() -> None:
 def test_prompt_carries_market_vocabulary() -> None:
     prompt = build_user_prompt(make_passport(), SOURCES)
 
-    assert "xe ga" in prompt  # вьетнамский словарь виден модели
+    assert "tay ga" in prompt  # вьетнамский словарь виден модели
     assert "инжектор" in prompt
     assert "Нячанг" in prompt
-    assert "chotot: vi" in prompt
+    assert "chotot: языки vi" in prompt
     assert "motorbike" in prompt
     assert "до 400 USD разово" in prompt
 
