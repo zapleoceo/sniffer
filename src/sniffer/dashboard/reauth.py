@@ -16,6 +16,7 @@ Telethon импортируется внутри функций намеренн
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import secrets
 import time
@@ -48,6 +49,12 @@ class Flow:
     code_hash: str
     needs_password: bool = False
     touched_at: float = field(default_factory=time.monotonic)
+    # Один шаг входа за раз. Двойной клик по «Подтвердить» присылает два POST с
+    # одним flow_id, оба успевают прочитать поток — и второй попадает в
+    # `sign_in` на клиенте, который первый уже отключил. Владелец видит
+    # невнятную ошибку Telethon вместо «поток истёк». Лок лежит в самом потоке:
+    # обоим запросам он достаётся тот же самый, потому что поток один объект.
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 _flows: dict[str, Flow] = {}
@@ -57,6 +64,11 @@ async def prune() -> None:
     """Забытые потоки закрываем: каждый держит открытое соединение с Telegram."""
     now = time.monotonic()
     for flow_id, flow in list(_flows.items()):
+        # Занятый поток не трогаем, даже если TTL вышел: `touched_at` обновится
+        # после того, как шаг закончится, а отключить клиент из-под работающего
+        # `sign_in` — это тот самый баг, от которого лок и поставлен.
+        if flow.lock.locked():
+            continue
         if now - flow.touched_at > FLOW_TTL_S:
             _flows.pop(flow_id, None)
             with contextlib.suppress(Exception):
@@ -123,6 +135,17 @@ async def verify(flow_id: str, *, code: str = "", password: str = "") -> str:
     if flow is None:
         raise ReauthError("поток истёк — начните заново")
 
+    async with flow.lock:
+        # Проверяем заново под локом: пока мы ждали своей очереди, предыдущий
+        # шаг мог довести вход до конца и снять поток с учёта. Работать с его
+        # клиентом уже нельзя — он отключён.
+        if _flows.get(flow_id) is not flow:
+            raise ReauthError("поток истёк — начните заново")
+        return await _verify_step(flow_id, flow, code=code, password=password)
+
+
+async def _verify_step(flow_id: str, flow: Flow, *, code: str, password: str) -> str:
+    """Один шаг входа. Вызывается только под локом потока."""
     from telethon.errors import SessionPasswordNeededError
 
     flow.touched_at = time.monotonic()

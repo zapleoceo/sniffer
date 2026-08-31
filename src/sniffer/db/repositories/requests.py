@@ -7,9 +7,8 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
-from sqlalchemy import func, select
+from sqlalchemy import Integer, cast, func, select
+from sqlalchemy.sql.elements import Cast
 
 from sniffer.db import models
 from sniffer.db.mappers import to_client_request
@@ -47,17 +46,27 @@ class ClientRequestRepository(Repository):
     ) -> ClientRequest | None:
         """Закрыть запрос. `error` не пуст — статус `failed`, а не `done`.
 
-        Длительность считаем в базе от `started_at`, а не по своему таймеру:
-        часы процесса и часы Postgres расходятся, и разъехавшись, они дают
-        отрицательное время выполнения в логе.
+        Обе точки времени берём в базе: `started_at` там и стоит, а конец
+        считает `clock_timestamp()` в самом UPDATE. Часы процесса не участвуют
+        вообще — иначе их расхождение с часами Postgres давало бы отрицательную
+        длительность, а `max(0, …)` не лечил бы её, а прятал.
         """
         row = await self._session.get(models.ClientRequest, request_id)
         if row is None:
             return None
 
-        finished = datetime.now(UTC)
-        row.finished_at = finished
-        row.duration_ms = max(0, int((finished - row.started_at).total_seconds() * 1000))
+        # `clock_timestamp()`, а не `now()`: второе возвращает время НАЧАЛА
+        # транзакции, и когда открытие с закрытием попадают в одну (тесты,
+        # короткий запрос), длительность выходила бы ровно нулём.
+        elapsed_ms = func.round(
+            func.extract("epoch", func.clock_timestamp() - models.ClientRequest.started_at) * 1000
+        )
+        # `cast` до INT обязателен: `round()` над double в Postgres остаётся
+        # double, а колонка целая. Тип выписан явно — иначе mypy выводит
+        # ожидаемый из колонки (`int | None`) и не принимает `Integer`.
+        duration: Cast[int] = cast(elapsed_ms, Integer)
+        row.finished_at = func.clock_timestamp()
+        row.duration_ms = duration
         row.status = REQUEST_FAILED if error else REQUEST_DONE
         row.error = error
         row.result_count = result_count
@@ -69,6 +78,10 @@ class ClientRequestRepository(Repository):
         if passport_id is not None:
             row.passport_id = passport_id
         await self._session.flush()
+        # Значения, посчитанные в SQL, после flush помечены устаревшими, и
+        # обычное чтение атрибута полезло бы в базу лениво — а в async это
+        # `MissingGreenlet`, а не запрос. Забираем их явно и здесь же.
+        await self._session.refresh(row, ["finished_at", "duration_ms"])
         return to_client_request(row)
 
     async def get(self, request_id: int) -> ClientRequest | None:

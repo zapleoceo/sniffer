@@ -286,6 +286,24 @@ def test_hostile_text_never_becomes_markup(owner: TestClient, path: str) -> None
     assert "&amp;" in body
 
 
+def test_table_refuses_a_raw_string_instead_of_a_cell() -> None:
+    """Забыть `esc()` в новой ячейке нельзя — таблица не примет строку.
+
+    До появления `Cell` безопасность таблицы держалась на том, что автор
+    каждого будущего вызова прочитает докстроку и вспомнит про `esc()`. Теперь
+    сырая строка не проходит: mypy ловит статически, а рантайм — падением.
+    """
+    from sniffer.dashboard import html
+
+    with pytest.raises(TypeError, match="Cell"):
+        html.table(["текст"], [[f"<td>{NASTY}</td>"]])  # type: ignore[list-item]
+
+    # А правильно собранная ячейка того же текста — проходит и экранирована.
+    rendered = html.table(["текст"], [[html.cell(NASTY)]])
+    assert "<script>" not in rendered
+    assert "&lt;script&gt;" in rendered
+
+
 # ── CSRF и переавторизация ──────────────────────────────────────────────────
 
 
@@ -474,6 +492,27 @@ def test_widget_script_source_is_allowed_by_csp(client: TestClient) -> None:
     response = client.get("/")
     csp = response.headers["content-security-policy"]
 
-    assert "script-src 'self' https://telegram.org" in csp
+    assert "script-src 'self' https://telegram.org/js/telegram-widget.js" in csp
     assert "frame-src https://oauth.telegram.org" in csp
     assert "telegram.org/js/telegram-widget.js" in response.text
+
+
+def test_csp_allows_the_widget_file_not_the_whole_telegram_origin(client: TestClient) -> None:
+    """Разрешён файл, а не origin.
+
+    `https://telegram.org` в `script-src` — это разрешение на ЛЮБОЙ скрипт,
+    который там окажется. Виджету нужен ровно один файл, его и разрешаем.
+    """
+    csp = client.get("/").headers["content-security-policy"]
+    script_src = csp.split("script-src")[1].split(";")[0]
+
+    assert "https://telegram.org/js/telegram-widget.js" in script_src
+    # Голого origin в директиве быть не должно — ни как отдельного источника,
+    # ни с завершающим слэшем.
+    sources = script_src.split()
+    assert "https://telegram.org" not in sources
+    assert "https://telegram.org/" not in sources
+
+    # И путь именно тот, что стоит в разметке страницы входа: разъехались бы —
+    # вход перестал бы работать, а тест остался бы зелёным.
+    assert 'src="https://telegram.org/js/telegram-widget.js?22"' in client.get("/").text

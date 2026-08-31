@@ -38,7 +38,10 @@ CallNext = Callable[[Request], Awaitable[Response]]
 CSP = "; ".join(
     (
         "default-src 'self'",
-        "script-src 'self' https://telegram.org",
+        # Не весь telegram.org, а ровно файл виджета: разрешённый origin — это
+        # разрешение на любой скрипт, который там когда-нибудь окажется. Путь
+        # без `?22` намеренно: CSP сверяет путь, query-строку игнорируя.
+        "script-src 'self' https://telegram.org/js/telegram-widget.js",
         # 'unsafe-inline' только для стилей: они лежат в <style> самой страницы.
         # Для скриптов inline не разрешён — там он и опасен.
         "style-src 'self' 'unsafe-inline'",

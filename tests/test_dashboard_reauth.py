@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Iterator
 from typing import Any
@@ -200,3 +201,71 @@ async def test_no_phone_anywhere_is_a_clear_message(monkeypatch: pytest.MonkeyPa
         await reauth.start("   ")
 
     assert "номер" in str(failure.value)
+
+
+class SlowClient(FakeClient):
+    """Клиент, который отпускает управление внутри `sign_in`.
+
+    Так воспроизводится двойной клик: пока первый запрос ждёт Telegram, второй
+    успевает войти в тот же поток. Настоящий Telethon ждёт сеть — здесь хватает
+    `sleep(0)`, чтобы петля отдала управление второму запросу.
+    """
+
+    async def sign_in(self, *args: Any, **kwargs: Any) -> None:
+        for _ in range(3):
+            await asyncio.sleep(0)
+        if self.disconnected:
+            # Ровно то, чем оборачивался баг: операция на отключённом клиенте.
+            raise RuntimeError("Cannot send requests while disconnected")
+        await super().sign_in(*args, **kwargs)
+
+
+async def test_double_click_does_not_sign_in_twice(
+    monkeypatch: pytest.MonkeyPatch, saved: list[tuple[str, str]]
+) -> None:
+    """Два одновременных POST с одним flow_id: вход один, ответ второму внятный.
+
+    Без лока оба запроса читали поток до того, как первый сделает `disconnect()`
+    и снимет его с учёта, и второй падал ошибкой Telethon об отключённом
+    клиенте вместо «поток истёк — начните заново».
+    """
+    client = SlowClient()
+    monkeypatch.setattr(reauth, "session_string_of", lambda _: SESSION_STRING)
+    flow_id = _flow(client)
+
+    results = await asyncio.gather(
+        reauth.verify(flow_id, code="12345"),
+        reauth.verify(flow_id, code="12345"),
+        return_exceptions=True,
+    )
+
+    ok = [item for item in results if isinstance(item, str)]
+    failures = [item for item in results if isinstance(item, BaseException)]
+    assert len(ok) == 1, f"вход обязан пройти ровно один раз, получено {results}"
+    assert len(failures) == 1
+    assert isinstance(failures[0], reauth.ReauthError)
+    assert "поток истёк" in str(failures[0]), f"второму нужен внятный ответ, а не {failures[0]}"
+    assert len(client.signed_in_with) == 1, "код нельзя предъявлять Telegram дважды"
+    assert len(saved) == 1, "сессия сохраняется один раз"
+
+
+async def test_busy_flow_survives_a_concurrent_prune() -> None:
+    """`prune` не отключает клиент из-под работающего шага.
+
+    Шаг может идти дольше TTL (Telegram отвечает не мгновенно). Сборка мусора,
+    запущенная параллельным запросом, не должна выдёргивать у него соединение.
+    """
+    client = SlowClient()
+    flow = reauth.Flow(
+        client=client,
+        phone="+84900000000",
+        code_hash="hash",
+        touched_at=time.monotonic() - reauth.FLOW_TTL_S - 10,
+    )
+    reauth._flows["busy"] = flow
+
+    async with flow.lock:
+        await reauth.prune()
+
+    assert "busy" in reauth._flows, "занятый поток не выбрасываем"
+    assert not client.disconnected, "соединение работающего шага не рвём"

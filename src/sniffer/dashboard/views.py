@@ -255,8 +255,13 @@ def _dialog(messages: list[DialogMessage]) -> str:
         [
             cell(moment(message.created_at)),
             cell("клиент" if message.direction == DIRECTION_IN else "бот"),
-            f"<td class='msg {'in' if message.direction == DIRECTION_IN else 'out'}'>"
-            f"{esc(message.text)}</td>",
+            # Реплика клиента — самый недоверенный текст на странице. Собираем
+            # её тем же `cell()`, что и остальные: своя разметка здесь означала
+            # бы своё экранирование, а его как раз и забывают.
+            cell(
+                message.text,
+                css=f"msg {'in' if message.direction == DIRECTION_IN else 'out'}",
+            ),
         ]
         for message in messages
     ]

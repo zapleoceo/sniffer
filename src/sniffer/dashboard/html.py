@@ -7,10 +7,17 @@
 Тексты объявлений и сообщения клиентов приезжают из чужих чатов и содержат что
 угодно, включая `<script>` и кавычки в атрибутах. Поэтому `esc()` экранирует и
 кавычки тоже, а собственная разметка собирается только здесь.
+
+Правило держится типом, а не памятью автора: ячейка таблицы — это `Cell`, и
+собрать её можно только через `cell()` / `num()` / `link()`, каждая из которых
+экранирует. Подсунуть в таблицу готовую строку не выйдет ни статически (ошибка
+типов), ни в рантайме (`TypeError`). Нужна ячейка со своей разметкой — добавь
+сюда функцию, которая её собирает и экранирует, а не строку в вызывающем.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from html import escape
@@ -121,31 +128,55 @@ def cards(items: list[tuple[str, object]]) -> str:
     )
 
 
-def table(headers: list[str], rows: list[list[str]]) -> str:
-    """Заголовки экранируются, ячейки — НЕТ: их готовит вызывающий.
+@dataclass(frozen=True, slots=True)
+class Cell:
+    """Готовая ячейка таблицы.
 
-    Так сделано затем, чтобы в ячейке могла быть ссылка. Ответственность на
-    вызывающем: любой текст из базы он обязан прогнать через `esc()` сам.
+    Существует ровно для того, чтобы про экранирование нельзя было забыть.
+    Раньше `table()` принимала `list[list[str]]` и честно предупреждала в
+    докстроке, что ячейки не экранирует, — но предупреждение в докстроке
+    проверяет только внимательность автора следующего вызова. Теперь ячейку
+    нельзя сделать из строки: собрать её можно лишь функциями ниже, а каждая из
+    них прогоняет содержимое через `esc()`. Забытый `esc()` стал ошибкой типов,
+    а не тихим внедрением разметки.
     """
+
+    html: str
+
+
+def table(headers: list[str], rows: list[list[Cell]]) -> str:
+    """Заголовки и ячейки экранированы: `Cell` иначе не собрать."""
     if not rows:
         return "<p class='mute'>пусто</p>"
     head = "".join(f"<th>{esc(name)}</th>" for name in headers)
-    body = "".join("<tr>" + "".join(row) + "</tr>" for row in rows)
+    body = "".join("<tr>" + "".join(_html_of(item) for item in row) + "</tr>" for row in rows)
     return f"<div class='scroll'><table><tr>{head}</tr>{body}</table></div>"
 
 
-def cell(value: object, *, css: str = "") -> str:
+def _html_of(item: Cell) -> str:
+    """Страховка на случай, если типы обойдут (`Any`, динамика, `# type: ignore`).
+
+    mypy ловит подсунутую строку статически, но дашборд показывает чужие тексты,
+    и цена промаха здесь — исполнение чужого скрипта в браузере владельца.
+    Поэтому ещё и падаем, а не рендерим сырую строку.
+    """
+    if not isinstance(item, Cell):
+        raise TypeError(f"ячейка таблицы обязана быть Cell, а не {type(item).__name__}")
+    return item.html
+
+
+def cell(value: object, *, css: str = "") -> Cell:
     """Ячейка с экранированным содержимым."""
     klass = f" class='{esc(css)}'" if css else ""
-    return f"<td{klass}>{esc(value)}</td>"
+    return Cell(f"<td{klass}>{esc(value)}</td>")
 
 
-def num(value: object) -> str:
-    return f"<td class='num'>{esc(value)}</td>"
+def num(value: object) -> Cell:
+    return Cell(f"<td class='num'>{esc(value)}</td>")
 
 
-def link(href: str, text: object) -> str:
-    return f"<td><a href='{esc(href)}'>{esc(text)}</a></td>"
+def link(href: str, text: object) -> Cell:
+    return Cell(f"<td><a href='{esc(href)}'>{esc(text)}</a></td>")
 
 
 def moment(value: datetime | None) -> str:

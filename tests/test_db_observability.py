@@ -7,12 +7,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
 import pytest
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sniffer import crypto
@@ -83,6 +86,61 @@ async def test_request_opens_running_and_closes_done(db_session: AsyncSession) -
     assert closed.stages == {"intake_ms": 1200, "plan_ms": 900, "search_ms": 8000}
     assert closed.sources == ["chotot"], "TEXT[] должен вернуться списком"
     assert closed.duration_ms is not None and closed.duration_ms >= 0
+
+
+async def test_duration_is_measured_by_the_database_not_the_process(
+    db_session: AsyncSession,
+) -> None:
+    """Обе точки времени считает Postgres — часы процесса не участвуют.
+
+    Документация обещает именно это, и обещание проверяемое: в UPDATE обязан
+    уйти `clock_timestamp()`. Пока конец считался `datetime.now()` в процессе,
+    расхождение часов давало отрицательную длительность, а `max(0, …)` её
+    заминало — в логе такой запрос выглядел мгновенным.
+    """
+    statements: list[str] = []
+
+    def record(conn: Any, cursor: Any, statement: str, *args: Any) -> None:
+        statements.append(statement)
+
+    # `AsyncSession.get_bind()` отдаёт синхронный Engine, обёрнутый асинхронным:
+    # события SQLAlchemy живут именно на нём.
+    sync_engine = db_session.get_bind()
+    event.listen(sync_engine, "before_cursor_execute", record)
+    try:
+        user = await _user(db_session)
+        repo = ClientRequestRepository(db_session)
+        opened = await repo.open(user.id or 0, "ищу байк на месяц")
+        # Настоящая пауза: длительность обязана её увидеть, а не выйти нулём.
+        await asyncio.sleep(0.06)
+        closed = await repo.finish(opened.id, stages={})
+        await db_session.commit()
+    finally:
+        event.remove(sync_engine, "before_cursor_execute", record)
+
+    assert closed is not None
+    updates = [item for item in statements if item.lstrip().upper().startswith("UPDATE")]
+    assert updates, "закрытие запроса обязано быть UPDATE-ом"
+    assert any("clock_timestamp" in item for item in updates), (
+        f"конец считает база, а не процесс; ушло: {updates}"
+    )
+
+    assert closed.duration_ms is not None
+    assert closed.duration_ms >= 50, (
+        f"пауза 60 мс обязана попасть в лог, вышло {closed.duration_ms}"
+    )
+    assert closed.finished_at is not None
+    assert closed.started_at is not None
+    stored = (closed.finished_at - closed.started_at).total_seconds() * 1000
+    # Одни часы на две точки: разница `finished_at - started_at` и посчитанная
+    # длительность обязаны совпасть. Разъехались — значит источников времени
+    # снова два. Заодно это проверка единиц: были бы микросекунды вместо
+    # миллисекунд, расхождение вышло бы в тысячу раз, а не в допуск.
+    # Верхнюю границу «не больше минуты» не ставим: под нагрузкой запрос
+    # действительно идёт секунды, и такой предел давал бы мигающий тест.
+    assert abs(stored - closed.duration_ms) < 250, (
+        f"duration_ms={closed.duration_ms} не совпал с finished_at-started_at={stored}"
+    )
 
 
 async def test_failed_request_stays_in_the_log(db_session: AsyncSession) -> None:

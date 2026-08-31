@@ -67,9 +67,9 @@ merge в master → CI: quality → docs-gate → deploy
 | `crypto.py` | Fernet для строки сессии юзербота в покое |
 | CI | `quality.yml` (с Postgres-контейнером под тесты `db/`), `deploy.yml` |
 
-284 теста зелёные без базы; ещё 34 требуют живого Postgres и идут в CI —
+291 тест зелёный без базы; ещё 35 требуют живого Postgres и идут в CI —
 локально без Docker они пропускаются по отсутствию `TEST_DATABASE_URL`.
-Итого 318.
+Итого 326.
 
 ### Не сделано
 
