@@ -28,12 +28,14 @@ from sniffer.search.market_terms import (
     BOARD_ATTRIBUTE_TERMS,
     BOARD_QUERY_HITS,
     BOARD_QUERY_TOTAL,
+    BOARD_SAFE_QUERIES,
 )
 from sniffer.search.plan import MAX_TASKS, SearchPlan, context_params, parse_tasks
 from sniffer.search.vocabulary import (
     accepts_jargon,
     attribute_phrases,
     board_attribute_phrases,
+    borrowed_from,
     category_terms,
     is_board_safe,
     source_langs,
@@ -42,6 +44,8 @@ from sniffer.search.vocabulary import (
 from sniffer.sources.chotot import build_params
 from sniffer.sources.chotot_filters import attribute_params, budget_params
 from sniffer.sources.chotot_reference import (
+    CONDITION_AD_NEW,
+    CONDITION_PARAM,
     MOTORBIKE_TYPE_AUTOMATIC,
     MOTORBIKE_TYPE_FOOTSHIFT,
     MOTORBIKE_TYPE_MANUAL,
@@ -78,7 +82,7 @@ ATTRIBUTE_PAIRS = [
 
 # Атрибуты, которые Chotot отбирает своим полем: они едут фильтром и словом не
 # дублируются (замер: `q='honda'` и `motorbikebrand=1` дают одни и те же 26).
-FILTERED_ATTRIBUTES = ("transmission", "engine_cc", "year_min", "brand")
+FILTERED_ATTRIBUTES = ("transmission", "engine_cc", "year_min", "brand", "condition")
 
 # Слова, которые замер дисквалифицировал как `q` доски. Ноль лжёт клиенту,
 # полная выдача не фильтрует ничего (spec-v2 2.2, правила 4 и 5).
@@ -468,16 +472,60 @@ def test_attribute_without_a_filter_gives_the_honest_full_output() -> None:
     assert not any(key.startswith("motorbike") for key in built)
 
 
-def test_measured_attribute_word_does_reach_the_board() -> None:
-    """Whitelist не пустой лозунг: «xe mới» замер прошло (8 из 59) и едет.
+def test_no_attribute_word_reaches_the_board_at_all() -> None:
+    """Слов о свойстве, безопасных для доски, у нас нет ни одного.
 
-    Если бы правило было «доске никогда никаких слов», этот тест был бы красным,
-    и заодно он держит живым сам путь board-слова в `q`.
+    Замер 31.08.2026 закрыл последнее: «xe mới» отдавало 8 из 59 — не ноль и не
+    всю выдачу, — а фильтром не было. Те же 8 объявлений, что по `q='xe'`, все
+    восемь помечены б/у, единственное новое не найдено. Свойства отбираются
+    полями, включая `condition` (поле `condition_ad` существует).
+    """
+    assert BOARD_ATTRIBUTE_TERMS == {}
+    assert BOARD_SAFE_QUERIES == ()
+    assert board_attribute_phrases(Category.MOTORBIKE, {"condition": "new"}, "vi") == []
+    assert "q" not in board_params({"condition": "new"})[0]
+
+
+def test_word_that_borrows_its_number_is_not_board_safe() -> None:
+    """«xe mới» отбраковано ПРАВИЛОМ, а не строкой в списке исключений.
+
+    Это и есть проверка полноты критерия: не «мы вычеркнули известное слово», а
+    «слово, повторяющее число своей же измеренной части, не проходит». Число 8
+    у «xe mới» — это число «xe», и «mới» отдельно отдаёт все 59, то есть слова
+    «новый» в запросе как будто нет. Тест намеренно берёт слово из таблицы
+    замеров, а не выдуманное: критерий должен ловить именно этот случай.
+    """
+    assert BOARD_QUERY_HITS["xe mới"] == BOARD_QUERY_HITS["xe"] == 8
+    assert borrowed_from("xe mới") == "xe"
+    assert not is_board_safe("xe mới")
+    # Число «своё» у слова, у которого измеренной части нет вовсе, — и такое
+    # слово остаётся безопасным по счёту: правило режет занятые числа, а не всё.
+    assert borrowed_from("tay ga") is None
+    assert is_board_safe("tay ga")
+
+
+def test_condition_new_goes_by_field_not_by_word() -> None:
+    """`condition=new` отбирается полем `condition_ad`, а не словом в `q`.
+
+    Замер 31.08.2026: `condition_ad=1` («Đã sử dụng») — 58 объявлений, `=2`
+    («Mới») — 1, вместе 59 без пересечений. Слово «xe mới» на этом месте давало
+    8 объявлений, все б/у, и настоящее новое среди них отсутствовало.
     """
     built = board_params({"condition": "new"})[0]
 
-    assert built["q"] == "xe mới"
-    assert board_attribute_phrases(Category.MOTORBIKE, {"condition": "new"}, "vi") == ["xe mới"]
+    assert built[CONDITION_PARAM] == CONDITION_AD_NEW
+    assert "q" not in built
+
+
+@pytest.mark.parametrize("value", ("good", "worn"))
+def test_used_gradations_get_no_condition_filter(value: str) -> None:
+    """«good» и «worn» полем не отбираются — у поля таких значений нет.
+
+    Отдать «good» как «б/у» значило бы выбросить объявление, помеченное новым,
+    хотя новый байк «отличному состоянию» удовлетворяет. Ранжирование разберёт
+    градацию лучше, чем фильтр, которого у доски нет.
+    """
+    assert CONDITION_PARAM not in board_params({"condition": value})[0]
 
 
 def test_board_whitelist_is_backed_by_a_measurement() -> None:
@@ -539,10 +587,42 @@ def test_fallback_and_model_plan_build_identical_requests(attributes: dict[str, 
 
     assert chotot_model.params == chotot_fallback.params
     model_request = build_params(chotot_model.query, chotot_model.params)
-    # Модель прислала пустой текст, фолбэк мог добавить измеренное слово —
-    # структурная часть запроса обязана совпасть до последнего поля.
     fallback_request = build_params(chotot_fallback.query, chotot_fallback.params)
-    assert model_request == {key: value for key, value in fallback_request.items() if key != "q"}
+    # Сравнение ЦЕЛИКОМ, вместе с `q`. Раньше `q` вычёркивался, и тест не видел
+    # ровно того расхождения, ради которого написан: модель присылала пустой
+    # текст, фолбэк добавлял «xe mới», и запросы уходили разные — 59 против 8.
+    assert model_request == fallback_request
+
+
+def test_model_word_to_a_field_source_is_dropped_not_sent() -> None:
+    """Модель прислала слово доске — текст выбрасывается, задача остаётся.
+
+    Слово о свойстве складывается с фильтром через И: замер — `motorbiketype=3`
+    даёт 12 объявлений, он же с `q='côn tay'` ноль. Терять надо слово, а не
+    задачу: фильтры отбирают, клиент получает 12 объявлений вместо пустоты.
+    """
+    tasks = parse_tasks(
+        [
+            {"source": "chotot", "query": "côn tay", "lang": "vi", "params": [], "priority": 1},
+            {"source": "chotot", "query": "xe mới", "lang": "vi", "params": [], "priority": 2},
+            {
+                "source": "telegram_groups",
+                "query": "скутер",
+                "lang": "ru",
+                "params": [],
+                "priority": 1,
+            },
+        ],
+        SOURCES,
+    )
+
+    assert [task.query for task in tasks if task.source == "chotot"] == ["", ""]
+    # Источника со свободным текстом гейт не касается: там слово и есть поиск.
+    assert [task.query for task in tasks if task.source == "telegram_groups"] == ["скутер"]
+    # Два слова превратились в два одинаковых пустых запроса, и дедуп плана
+    # оставляет один: доске уходит ОДИН запрос с фильтрами, а не два одинаковых.
+    plan = SearchPlan.from_tasks(tasks)
+    assert [task.query for task in plan.tasks if task.source == "chotot"] == [""]
 
 
 def test_empty_query_is_legal_for_a_board_and_dropped_for_a_chat() -> None:
@@ -613,5 +693,9 @@ def test_prompt_offers_the_board_only_measured_words() -> None:
 
     board_only = build_user_prompt(make_passport(attributes={"condition": "new"}), ["chotot"])
 
-    assert "xe mới" in board_only
+    # Слов, проверенных замером, для доски не осталось ни одного: «xe mới» было
+    # последним и оказалось числом слова «xe». Промпт обязан сказать это прямо,
+    # иначе модель заполнит query сама — и погасит фильтр в ноль.
+    assert "xe mới" not in board_only
     assert "nguyên zin" not in board_only
+    assert "оставь query пустым" in board_only

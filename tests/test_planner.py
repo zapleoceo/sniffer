@@ -93,7 +93,11 @@ async def test_valid_answer_becomes_plan() -> None:
 
     assert not plan.is_fallback
     # Порядок задач — по приоритету, а не по порядку перечисления моделью.
-    assert [task.query for task in plan.tasks] == ["инжектор", "xe ga", "блюкарт"]
+    # У Chotot запрос пуст не случайно: источник ищет полями, и присланное
+    # моделью «xe ga» выброшено гейтом (замер — ноль объявлений, spec-v2 4.1.1).
+    # Задача при этом осталась: фильтры отбирают, слово только гасило бы их.
+    assert [task.query for task in plan.tasks] == ["инжектор", "", "блюкарт"]
+    assert [task.source for task in plan.tasks][1] == "chotot"
     assert plan.reasoning.startswith("вьетнамский сегмент")
     assert len(broker.calls) == 1  # бюджет spec-v2 2.3: один вызов LLM на план
 
@@ -131,7 +135,8 @@ async def test_plan_is_cut_to_budget() -> None:
     assert len(plan.tasks) == MAX_TASKS
     assert not plan.is_fallback
     # Обрезали по приоритету: догадки ушли, очевидное осталось.
-    assert plan.tasks[0].query == "xe ga"
+    assert plan.tasks[0].source == "chotot"
+    assert plan.tasks[0].query == ""  # слово к доске выброшено гейтом, задача цела
 
 
 def test_plan_model_refuses_more_than_budget() -> None:

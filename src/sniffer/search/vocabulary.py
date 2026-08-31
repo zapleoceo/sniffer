@@ -28,6 +28,7 @@ from sniffer.search.market_terms import (
     BOARD_ATTRIBUTE_TERMS,
     BOARD_QUERY_HITS,
     BOARD_QUERY_TOTAL,
+    BOARD_SAFE_QUERIES,
     CATEGORY_TERMS,
     CITY_NAMES,
     INTENT_TERMS,
@@ -171,13 +172,65 @@ def board_query_hits(term: str) -> int | None:
 
 
 def is_board_safe(term: str) -> bool:
-    """Годится ли слово в `q` доски: измерено, не ноль и не вся выдача.
+    """Годится ли слово в `q` доски: измерено, число в границах и число СВОЁ.
 
     Неизмеренное слово безопасным не считается — это и есть гейт против
     «казалось бы, подходит»: цена ошибки не «выдача чуть уже», а пустота.
+
+    Третье условие добавлено по разбору «xe mới»: 8 из 59 — не ноль и не вся
+    выдача, прежним двум условиям слово удовлетворяло, а фильтром не было. Его
+    находки совпали с `q='xe'` до последнего id, «mới» отдельно отдавало все 59,
+    и все восемь были помечены б/у при запросе НОВОГО. Проверять «значит ли
+    слово то, что написано» по одному числу нельзя, зато видно механически:
+    фраза, чьё число равно числу её же измеренной части, ничего не добавляет к
+    этой части. Это и проверяется — данными той же таблицы, а не списком
+    исключений, который пришлось бы дописывать после каждого следующего случая.
     """
     hits = board_query_hits(term)
-    return hits is not None and 0 < hits < BOARD_QUERY_TOTAL
+    if hits is None or not 0 < hits < BOARD_QUERY_TOTAL:
+        return False
+    return borrowed_from(term) is None
+
+
+def borrowed_from(term: str) -> str | None:
+    """Измеренная часть фразы, чьё число фраза повторяет. `None` — число своё.
+
+    Возвращается сама часть, а не флаг: в логе и в тесте нужно видеть, У ЧЕГО
+    слово заняло число, иначе разбираться придётся заново.
+    """
+    hits = board_query_hits(term)
+    if hits is None:
+        return None
+    for part in _measured_parts(term):
+        if BOARD_QUERY_HITS[part] == hits:
+            return part
+    return None
+
+
+def board_query_allowed(query: str) -> bool:
+    """Можно ли отправить эту строку в `q` источнику, который ищет полями.
+
+    Список закрытый (`BOARD_SAFE_QUERIES`) и сейчас пустой: доска отбирает
+    свойства полями, а слово о свойстве с чужим значением поля даёт ноль. Гейт
+    нужен потому, что `q` приходит не только из нашего словаря — его присылает
+    модель, и её текст к доске без замера пускать нельзя.
+    """
+    return query.strip().casefold() in {
+        allowed.strip().casefold() for allowed in BOARD_SAFE_QUERIES
+    }
+
+
+def _measured_parts(term: str) -> list[str]:
+    """Собственные подфразы термина, у которых есть свой замер."""
+    words = term.strip().casefold().split()
+    whole = " ".join(words)
+    parts = []
+    for start in range(len(words)):
+        for end in range(start + 1, len(words) + 1):
+            part = " ".join(words[start:end])
+            if part != whole and part in BOARD_QUERY_HITS:
+                parts.append(part)
+    return parts
 
 
 def _terms(

@@ -11,10 +11,13 @@ from __future__ import annotations
 from collections.abc import Collection, Mapping, Sequence
 from typing import Any
 
+import structlog
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from sniffer.domain.passport import Passport
-from sniffer.search.vocabulary import source_profile
+from sniffer.search.vocabulary import board_query_allowed, source_profile
+
+log = structlog.get_logger(__name__)
 
 # spec-v2, раздел 2.3: свобода источников не означает свободу расходов.
 MAX_TASKS = 12
@@ -171,17 +174,29 @@ def parse_tasks(raw: Any, available: Collection[str]) -> list[SearchTask]:
         source = str(item.get("source", "")).strip()
         if source not in known:
             continue
-        if not str(item.get("query", "")).strip() and source_profile(source).free_text:
+        profile = source_profile(source)
+        query = str(item.get("query", ""))
+        if not query.strip() and profile.free_text:
             # Источнику, который ищет только текстом, пустой запрос искать
             # нечем — задача уйдёт впустую. Источнику, который ищет полями,
             # пустой `q` наоборот лучший запрос: фильтры отбирают, а лишнее
             # слово гасит их в ноль (spec-v2 4.1.1).
             continue
+        if query.strip() and not profile.free_text and not board_query_allowed(query):
+            # Источник ищет полями, а модель прислала слово. Слово о свойстве
+            # складывается с фильтром через И и гасит его в НОЛЬ: замер —
+            # `motorbiketype=3` даёт 12 объявлений, он же с `q='côn tay'` ноль.
+            # Выбрасываем текст, а не задачу: фильтры остаются и отбирают, а
+            # клиент получает 12 объявлений вместо пустоты, прочитанной как «на
+            # рынке нет». Разрешены только строки с замером (BOARD_SAFE_QUERIES),
+            # и сейчас там пусто — ни одно слово замер не прошло.
+            log.warning("plan.board_query_dropped", source=source, query=query.strip())
+            query = ""
         try:
             tasks.append(
                 SearchTask(
                     source=source,
-                    query=str(item.get("query", "")),
+                    query=query,
                     lang=str(item.get("lang", DEFAULT_LANG)),
                     params=_as_params(item.get("params")),
                     priority=_as_priority(item.get("priority")),

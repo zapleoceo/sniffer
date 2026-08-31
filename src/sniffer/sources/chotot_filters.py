@@ -26,6 +26,8 @@ from sniffer.domain.passport import Category
 from sniffer.sources.chotot_reference import (
     CAPACITY_ABOVE_ALL,
     CAPACITY_BUCKETS,
+    CONDITION_AD,
+    CONDITION_PARAM,
     MOTORBIKE_BRAND,
     PRICE_CURRENCY,
     PRICE_MAX_VND,
@@ -61,6 +63,18 @@ def _brand(value: Any) -> dict[str, Any]:
     return {"motorbikebrand": code} if code else {}
 
 
+def _condition(value: Any) -> dict[str, Any]:
+    """Состояние — полем `condition_ad`, и только значение `new`.
+
+    «good» и «worn» здесь отсутствуют намеренно: поле различает лишь «б/у» и
+    «новое», градаций внутри б/у у него нет. Отдать «good» как «б/у» значило бы
+    выбросить объявление, помеченное новым, — а новый байк «отличному
+    состоянию» удовлетворяет. Значение без кода остаётся без фильтра.
+    """
+    code = CONDITION_AD.get(str(value).strip().lower())
+    return {CONDITION_PARAM: code} if code else {}
+
+
 def _year_min(value: Any) -> dict[str, Any]:
     year = _as_int(value)
     # Верхняя граница не проверяется: год из будущего просто вернёт ноль
@@ -74,6 +88,7 @@ ATTRIBUTE_FILTERS: dict[Category, dict[str, AttributeFilter]] = {
         "engine_cc": _engine_cc,
         "brand": _brand,
         "year_min": _year_min,
+        "condition": _condition,
     },
 }
 
