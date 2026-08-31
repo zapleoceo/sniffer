@@ -48,3 +48,38 @@ class Console:
     # Спрашивается ДО отправки кода: Telegram прислал бы его, а прочитать было
     # бы некому — и следующая попытка упёрлась бы в FloodWait.
     is_interactive: Callable[[], bool] = _stdin_is_a_terminal
+
+
+# Три попытки — не терпение, а арифметика: переспросить ничего не стоит (сети
+# тут нет), а бесконечный цикл в неинтерактивной среде крутился бы вечно.
+MAX_ATTEMPTS = 3
+
+
+class EmptyInputError(RuntimeError):
+    """Человек ничего не ввёл, а пустой ввод дальше пускать нельзя."""
+
+
+def ask_required(
+    console: Console,
+    prompt: str,
+    *,
+    secret: bool = False,
+    attempts: int = MAX_ATTEMPTS,
+) -> str:
+    """Спрашивает, пока не введут непустое.
+
+    Пустое значение нельзя отдавать в `sign_in` ни в каком виде. Пустой код
+    Telethon понимает как «кода нет»: ветка `if phone and not code and not
+    password` молча шлёт ВТОРОЙ запрос кода и возвращает объект отправки
+    вместо пользователя — исключения нет, а сессия остаётся неавторизованной.
+    Пустой пароль двухфакторной защиты попадает в `else` того же метода и даёт
+    `ValueError`. И то, и другое начинается с одного случайного Enter.
+    """
+    ask = console.ask_secret if secret else console.ask
+    for attempts_left in range(attempts - 1, -1, -1):
+        value = ask(prompt).strip()
+        if value:
+            return value
+        if attempts_left:
+            console.say("Пусто — Enter не подойдёт. Введите значение.")
+    raise EmptyInputError("значение так и не ввели")

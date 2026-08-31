@@ -45,6 +45,11 @@ class TelegramLike(Protocol):
 
     async def send_code_request(self, phone: str) -> object: ...
 
+    # Единственный надёжный ответ на вопрос «вход состоялся?». Возврат
+    # `sign_in` им не является: у Telethon есть ветка, где он отдаёт объект
+    # отправленного кода вместо пользователя, и она не бросает исключения.
+    async def is_user_authorized(self) -> bool: ...
+
     async def sign_in(
         self,
         phone: str | None = ...,

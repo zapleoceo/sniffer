@@ -63,9 +63,9 @@ merge в master → CI: quality → docs-gate → deploy
 | `db/` | engine и сессии, ORM-зеркало схемы, репозитории chats · raw_messages · listings · users · passports, очередь `jobs` на `FOR UPDATE SKIP LOCKED` |
 | CI | `quality.yml` (с Postgres-контейнером под тесты `db/`), `deploy.yml` |
 
-160 тестов зелёные; ещё 16 требуют живой базы и идут в CI — локально
-без Docker они пропускаются по отсутствию `TEST_DATABASE_URL`, а проверка прав
-файла сессии — по отсутствию прав POSIX вне Linux.
+170 тестов зелёные; ещё 16 требуют живой базы и идут в CI — локально
+без Docker они пропускаются по отсутствию `TEST_DATABASE_URL`, а две проверки
+файла сессии (права 0600 и битый симлинк) — по отсутствию POSIX вне Linux.
 
 ### Не сделано
 
