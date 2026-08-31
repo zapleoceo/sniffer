@@ -24,6 +24,32 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
+    # Тесты слоя db/ идут по живому Postgres. Схема Postgres-специфична —
+    # JSONB, TEXT[], tsvector, vector(1024), — и подменить её sqlite нельзя:
+    # ON CONFLICT, FOR UPDATE SKIP LOCKED и типы проверяются только там, где
+    # они настоящие. Образ с pgvector, потому что listings.embedding иначе не
+    # создастся.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: sniffer
+          POSTGRES_PASSWORD: sniffer
+          POSTGRES_DB: sniffer_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sniffer -d sniffer_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      # Без этой переменной тесты с базой пропускаются — так у разработчика
+      # без Docker остаётся зелёный прогон, а в CI они выполняются всегда.
+      TEST_DATABASE_URL: postgresql+asyncpg://sniffer:sniffer@localhost:5432/sniffer_test
+      PGPASSWORD: sniffer
+
     steps:
       - uses: actions/checkout@v4
 
@@ -53,6 +79,12 @@ jobs:
 
       - name: mypy
         run: uv run mypy src tests
+
+      # Тот же файл, что накатывается на боевую базу. Он идемпотентен, и
+      # именно поэтому проверять модели есть смысл против него, а не против
+      # metadata.create_all: последнее сверяло бы модели с ними же.
+      - name: Схема в тестовой базе
+        run: psql -h localhost -U sniffer -d sniffer_test -v ON_ERROR_STOP=1 -f infra/sql/001_init.sql
 
       - name: pytest
         run: uv run pytest
