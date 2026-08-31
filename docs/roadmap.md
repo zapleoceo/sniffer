@@ -57,15 +57,16 @@ merge в master → CI: quality → docs-gate → deploy
 | `bot/` | первый диалог, карточки выдачи |
 | `verifier/liveness.py` | возраст лота, пометка `stale` |
 | `pipeline/gate.py` | мультиязычный regex-гейт |
-| CI | `quality.yml`, `deploy.yml` |
+| `db/` | engine и сессии, ORM-зеркало схемы, репозитории chats · raw_messages · listings · users · passports, очередь `jobs` на `FOR UPDATE SKIP LOCKED` |
+| CI | `quality.yml` (с Postgres-контейнером под тесты `db/`), `deploy.yml` |
 
-123 теста зелёные.
+136 тестов зелёные; ещё 16 требуют живой базы и идут в CI — локально без
+Docker они пропускаются по отсутствию `TEST_DATABASE_URL`.
 
 ### Не сделано
 
 | Пробел | Почему это блокирует |
 |---|---|
-| `db/` пустой | SQL-схема есть, кода доступа нет; без него нет ни ингеста, ни подписок, ни квот |
 | адаптер `telegram_groups` | главный источник продукта; сейчас ищет только Chotot |
 | таблицы `sources`, `listing_verifications`, `usage_counters`, `payments`, `price_history`, `users.tier` | описаны в spec-v2, в `001_init.sql` отсутствуют |
 | `collector/`, `worker/`, `notifier/` | только точки входа, тела нет |
@@ -84,11 +85,14 @@ merge в master → CI: quality → docs-gate → deploy
 
 | Ветка | Содержание | Зависит от |
 |---|---|---|
-| `feat/db-layer` | async engine, модели, репозитории, единственное место с SQL | — |
+| ~~`feat/db-layer`~~ | сделано: async engine, модели, репозитории, единственное место с SQL | — |
 | `feat/schema-v2` | недостающие таблицы + `users.tier`, миграция на живой базе | `db-layer` |
 | `feat/telegram-groups-adapter` | `messages.search` по известным чатам, FloodWait с экспоненциальной паузой | — |
 
-`db-layer` блокирует почти всё, поэтому идёт первым и один.
+`db-layer` блокировал почти всё, поэтому шёл первым и один. Он закрыт —
+устройство слоя описано в [architecture.md, раздел 5.1](architecture.md#51-слой-доступа--db).
+Репозиториев ровно столько, сколько нужно сейчас: подписки, уведомления и
+outbox своих классов ещё не получили, их заводят волны 3 и 4.
 
 ### Волна 2 — воронка и проверка
 
