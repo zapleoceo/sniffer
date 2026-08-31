@@ -20,12 +20,14 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import io
 import logging
 import os
 import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from unittest import mock
 
 import pytest
 import telethon.errors
@@ -1064,6 +1066,88 @@ def test_usable_console_requires_a_terminal_and_both_streams(
     assert not console_module._console_is_usable()
 
 
+def test_a_closed_fd_under_a_live_stream_is_not_a_usable_console(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Объект потока есть, а fd под ним закрыт — говорить всё равно негде.
+
+    Ветка `except (OSError, ValueError)` в `_console_is_usable` до сих пор
+    держалась комментарием: `closed` у такого объекта False, `isatty()` может
+    ответить True, и только `flush()` выдаёт правду. Незакрытая ветка означала
+    бы приглашение к вводу ПОСЛЕ отправки кода — то есть сгоревшую попытку.
+    """
+
+    class FlushRaises:
+        closed = False
+
+        def flush(self) -> None:
+            raise ValueError("I/O operation on closed file")
+
+        def isatty(self) -> bool:
+            return True
+
+    monkeypatch.setattr(sys, "stdin", FakeTty())
+    monkeypatch.setattr(sys, "stdout", FlushRaises())
+
+    assert not console_module._console_is_usable()
+
+    # Второй способ той же беды: fd закрыт по-настоящему, и flush даёт OSError.
+    class FlushFailsWithOsError(FlushRaises):
+        def flush(self) -> None:
+            raise OSError(9, "Bad file descriptor")
+
+    monkeypatch.setattr(sys, "stdout", FlushFailsWithOsError())
+
+    assert not console_module._console_is_usable()
+
+
+def test_a_bad_descriptor_on_a_prompt_is_a_terminal_problem(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`OSError`/EBADF на приглашении — та же беда, что потерянный stdout.
+
+    Комментарий в `_ask` перечисляет три способа (`EOFError`, `RuntimeError`,
+    `OSError`), а тесты были на два: fd, закрытый из-под уже созданного объекта
+    потока, оставался словами без проверки. Без неё `OSError` уехал бы в общий
+    обработчик и стал бы rc=4 «сеть недоступна» — совет искать проблему в сети
+    там, где нет терминала.
+    """
+
+    def bad_descriptor(_prompt: str = "") -> str:
+        raise OSError(9, "Bad file descriptor")
+
+    monkeypatch.setattr("builtins.input", bad_descriptor)
+    monkeypatch.setattr(sys, "stderr", None)
+
+    with pytest.raises(NoTerminalError):
+        console_module._ask("Код: ")
+
+    monkeypatch.setattr(console_module, "getpass", bad_descriptor)
+
+    with pytest.raises(NoTerminalError):
+        console_module._ask_secret("Пароль: ")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="петля симлинков — POSIX; прод у нас Linux")
+def test_a_symlink_loop_in_the_parent_is_a_named_refusal(tmp_path: Path) -> None:
+    """Петля симлинков в каталоге-родителе — строка отказа, а не исключение.
+
+    Ровно то, что `session_file` утверждал комментарием: ELOOP `_ignore_error`
+    глотает, `is_dir()` отвечает False, и функция обязана вернуть текст. Тест
+    нужен не ради самой петли, а ради контракта «не бросать»: бросок отсюда —
+    это rc=1 с трейсбеком на последней проверке перед входом в Telegram.
+    """
+    first = tmp_path / "a"
+    second = tmp_path / "b"
+    first.symlink_to(second)
+    second.symlink_to(first)
+
+    refusal = why_cannot_write(first / "tg_session.txt")
+
+    assert refusal, "петля обязана назваться словами, а не улететь исключением"
+    assert isinstance(refusal, str)
+
+
 def test_human_output_never_falls_back_to_stdout(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1364,28 +1448,51 @@ def _run_with_boom_at(
     monkeypatch: pytest.MonkeyPatch,
 ) -> int:
     """Подкладывает `Boom` в один шаг команды и возвращает её код выхода."""
+    return _run_with_failure_at(step, Boom, tmp_path, monkeypatch)
+
+
+def _run_with_failure_at(
+    step: str,
+    make_error: Callable[[], BaseException],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> int:
+    """То же, но исключение задаёт вызывающий — включая ветку `BaseException`.
+
+    Существует потому, что ось типов у охраны ДВЕ, а закрыта была одна.
+    `Boom(Exception)` проверял, что шаг не полагается на список ожидаемых
+    классов; `KeyboardInterrupt` и `BaseExceptionGroup` проверяют, что сама
+    граница взята по корню иерархии, а не по `Exception` — на пятом круге
+    неполным оказался именно `Exception`.
+    """
 
     def has_terminal() -> bool:
         return True
+
+    def fail(*_args: object, **_kwargs: object) -> object:
+        # Аргументы принимаются любые: заглушка встаёт и на `why_cannot_write(path)`,
+        # и на `write_session(path, session)`. Без этого шаг падал бы `TypeError` —
+        # тоже Exception, то есть тест проходил бы, не проверив прерывание.
+        raise make_error()
 
     settings: Settings | None = _ready_settings()
     interactive: Callable[[], bool] = has_terminal
 
     if step == "settings":
         settings = None
-        monkeypatch.setattr(collector_auth, "get_settings", _boom)
+        monkeypatch.setattr(collector_auth, "get_settings", fail)
     elif step == "terminal":
-        interactive = _boom  # type: ignore[assignment]
+        interactive = fail  # type: ignore[assignment]
     elif step == "path":
-        monkeypatch.setattr(collector_auth, "why_cannot_write", _boom)
+        monkeypatch.setattr(collector_auth, "why_cannot_write", fail)
     elif step == "write":
-        monkeypatch.setattr(collector_auth, "write_session", _boom)
+        monkeypatch.setattr(collector_auth, "write_session", fail)
     elif step != "telegram":
         raise AssertionError(f"неизвестный шаг {step}")
 
     def factory(_api_id: int, _api_hash: str) -> FakeClient:
         if step == "telegram":
-            raise Boom("шаг «диалог с Telegram»")
+            raise make_error()
         return FakeClient()
 
     return run_auth(
@@ -1476,3 +1583,215 @@ def test_the_documented_codes_are_exactly_the_modules_constants() -> None:
 
     assert constants == set(DOCUMENTED_EXIT_CODES)
     assert 1 not in constants
+
+
+# --------------------------------------------------------------------------
+# Пятый круг: ось `BaseException`. Четыре предыдущих закрывали набор кодов
+# списком, пятый показал, что и сама граница была не корнем иерархии:
+# `except Exception` не берёт ни Ctrl+C, ни `BaseExceptionGroup`.
+# --------------------------------------------------------------------------
+
+GUARDED_STEPS: tuple[tuple[str, int], ...] = (
+    ("settings", EXIT_NOT_CONFIGURED),
+    ("terminal", EXIT_NO_TERMINAL),
+    ("path", EXIT_NO_OUTPUT_FILE),
+    ("telegram", EXIT_PROTOCOL),
+    ("write", EXIT_NO_OUTPUT_FILE),
+)
+
+
+def _interrupt_group() -> BaseException:
+    """Ctrl+C, завёрнутый в группу, — так его отдаёт `asyncio.TaskGroup`.
+
+    Группа не наследует ни `KeyboardInterrupt`, ни `Exception`, поэтому её не
+    берёт ни один `except` по конкретным классам: `BaseExceptionGroup` — это
+    отдельная ветка иерархии, и раньше она давала литеральный rc=1.
+    """
+    return BaseExceptionGroup("группа", [KeyboardInterrupt()])
+
+
+def _mixed_group() -> BaseException:
+    """Снятая задача рядом с настоящим сбоем — это про сбой, не про прерывание."""
+    return BaseExceptionGroup("группа", [asyncio.CancelledError(), Boom("настоящий сбой")])
+
+
+def test_every_guarded_step_of_run_auth_is_in_the_matrix() -> None:
+    """Список шагов связан с кодом механически, а не памятью автора теста.
+
+    Прошлый круг оставил именно эту дыру: шагов в команде было шесть, в
+    `parametrize` пять, и добавить шестой можно было, ничего не покрасив. Здесь
+    сверяется само устройство — число блоков охраны в исходнике команды против
+    числа шагов в матрице, — поэтому новый шаг красит тест до того, как его
+    забудут проверить.
+
+    И заодно проверяется сама граница: `except Exception` в команде быть не
+    должно ни одного. `Exception` — не корень иерархии, и любое его появление
+    здесь возвращает ту же дыру, из-за которой Ctrl+C давал трейсбек.
+    """
+    body = inspect.getsource(run_auth)
+
+    assert body.count("except BaseException") == len(GUARDED_STEPS)
+    assert "except Exception" not in body
+    # Шаг «печать пути» живёт отдельной функцией и в матрицу не входит: у него
+    # нет своего кода, исход уже определён записанным файлом. Охрана та же.
+    assert inspect.getsource(collector_auth._report_success).count("except BaseException") == 1
+
+
+@pytest.mark.parametrize(("step", "expected"), GUARDED_STEPS)
+@pytest.mark.parametrize(
+    "make_error",
+    [
+        pytest.param(KeyboardInterrupt, id="KeyboardInterrupt"),
+        pytest.param(asyncio.CancelledError, id="CancelledError"),
+        pytest.param(_interrupt_group, id="BaseExceptionGroup"),
+    ],
+)
+def test_an_interrupt_at_any_step_is_words_not_a_traceback(
+    step: str,
+    expected: int,
+    make_error: Callable[[], BaseException],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ctrl+C на ЛЮБОМ шаге — документированный код 130, а не стек.
+
+    Раньше охрана от прерывания стояла на одном шаге из шести, дописанная
+    вручную и по памяти, — то есть ровно тем способом, который в этом файле
+    объявлен дефектом. Ctrl+C на остальных давал трейсбек, в том числе на шаге
+    записи, то есть ПОСЛЕ созданной на аккаунте авторизации.
+
+    `expected` здесь не используется: у прерывания исход один на все шаги, и
+    это тоже утверждение — причина отказа сменилась, а не место.
+    """
+    code = _run_with_failure_at(step, make_error, tmp_path, monkeypatch)
+
+    assert code == EXIT_INTERRUPTED
+    assert code in DOCUMENTED_EXIT_CODES
+    assert code != 1, "rc=1 в таблице описан как наш баг"
+    assert not (tmp_path / "tg_session.txt").exists()
+
+
+@pytest.mark.parametrize(("step", "expected"), GUARDED_STEPS)
+def test_a_mixed_group_answers_about_the_failure_not_the_interrupt(
+    step: str,
+    expected: int,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Группа со снятой задачей И настоящим сбоем — ответ про сбой.
+
+    Иначе «прервано» стало бы удобной свалкой: любая группа с одной снятой
+    задачей внутри скрыла бы настоящую причину и код шага.
+    """
+    code = _run_with_failure_at(step, _mixed_group, tmp_path, monkeypatch)
+
+    assert code == expected
+    assert code in DOCUMENTED_EXIT_CODES
+
+
+@pytest.mark.parametrize(("step", "expected"), GUARDED_STEPS)
+def test_systemexit_is_passed_through_not_rewritten(
+    step: str,
+    expected: int,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`SystemExit` проходит наружу: чужой код выхода не переписываем своим.
+
+    Единственный карв-аут в охране — и он проверяется, потому что «поймано» и
+    «переброшено» здесь одинаково выглядят в коде и по-разному в поведении.
+    """
+    with pytest.raises(SystemExit):
+        _run_with_failure_at(step, lambda: SystemExit(3), tmp_path, monkeypatch)
+
+
+def test_an_interrupt_while_reporting_success_keeps_the_success(tmp_path: Path) -> None:
+    """Ctrl+C на печати пути не отменяет записанный файл.
+
+    Файл уже на диске с правами 0600, авторизация создана: превратить это в
+    ошибку из-за прерывания на необязательном последнем действии нельзя.
+    """
+    path = tmp_path / "tg_session.txt"
+
+    def interrupt(_text: str) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatched = Console(
+        say=lambda _t: None,
+        ask=lambda _p: "12345",
+        ask_secret=lambda _p: "секрет",
+        is_interactive=lambda: True,
+    )
+    code = run_auth(
+        _ready_settings(),
+        monkeypatched,
+        out_path=path,
+        client_factory=lambda _i, _h: FakeClient(),
+    )
+
+    assert code == EXIT_OK
+    assert path.exists()
+
+    # Тот же случай, но прерывание приходит из самого `print`.
+    second = tmp_path / "second.txt"
+    with mock.patch("builtins.print", side_effect=interrupt):
+        code = run_auth(
+            _ready_settings(),
+            monkeypatched,
+            out_path=second,
+            client_factory=lambda _i, _h: FakeClient(),
+        )
+
+    assert code == EXIT_OK
+    assert second.exists(), "файл записан — значит успех, чем бы ни кончилась печать"
+
+
+def test_a_broken_str_of_an_exception_still_names_its_class(tmp_path: Path) -> None:
+    """Класс исключения в сообщении есть, даже если его текст падает сам.
+
+    Иначе охрана всё равно кончилась бы трейсбеком — уже своим, из строки
+    диагностики, — и владелец опять получил бы rc=1 вместо кода из таблицы.
+    """
+
+    class Unprintable(Exception):
+        def __str__(self) -> str:
+            raise RuntimeError("текст исключения сам сломан")
+
+    recorder = Recorder()
+
+    def unprintable(_api_id: int, _api_hash: str) -> FakeClient:
+        raise Unprintable
+
+    code = run_auth(
+        _ready_settings(),
+        recorder.console,
+        out_path=tmp_path / "tg_session.txt",
+        client_factory=unprintable,
+    )
+
+    assert code == EXIT_PROTOCOL
+    assert any("Unprintable" in line for line in recorder.said)
+
+
+def test_a_cancelled_disconnect_does_not_lose_the_created_session(tmp_path: Path) -> None:
+    """Ctrl+C на закрытии соединения не отменяет уже полученную сессию.
+
+    `_close_quietly` живёт в `finally`, а исключение оттуда заменяет собой
+    возвращаемое значение. Для `OSError` это было закрыто, для прерывания — нет,
+    хотя цена та же и хуже: авторизация на аккаунте создана, строка потеряна.
+    """
+    path = tmp_path / "tg_session.txt"
+
+    class InterruptOnDisconnect(FakeClient):
+        async def disconnect(self) -> None:
+            raise KeyboardInterrupt
+
+    code = run_auth(
+        _ready_settings(),
+        _console_with(is_interactive=lambda: True),
+        out_path=path,
+        client_factory=lambda _i, _h: InterruptOnDisconnect(),
+    )
+
+    assert code == EXIT_OK
+    assert path.exists(), "сессия получена — терять её из-за прерывания на disconnect нельзя"
