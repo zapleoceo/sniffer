@@ -42,7 +42,12 @@ import structlog
 
 from sniffer.broker.client import BrokerClient, BrokerError
 from sniffer.broker.usage import default_usage_sink
-from sniffer.domain.passport import Currency, Passport
+from sniffer.domain.passport import Currency, Intent, Passport
+
+# Словарь рынка — знание о том, как предмет называют люди. Охраннику он
+# нужен ровно за тем же, за чем планировщику: говорить с моделью словами
+# объявления, а не именами полей.
+from sniffer.search.market_terms import CATEGORY_TERMS
 from sniffer.sources.base import RawItem
 
 log = structlog.get_logger(__name__)
@@ -60,6 +65,10 @@ GUARD_CAPABILITY = "prefilter"
 # Верхняя граница правдоподобия: 10 млрд донгов — это 380 тысяч долларов.
 # Больше — ошибка чтения, а не цена байка или квартиры в Нячанге.
 MAX_PLAUSIBLE_VND = 10_000_000_000
+
+INTENT_WORDS = {Intent.BUY: "купить", Intent.RENT: "снять"}
+# Город в паспорте — ключ, а не название. Модели нужно второе.
+CITY_WORDS = {"nha_trang": "Нячанг", "da_nang": "Дананг"}
 
 SYSTEM = (
     "Ты проверяешь объявления перед показом клиенту. Отвечай только JSON по схеме. "
@@ -115,7 +124,7 @@ async def screen(
     limit: int = GUARD_ITEMS,
 ) -> list[RawItem]:
     """Проверенная выдача. Наружу не бросает: отказ означает выдачу как есть."""
-    head, tail = items[:limit], items[limit:]
+    head = items[:limit]
     if not head:
         return items
 
@@ -150,9 +159,18 @@ async def screen(
         dropped=len(head) - len(passed),
         reasons=[v.reason for v in verdicts.values() if not v.keep][:5],
     )
-    # Хвост за пределами проверенного не показывается всё равно (`MAX_CARDS`),
-    # но и выбрасывать его не за что: о нём просто ничего не известно.
-    return passed + tail
+    # Хвост НЕ возвращается, и это исправление, а не экономия. Сначала он ехал
+    # следом за проверенным — «о нём ничего не известно, выбрасывать не за что».
+    # Замер 01.09.2026 показал, чем это оборачивается: охранник снял десять
+    # карточек из двенадцати, и наверх всплыл непроверенный хвост, куда
+    # ранжирование сложило заведомо худшее. На «мотоцикл до 300 USD» клиент
+    # увидел ноутбуки ThinkPad — не потому что охранник их пропустил, а потому
+    # что до них он не дошёл.
+    #
+    # Проверяем двенадцать, показываем пять (`MAX_CARDS`) — запас двукратный.
+    # Три проверенные карточки честнее, чем три проверенные и две неизвестно
+    # какие: для клиента они выглядят одинаково.
+    return passed
 
 
 def _apply(item: RawItem, verdict: Verdict | None) -> RawItem | None:
@@ -222,10 +240,22 @@ def _prompt(passport: Passport, items: list[RawItem], usd_vnd: float | None) -> 
         lines.append(f"{number}) {text}")
     lines += [
         "",
-        "Для каждого объявления реши: keep=true только если это действительно то,",
-        "что ищет клиент, И цена (если она в тексте есть) влезает в бюджет.",
-        "price_text — точный фрагмент объявления с ценой, скопированный дословно,",
-        'или "" если цены в тексте нет. price_vnd — та же сумма в донгах цифрами.',
+        "Реши по каждому объявлению, показывать ли его клиенту (keep).",
+        "",
+        "Отказывай (keep=false) ТОЛЬКО в двух случаях:",
+        "1) в объявлении явно другой предмет — телефон, ноутбук, часы,",
+        "   колонка там, где человек ищет транспорт или жильё;",
+        "2) цена НАПИСАНА в тексте и она выше бюджета.",
+        "",
+        "Во всех остальных случаях keep=true. В частности:",
+        "— отсутствие цены НЕ причина отказа: её просто не написали;",
+        "— близкая разновидность того же предмета подходит: скутер, мопед,",
+        "  мотобайк, автомат и механика — всё это транспорт для клиента;",
+        "— непонятное или короткое объявление оставляй, решит человек.",
+        "",
+        "price_text — точный фрагмент объявления с ценой, слово в слово,",
+        "или пустая строка, если цены в тексте нет. Не пересказывай.",
+        "price_vnd — та же сумма в донгах цифрами.",
         "why — до восьми слов, почему решил так.",
     ]
     return "\n".join(lines)
@@ -235,11 +265,16 @@ def _wanted(passport: Passport, usd_vnd: float | None) -> str:
     """Запрос словами. Бюджет — в донгах: объявления написаны в них."""
     parts: list[str] = []
     if passport.intent:
-        parts.append(passport.intent.value)
+        parts.append(INTENT_WORDS.get(passport.intent, passport.intent.value))
     if passport.category:
-        parts.append(passport.category.value)
+        # Русскими словами, а не значением перечисления. Замер 01.09.2026: со
+        # строкой `motorbike` модель отбраковывала скутеры с формулировкой «это
+        # скутер, а клиент ищет motorbike» — она читала имя поля как требование,
+        # потому что человек так не пишет.
+        words = CATEGORY_TERMS.get(passport.category, {}).get("ru", ())
+        parts.append(" / ".join(words) or passport.category.value)
     if passport.city:
-        parts.append(passport.city)
+        parts.append(CITY_WORDS.get(passport.city, passport.city))
     for field, value in passport.attributes.items():
         parts.append(f"{field}={value}")
     ceiling = _ceiling_vnd(passport, usd_vnd)
