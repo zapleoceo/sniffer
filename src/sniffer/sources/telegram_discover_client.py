@@ -32,6 +32,7 @@ from sniffer.sources.telegram_discover_convert import (
     with_details,
 )
 from sniffer.sources.telegram_discover_reference import ResolvedChat, TelegramJoiner
+from sniffer.telegram_identity import IDENTITY
 
 log = structlog.get_logger(__name__)
 
@@ -159,6 +160,7 @@ def new_joiner(settings: Settings) -> TelegramJoiner:
         settings.tg_api_id,
         settings.tg_api_hash,
         flood_sleep_threshold=0,
+        **IDENTITY,
     )
     return TelethonJoiner(client)
 

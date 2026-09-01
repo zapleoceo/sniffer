@@ -19,6 +19,7 @@ from sniffer import telegram_identity as identity
 from sniffer.collector import client as collector_client
 from sniffer.config import Settings
 from sniffer.sources import telegram_client as reader_client
+from sniffer.sources import telegram_discover_client as joiner_client
 
 IDENTITY_KEYS = ("device_model", "system_version", "app_version")
 
@@ -66,7 +67,7 @@ def test_the_reader_introduces_itself_at_all(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_both_clients_introduce_themselves_identically(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Два места, представляющиеся Telegram по-разному, — это баг."""
+    """Все способы работы с одной сессией представляются одинаково."""
     seen = _capture(monkeypatch)
 
     collector_client.new_client(42, "hash")
@@ -75,7 +76,11 @@ def test_both_clients_introduce_themselves_identically(monkeypatch: pytest.Monke
     reader_client.new_reader(_settings())
     from_reader = {key: seen[key] for key in IDENTITY_KEYS}
 
+    joiner_client.new_joiner(_settings())
+    from_joiner = {key: seen[key] for key in IDENTITY_KEYS}
+
     assert from_auth == from_reader
+    assert from_auth == from_joiner
     assert from_auth == identity.IDENTITY, "подпись берётся из одного места, а не копируется"
 
 
