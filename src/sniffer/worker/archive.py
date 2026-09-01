@@ -1,18 +1,27 @@
 """Оркестрация архива: сырьё → гейт → карточка.
 
 Транзакция охватывает создание карточки и смену стадии, поэтому рестарт не
-оставляет сообщение помеченным обработанным без ``listings``.
+оставляет сообщение помеченным обработанным без `listings`.
+
+Одно сообщение обрабатывается независимо от остальных, и это не запас
+прочности, а урок. Живой отказ 01.09.2026: объявление с ценой «21.500.000 млн
+VND» дало 21.5 триллиона донгов, вставка упала на `NUMERIC(14,2)`, и воркер
+ушёл в ЦИКЛ ПЕРЕЗАПУСКА — то есть одно кривое объявление навсегда остановило
+обработку всех остальных. Пачка, падающая целиком из-за одной строки, — это не
+надёжность, это единая точка отказа с чужим текстом на входе.
 """
 
 from __future__ import annotations
 
 import structlog
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from sniffer.db.engine import session_scope
 from sniffer.db.repositories.chats import ChatRepository
 from sniffer.db.repositories.listings import ListingRepository
 from sniffer.db.repositories.raw_messages import RawMessageRepository
 from sniffer.domain.fingerprint import fingerprint
+from sniffer.domain.records import RawMessage
 from sniffer.pipeline.archive import (
     STAGE_DUPLICATE,
     STAGE_EXTRACTED,
@@ -29,50 +38,70 @@ BATCH_SIZE = 50
 class ArchivePipeline:
     async def tick(self) -> int:
         async with session_scope() as session:
-            raw_repo = RawMessageRepository(session)
-            messages = await raw_repo.list_by_stage(limit=BATCH_SIZE)
+            repo = RawMessageRepository(session)
             handled = 0
-            for raw in messages:
-                if raw.id is None:  # pragma: no cover -- репозиторий всегда возвращает id
+            for raw in await repo.list_by_stage(limit=BATCH_SIZE):
+                if raw.id is None:  # pragma: no cover — репозиторий всегда возвращает id
                     continue
-                result = classify(raw)
-                if not result.passed:
-                    await raw_repo.set_stage(
-                        [raw.id], STAGE_REJECTED, gate_signals=result.as_signals()
-                    )
-                    handled += 1
-                    continue
-                chat = await ChatRepository(session).get_by_tg_id(raw.chat_tg_id)
-                if chat is None:
-                    log.warning(
-                        "pipeline.unknown_chat", chat_tg_id=raw.chat_tg_id, raw_message_id=raw.id
-                    )
-                    await raw_repo.set_stage(
-                        [raw.id],
-                        STAGE_REJECTED,
-                        gate_signals={**result.as_signals(), "reason": "unknown_chat"},
-                    )
-                    handled += 1
-                    continue
-                # Отпечаток считаем от текста, а не берём сохранённый: строки
-                # от старого коллектора несут побайтовый хеш, и кросспост по
-                # ним не сходится. Заодно освежаем его в базе.
-                digest = fingerprint(raw.text)
-                if await raw_repo.has_listing_for(digest, besides=raw.id):
-                    # Кросспост: то же объявление уже стало карточкой из другой
-                    # группы. Вторую не заводим — клиенту она пришла бы дублем.
-                    await raw_repo.set_stage(
-                        [raw.id],
-                        STAGE_DUPLICATE,
-                        gate_signals=result.as_signals(),
-                        text_hash=digest,
-                    )
-                    handled += 1
-                    continue
-                await ListingRepository(session).add(listing_from(raw, chat, result))
-                await raw_repo.set_stage(
-                    [raw.id], STAGE_EXTRACTED, gate_signals=result.as_signals(), text_hash=digest
-                )
-                handled += 1
-            await session.commit()
+                handled += await self._safely(raw, session)
             return handled
+
+    async def _safely(self, raw: RawMessage, session: AsyncSession) -> int:
+        """Одно сообщение, своей транзакцией. Падение не уносит соседей.
+
+        Широкий `except` намеренно: перечислять причины, по которым чужой текст
+        не разобрался, значит однажды встать на неназванной. Решение одно и то
+        же для любой — пометить сообщение отклонённым с причиной в
+        `gate_signals` и идти дальше; разбираться с ним потом по логу.
+        """
+        try:
+            moved = await self._one(raw, session)
+            await session.commit()
+            return moved
+        except Exception as exc:
+            await session.rollback()
+            log.warning(
+                "pipeline.message_failed",
+                raw_message_id=raw.id,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            await RawMessageRepository(session).set_stage(
+                [raw.id or 0], STAGE_REJECTED, gate_signals={"reason": "pipeline_error"}
+            )
+            await session.commit()
+            return 1
+
+    async def _one(self, raw: RawMessage, session: AsyncSession) -> int:
+        repo = RawMessageRepository(session)
+        assert raw.id is not None
+        result = classify(raw)
+        if not result.passed:
+            await repo.set_stage([raw.id], STAGE_REJECTED, gate_signals=result.as_signals())
+            return 1
+
+        chat = await ChatRepository(session).get_by_tg_id(raw.chat_tg_id)
+        if chat is None:
+            log.warning("pipeline.unknown_chat", chat_tg_id=raw.chat_tg_id, raw_message_id=raw.id)
+            await repo.set_stage(
+                [raw.id],
+                STAGE_REJECTED,
+                gate_signals={**result.as_signals(), "reason": "unknown_chat"},
+            )
+            return 1
+
+        # Отпечаток считаем от текста, а не берём сохранённый: строки от старого
+        # коллектора несут побайтовый хеш, и кросспост по ним не сходится.
+        # Заодно освежаем его в базе.
+        digest = fingerprint(raw.text)
+        if await repo.has_listing_for(digest, besides=raw.id):
+            # Кросспост: то же объявление уже стало карточкой из другой группы.
+            await repo.set_stage(
+                [raw.id], STAGE_DUPLICATE, gate_signals=result.as_signals(), text_hash=digest
+            )
+            return 1
+
+        await ListingRepository(session).add(listing_from(raw, chat, result))
+        await repo.set_stage(
+            [raw.id], STAGE_EXTRACTED, gate_signals=result.as_signals(), text_hash=digest
+        )
+        return 1
