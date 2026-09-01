@@ -19,7 +19,7 @@ from fastapi import Cookie, FastAPI, Form, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from sniffer.config import get_settings
-from sniffer.dashboard import auth, data, reauth, views
+from sniffer.dashboard import auth, data, inventory, reauth, views
 from sniffer.dashboard.html import error_page, esc, login_page
 
 log = structlog.get_logger(__name__)
@@ -135,6 +135,12 @@ def create_app() -> FastAPI:
     async def overview(sniffer_owner: OwnerCookie = None) -> HTMLResponse:
         _require_owner(sniffer_owner)
         return _html(views.overview_page(await data.overview()))
+
+    @app.get("/database", response_class=HTMLResponse)
+    async def database(sniffer_owner: OwnerCookie = None) -> HTMLResponse:
+        """Что накоплено в базе. Тот же страж владельца, что и у остальных."""
+        _require_owner(sniffer_owner)
+        return _html(inventory.inventory_page(await data.inventory()))
 
     @app.get("/auth/telegram", response_class=HTMLResponse)
     async def telegram_login(request: Request) -> Response:

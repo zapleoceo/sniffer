@@ -76,7 +76,8 @@ def esc(value: object) -> str:
 def page(title: str, body: str, *, nav: bool = True) -> str:
     header = (
         f"<header><h1>{esc(title)}</h1><nav>"
-        '<a href="/">Обзор</a><a href="/session">Сессия юзербота</a>'
+        '<a href="/">Обзор</a><a href="/database">База</a>'
+        '<a href="/session">Сессия юзербота</a>'
         "</nav></header>"
         if nav
         else ""

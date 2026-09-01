@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import cast
 
-from sqlalchemy import Table, select, update
+from sqlalchemy import Table, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from sniffer.db import models
@@ -49,6 +49,27 @@ class RawMessageRepository(Repository):
             )
         )
         return to_raw_message(row) if row is not None else None
+
+    async def recent(self, *, limit: int = 30) -> list[RawMessage]:
+        """Последнее собранное сырьё — доказательство, что ингест идёт.
+
+        Порядок по времени публикации, а не по `id`: пачки догона приходят
+        вразнобой, и «последнее по вставке» показало бы старое сообщение из
+        только что подключённого чата.
+        """
+        rows = await self._session.scalars(
+            select(models.RawMessage).order_by(models.RawMessage.posted_at.desc()).limit(limit)
+        )
+        return [to_raw_message(row) for row in rows]
+
+    async def counts_by_chat(self) -> dict[int, int]:
+        """Сколько сырья принёс каждый чат. Один запрос, а не по чату на строку."""
+        rows = await self._session.execute(
+            select(models.RawMessage.chat_tg_id, func.count()).group_by(
+                models.RawMessage.chat_tg_id
+            )
+        )
+        return {int(chat_tg_id): int(total) for chat_tg_id, total in rows}
 
     async def list_by_stage(
         self, stage: str = STAGE_PENDING, *, limit: int = 100

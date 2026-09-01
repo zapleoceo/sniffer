@@ -46,6 +46,18 @@ class ChatRepository(Repository):
         )
         return [to_chat(row) for row in rows]
 
+    async def list_all(self, *, limit: int = 200) -> list[Chat]:
+        """Весь реестр для показа владельцу, свежие записи первыми.
+
+        Отдельно от `list_active`: та отвечает на вопрос «где искать сейчас» и
+        режется десяткой по бюджету плана. Здесь вопрос другой — «что вообще
+        накопилось», и выключенный чат в ответе обязан быть виден.
+        """
+        rows = await self._session.scalars(
+            select(models.Chat).order_by(models.Chat.id.desc()).limit(limit)
+        )
+        return [to_chat(row) for row in rows]
+
     async def add(self, chat: Chat) -> Chat:
         row = models.Chat(
             tg_id=chat.tg_id,

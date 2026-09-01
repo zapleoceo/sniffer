@@ -21,8 +21,14 @@ from sniffer.dashboard import auth, data, reauth, views
 from sniffer.domain.records import (
     REQUEST_DONE,
     BrokerCall,
+    CandidateState,
+    Chat,
     ClientRequest,
     DialogMessage,
+    JoinEvent,
+    JoinLimits,
+    RawMessage,
+    RejectedCandidate,
     SessionState,
     User,
 )
@@ -68,6 +74,57 @@ DIALOG = [
     ),
 ]
 STATE = SessionState(id=1, phone="+84900000000", is_active=True, last_ok_at=NOW)
+
+# Всё, что приезжает из чужих чатов, несёт NASTY: название чата и текст поста
+# пишет не владелец, а незнакомый человек в барахолке.
+INVENTORY = data.Inventory(
+    stats={
+        "users": 1,
+        "chats": 2,
+        "chats_active": 1,
+        "raw_messages": 12,
+        "listings": 0,
+        "listings_active": 0,
+        "listings_fresh": 0,
+    },
+    chats=[
+        data.ChatRow(
+            chat=Chat(
+                id=1,
+                tg_id=-1001234567890,
+                username="baraholka",
+                title=NASTY,
+                city="nha_trang",
+                last_msg_id=940,
+                last_synced_at=NOW,
+            ),
+            harvested=12,
+        )
+    ],
+    candidates=[CandidateState(key=NASTY, found_in="@seed", priority=10, attempts=2, found_at=NOW)],
+    candidate_counts={"queued": 34, "joining": 1},
+    joins=[
+        JoinEvent(
+            id=2,
+            kind="claimed",
+            happened_at=NOW,
+            next_allowed_at=NOW,
+            mute_error=NASTY,
+        )
+    ],
+    limits=JoinLimits(joins_in_window=2, next_allowed_at=NOW),
+    rejects=[RejectedCandidate(key=NASTY, reason="foreign_city", rejected_at=NOW)],
+    raw=[
+        RawMessage(
+            chat_tg_id=-1001234567890,
+            msg_id=940,
+            text=NASTY,
+            text_hash="0" * 64,
+            posted_at=NOW,
+            has_media=True,
+        )
+    ],
+)
 
 
 @pytest.fixture(autouse=True)
@@ -116,8 +173,12 @@ def fake_db(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_session_states() -> list[SessionState]:
         return [STATE]
 
+    async def fake_inventory(**_: Any) -> data.Inventory:
+        return INVENTORY
+
     for name, value in (
         ("overview", fake_overview),
+        ("inventory", fake_inventory),
         ("request_detail", fake_request_detail),
         ("user_detail", fake_user_detail),
         ("session_states", fake_session_states),
@@ -143,7 +204,7 @@ def owner(client: TestClient) -> TestClient:
 # ── доступ ──────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("path", ["/", "/requests/3", "/users/7", "/session"])
+@pytest.mark.parametrize("path", ["/", "/database", "/requests/3", "/users/7", "/session"])
 def test_stranger_sees_no_data(client: TestClient, path: str) -> None:
     """Неавторизованный не видит ни строки: только форму входа."""
     response = client.get(path)
@@ -271,7 +332,7 @@ def test_logout_clears_the_cookie(owner: TestClient) -> None:
 # ── экранирование ───────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("path", ["/", "/requests/3", "/users/7"])
+@pytest.mark.parametrize("path", ["/", "/database", "/requests/3", "/users/7"])
 def test_hostile_text_never_becomes_markup(owner: TestClient, path: str) -> None:
     """Текст из чужих чатов рендерится как текст, а не как разметка."""
     body = owner.get(path).text
@@ -427,7 +488,7 @@ def test_reauth_failure_is_shown_escaped(
 
 
 def test_secrets_are_never_rendered(owner: TestClient) -> None:
-    for path in ("/", "/session", "/requests/3"):
+    for path in ("/", "/database", "/session", "/requests/3"):
         body = owner.get(path).text
         assert SESSION_SECRET not in body
         assert BOT_TOKEN not in body
@@ -462,7 +523,7 @@ def test_openapi_and_docs_are_off(client: TestClient) -> None:
 # ── заголовки безопасности ──────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("path", ["/", "/requests/3", "/session", "/healthz"])
+@pytest.mark.parametrize("path", ["/", "/database", "/requests/3", "/session", "/healthz"])
 def test_security_headers_are_on_every_response(owner: TestClient, path: str) -> None:
     """Второй рубеж после экранирования — и он не должен зависеть от хендлера."""
     headers = owner.get(path).headers
@@ -516,3 +577,61 @@ def test_csp_allows_the_widget_file_not_the_whole_telegram_origin(client: TestCl
     # И путь именно тот, что стоит в разметке страницы входа: разъехались бы —
     # вход перестал бы работать, а тест остался бы зелёным.
     assert 'src="https://telegram.org/js/telegram-widget.js?22"' in client.get("/").text
+
+
+# ── страница «База» ─────────────────────────────────────────────────────────
+
+
+def test_database_page_shows_what_is_accumulated(owner: TestClient) -> None:
+    """Главный вопрос страницы: есть ли чему отвечать на запрос клиента."""
+    body = owner.get("/database").text
+
+    assert "Наполнение" in body
+    assert "Чаты реестра" in body and "Очередь вступлений" in body
+    assert "Журнал вступлений" in body and "Последнее сырьё" in body
+    # Счёт вступлений показывается с потолком: «2» без «из 10» не говорит ничего.
+    assert "2/10" in body
+
+
+def test_database_page_says_out_loud_whether_group_search_can_work(
+    owner: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Числа без вывода из них владелец каждый раз пересчитывал бы в уме."""
+    assert "Поиск по группам работает" in owner.get("/database").text
+
+    empty = data.Inventory(stats={"chats": 0, "raw_messages": 0})
+
+    async def nothing(**_: Any) -> data.Inventory:
+        return empty
+
+    monkeypatch.setattr(data, "inventory", nothing)
+    assert "Реестр пуст" in owner.get("/database").text
+
+
+def test_a_chat_without_raw_messages_is_called_out(
+    owner: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Чаты есть, сырья нет — это отдельная поломка, а не «ещё не началось».
+
+    Именно так выглядел живой отказ 01.09.2026 с обратной стороны: вступление
+    прошло, реестр пуст. Обратный случай (реестр есть, ингест молчит) прячется
+    так же легко, поэтому у него свой текст, а не общий «пусто».
+    """
+
+    async def joined_but_silent(**_: Any) -> data.Inventory:
+        return data.Inventory(stats={"chats": 3, "chats_active": 3, "raw_messages": 0})
+
+    monkeypatch.setattr(data, "inventory", joined_but_silent)
+    body = owner.get("/database").text
+
+    assert "Чаты есть, сырья нет" in body
+    assert "Поиск по группам работает" not in body
+
+
+def test_a_stuck_candidate_is_visible_by_its_attempts(owner: TestClient) -> None:
+    """Очередь стоит ровно тогда, когда первый по приоритету копит попытки."""
+    body = owner.get("/database").text
+
+    assert "попыток" in body
+    assert "claimed" not in body, "исход показываем словами, а не строкой из БД"
+    assert "слот занят, исхода нет" in body
