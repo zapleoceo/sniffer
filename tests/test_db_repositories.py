@@ -13,9 +13,11 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from sniffer.bot.store import Client, PassportStore
+from sniffer.db import models
 from sniffer.db.repositories import (
     CandidateRepository,
     ChatRepository,
@@ -545,3 +547,92 @@ async def test_rejections_are_readable_with_their_reason(db_session: AsyncSessio
     assert [(item.key, item.reason) for item in await repo.recent()] == [
         ("@danang001", "foreign_city")
     ]
+
+
+# ── уборка сырья по сроку хранения ──────────────────────────────────────────
+
+
+async def _age(session: AsyncSession, raw_id: int, *, days: int) -> None:
+    """Состарить строку: `ingested_at` ставит база, вставкой его не задать."""
+    await session.execute(
+        update(models.RawMessage)
+        .where(models.RawMessage.id == raw_id)
+        .values(ingested_at=NOW - timedelta(days=days))
+    )
+
+
+async def test_retention_never_takes_a_listing_down_with_the_raw_message(
+    db_session: AsyncSession,
+) -> None:
+    """Главная мина уборки: у `listings.raw_message_id` стоит ON DELETE CASCADE.
+
+    Удаление сырья по возрасту унесло бы живую карточку, показанную клиенту,
+    вместе с текстом, по которому verifier её сверяет. Тест на подделке этого
+    не поймал бы: каскад существует только в настоящей схеме.
+    """
+    repo = RawMessageRepository(db_session)
+    with_card, orphan = await repo.add_many([_raw(1), _raw(2)])
+    await ListingRepository(db_session).add(
+        Listing(
+            raw_message_id=with_card,
+            deal_type="sell",
+            category="motorbike",
+            city="nha_trang",
+            title="Honda Vision 2021",
+            summary="Автомат",
+            tg_link="https://t.me/c/100123/1",
+            posted_at=NOW,
+        )
+    )
+    for raw_id in (with_card, orphan):
+        await _age(db_session, raw_id, days=200)
+    await db_session.commit()
+
+    deleted = await repo.delete_expired(older_than=NOW - timedelta(days=90), limit=100)
+    await db_session.commit()
+
+    assert deleted == 1, "удалить полагалось ровно сироту"
+    assert await repo.get_by_key(-100123, 1) is not None, "сырьё под карточкой обязано остаться"
+    assert await repo.get_by_key(-100123, 2) is None
+    assert await ListingRepository(db_session).get_by_raw_message(with_card) is not None
+
+
+async def test_retention_counts_from_ingested_not_posted(db_session: AsyncSession) -> None:
+    """Догон истории приносит посты двухлетней давности — и они не мусор.
+
+    По `posted_at` уборка стирала бы архив ровно с той скоростью, с какой
+    коллектор его дочитывает, и глубокий добор не имел бы смысла вовсе.
+    """
+    ancient = RawMessage(
+        chat_tg_id=-100123,
+        msg_id=42,
+        text="Продам байк, объявление двухлетней давности",
+        text_hash="hash-ancient",
+        posted_at=NOW - timedelta(days=700),
+    )
+    repo = RawMessageRepository(db_session)
+    await repo.add_many([ancient])
+    await db_session.commit()
+
+    deleted = await repo.delete_expired(older_than=NOW - timedelta(days=90), limit=100)
+    await db_session.commit()
+
+    assert deleted == 0, "скачано сегодня — значит хранится, каким бы старым ни был пост"
+    assert await repo.get_by_key(-100123, 42) is not None
+
+
+async def test_retention_deletes_in_batches(db_session: AsyncSession) -> None:
+    """Первая уборка накопленного не должна быть одной длинной транзакцией."""
+    repo = RawMessageRepository(db_session)
+    ids = await repo.add_many([_raw(number) for number in range(1, 8)])
+    for raw_id in ids:
+        await _age(db_session, raw_id, days=120)
+    await db_session.commit()
+
+    assert await repo.delete_expired(older_than=NOW - timedelta(days=90), limit=3) == 3
+    await db_session.commit()
+    assert await repo.delete_expired(older_than=NOW - timedelta(days=90), limit=3) == 3
+    await db_session.commit()
+    assert await repo.delete_expired(older_than=NOW - timedelta(days=90), limit=3) == 1
+    await db_session.commit()
+    assert await repo.delete_expired(older_than=NOW - timedelta(days=90), limit=3) == 0

@@ -129,7 +129,11 @@ CREATE TABLE IF NOT EXISTS sellers (
     last_seen     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Сырьё как пришло. TTL 30 дней — чистится кроном, иначе съест диск.
+-- Сырьё как пришло. Срок хранения 90 дней, считается от `ingested_at`;
+-- убирает воркер (`worker/retention.py`), не системный крон: состояние машины
+-- задаётся репозиторием, а строчка в чужом crontab не переживёт пересборку.
+-- Срок был 30 дней и не исполнялся вообще — уборки не существовало до
+-- 01.09.2026, а комментарий утверждал обратное.
 CREATE TABLE IF NOT EXISTS raw_messages (
     id           BIGSERIAL PRIMARY KEY,
     chat_tg_id   BIGINT      NOT NULL,
