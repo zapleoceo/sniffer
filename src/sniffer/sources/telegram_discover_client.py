@@ -5,19 +5,19 @@
 собой первое. Разбор ответа вынесен ещё дальше — в
 `telegram_discover_convert.py`: он проверяется таблицей значений и без сети.
 
-Здесь же видна вся поверхность целиком — семь запросов: четыре чтения
-и три на два действия:
+Здесь же видны семь явных TL-запросов: четыре чтения и три на два действия:
 `ResolveUsername`, `GetFullChannel`, `CheckChatInvite`, `contacts.Search`,
 `JoinChannel`, `ImportChatInvite`, `UpdateNotifySettings`. Список закрытый
 (CLAUDE.md, «Работа с Telegram»); третьего **действия** не появляется без
 решения владельца, а `CheckChatInvite` — чтение: оно ничего не отправляет и в
-чате не видно.
+чате не видно. История читается отдельным высокоуровневым `get_messages`, без
+отметки о прочтении.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, cast
 
 import structlog
 
@@ -96,6 +96,15 @@ class TelethonJoiner:
 
         result = await self._client(SearchRequest(q=query, limit=limit))
         return [from_chat(chat) for chat in getattr(result, "chats", ())]
+
+    async def history(self, entity: int | str, *, limit: int, min_id: int) -> Sequence[Any]:
+        """Последние сообщения после курсора, без отметки о прочтении.
+
+        `get_messages` — чтение истории. В отличие от `send_read_acknowledge`
+        оно не меняет состояние диалога у аккаунта и никому не видно.
+        """
+        messages = await self._client.get_messages(entity, limit=limit, min_id=min_id)
+        return cast(Sequence[Any], messages)
 
     async def join_public(self, username: str) -> int:
         """Исключение 1 из «юзербот только читает» (CLAUDE.md)."""

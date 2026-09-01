@@ -96,17 +96,17 @@ async def test_candidate_queue_reserves_in_priority_order_and_counts_unknown_att
     await db_session.commit()
 
 
-async def test_join_ledger_never_claims_a_fourth_slot_in_a_rolling_day(
+async def test_join_ledger_never_claims_an_eleventh_slot_in_a_rolling_day(
     db_session: AsyncSession,
 ) -> None:
     repo = JoinLedgerRepository(db_session)
-    moments = [NOW + timedelta(hours=hour) for hour in (0, 2, 4)]
+    moments = [NOW + timedelta(hours=hour) for hour in range(0, 20, 2)]
     for moment in moments:
         assert (
             await repo.claim_slot(
                 moment,
                 window=timedelta(hours=24),
-                maximum=3,
+                maximum=10,
                 next_allowed_at=moment + timedelta(hours=1),
             )
             is not None
@@ -115,10 +115,10 @@ async def test_join_ledger_never_claims_a_fourth_slot_in_a_rolling_day(
 
     assert (
         await repo.claim_slot(
-            NOW + timedelta(hours=6),
+            NOW + timedelta(hours=20),
             window=timedelta(hours=24),
-            maximum=3,
-            next_allowed_at=NOW + timedelta(hours=7),
+            maximum=10,
+            next_allowed_at=NOW + timedelta(hours=21),
         )
         is None
     )
