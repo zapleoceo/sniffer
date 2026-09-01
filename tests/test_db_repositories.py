@@ -17,15 +17,17 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from sniffer.bot.store import Client, PassportStore
 from sniffer.db.repositories import (
+    CandidateRepository,
     ChatRepository,
     JobRepository,
+    JoinLedgerRepository,
     ListingRepository,
     PassportRepository,
     RawMessageRepository,
     UserRepository,
 )
 from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
-from sniffer.domain.records import Chat, Listing, RawMessage
+from sniffer.domain.records import Chat, DiscoveryCandidate, Listing, RawMessage
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("TEST_DATABASE_URL"),
@@ -69,6 +71,57 @@ async def test_active_chats_come_by_rank(db_session: AsyncSession) -> None:
     await db_session.commit()
 
     assert [chat.tg_id for chat in await repo.list_active()] == [1, 2]
+
+
+# ── безопасная очередь вступления ──────────────────────────────────────────
+
+
+async def test_candidate_queue_reserves_in_priority_order_and_counts_unknown_attempts(
+    db_session: AsyncSession,
+) -> None:
+    repo = CandidateRepository(db_session)
+    await repo.push(DiscoveryCandidate(key="@later", username="later", priority=20))
+    await repo.push(DiscoveryCandidate(key="@first", username="first", priority=10))
+    await db_session.commit()
+
+    first = await repo.reserve()
+    await db_session.commit()
+    assert first is not None and first.key == "@first"
+    assert await repo.release(first.key) == 1
+    await db_session.commit()
+
+    # Освобождённый кандидат остаётся первым, но попытка хранится в БД.
+    again = await repo.reserve()
+    assert again is not None and again.key == "@first"
+    await db_session.commit()
+
+
+async def test_join_ledger_never_claims_a_fourth_slot_in_a_rolling_day(
+    db_session: AsyncSession,
+) -> None:
+    repo = JoinLedgerRepository(db_session)
+    moments = [NOW + timedelta(hours=hour) for hour in (0, 2, 4)]
+    for moment in moments:
+        assert (
+            await repo.claim_slot(
+                moment,
+                window=timedelta(hours=24),
+                maximum=3,
+                next_allowed_at=moment + timedelta(hours=1),
+            )
+            is not None
+        )
+        await db_session.commit()
+
+    assert (
+        await repo.claim_slot(
+            NOW + timedelta(hours=6),
+            window=timedelta(hours=24),
+            maximum=3,
+            next_allowed_at=NOW + timedelta(hours=7),
+        )
+        is None
+    )
 
 
 async def test_sync_cursor_only_moves_forward(db_session: AsyncSession) -> None:

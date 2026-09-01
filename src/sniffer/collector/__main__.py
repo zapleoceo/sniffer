@@ -1,12 +1,12 @@
 """Коллектор: единственный держатель MTProto-сессии.
 
-На P0 сессии ещё нет, и это нормальное состояние, а не сбой: процесс говорит,
-каких настроек ждёт, и ждёт. Догон истории по `chats.last_msg_id` и
-live-подписка приходят на P1 — их место в `_tick`.
+Коллектор разбирает очередь безопасного вступления: не более одного кандидата
+за проход, с лимитами, которые хранятся в Postgres. Догон истории по
+`chats.last_msg_id` и live-подписка приходят на следующем этапе.
 
-Юзербот только читает (CLAUDE.md). Ни одного исходящего действия отсюда не
-появится: личный аккаунт ловит `PEER_FLOOD` за пять сообщений незнакомым
-людям, а аккаунт здесь один.
+Юзербот не общается (CLAUDE.md): нет ни сообщений, ни реакций, ни отметок о
+прочтении. Единственные разрешённые исключения здесь — вступление по очереди и
+беззвучный режим; их лимиты и журнал хранятся в Postgres.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ import structlog
 
 from sniffer.collector.auth import EXIT_OK, EXIT_USAGE, run_auth
 from sniffer.collector.console import Console, tell
+from sniffer.collector.discovery import DiscoveryRunner
 from sniffer.config import Settings
 from sniffer.runtime.service import Service, idle_loop, run_service
 
@@ -31,9 +32,10 @@ NAME = "collector"
 # коллектор, и версия Telethon у них обязана быть одна.
 AUTH_COMMAND = "auth"
 
-# Интервал опроса больше, чем у воркера: Telegram не любит частых обращений, а
-# новые сообщения приходят подпиской, а не поллингом.
-POLL_INTERVAL_S = 15.0
+# Лимит разрешает одно вступление не чаще чем раз в час; проверять его каждые
+# 15 минут достаточно, а держать второе MTProto-подключение постоянно нельзя:
+# в момент живого поиска сессией пользуется адаптер Telegram-групп.
+POLL_INTERVAL_S = 15 * 60.0
 
 
 def missing_settings(settings: Settings) -> list[str]:
@@ -53,12 +55,8 @@ def missing_settings(settings: Settings) -> list[str]:
 
 async def run(stop: asyncio.Event) -> None:
     log.info("collector.started")
-    await idle_loop(stop, _tick, service=NAME, poll_interval_s=POLL_INTERVAL_S)
-
-
-async def _tick() -> int:
-    """Сколько сообщений забрали за проход. P1: догон истории и live-подписка."""
-    return 0
+    runner = DiscoveryRunner()
+    await idle_loop(stop, runner.tick, service=NAME, poll_interval_s=POLL_INTERVAL_S)
 
 
 SERVICE = Service(name=NAME, requires=missing_settings, run=run)

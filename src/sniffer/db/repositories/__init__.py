@@ -4,6 +4,11 @@ from sniffer.db.repositories.base import Repository
 from sniffer.db.repositories.broker_calls import BrokerCallRepository
 from sniffer.db.repositories.chats import ChatRepository
 from sniffer.db.repositories.dialog import DialogRepository
+from sniffer.db.repositories.discovery import (
+    CandidateRepository,
+    JoinLedgerRepository,
+    RejectRepository,
+)
 from sniffer.db.repositories.jobs import JobRepository
 from sniffer.db.repositories.listings import ListingRepository
 from sniffer.db.repositories.passports import PassportRepository
@@ -15,13 +20,16 @@ from sniffer.db.repositories.users import UserRepository
 
 __all__ = [
     "BrokerCallRepository",
+    "CandidateRepository",
     "ChatRepository",
     "ClientRequestRepository",
     "DialogRepository",
     "JobRepository",
+    "JoinLedgerRepository",
     "ListingRepository",
     "PassportRepository",
     "RawMessageRepository",
+    "RejectRepository",
     "Repository",
     "StatsRepository",
     "TelegramSessionRepository",
