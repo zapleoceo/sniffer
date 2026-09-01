@@ -140,15 +140,22 @@ async def test_a_broken_guard_does_not_cancel_the_answer(boom: Exception) -> Non
     assert len(kept) == 2
 
 
-async def test_only_the_head_of_the_list_costs_money() -> None:
-    """Клиенту показываются единицы карточек — проверять сотню незачем."""
+async def test_only_checked_cards_reach_the_client() -> None:
+    """Непроверенный хвост не показывается — и это исправление, а не экономия.
+
+    Сначала хвост ехал следом за проверенным: «о нём ничего не известно,
+    выбрасывать не за что». Замер 01.09.2026 показал цену такой логики: охранник
+    снял десять карточек из двенадцати, наверх всплыл хвост, куда ранжирование
+    сложило заведомо худшее, и на «мотоцикл до 300 USD» клиент увидел ноутбуки
+    ThinkPad — не потому что охранник их пропустил, а потому что до них не дошёл.
+    """
     items = [item(number, "Продам байк") for number in range(1, 31)]
     broker = FakeBroker({"verdicts": []})
 
     kept = await screen(WANTED, items, broker=broker, limit=5)  # type: ignore[arg-type]
 
-    assert broker.calls == 1
-    assert len(kept) == 30, "непроверенный хвост не выбрасывается"
+    assert broker.calls == 1, "платим за пятерых, а не за тридцать"
+    assert len(kept) == 5, "показываем только то, что проверили"
     assert broker.prompts[0].count(") Продам байк") == 5
 
 
@@ -187,3 +194,34 @@ async def test_without_a_rate_the_model_is_not_told_a_made_up_budget() -> None:
 
     # Слово «бюджет» есть в самой инструкции — проверяем именно потолок.
     assert "бюджет до" not in broker.prompts[0]
+
+
+async def test_the_model_is_told_the_subject_in_human_words() -> None:
+    """Со строкой `motorbike` модель отбраковывала скутеры.
+
+    Замер 01.09.2026, дословная причина отказа: «Это мопед/скутер электрический,
+    а клиент ищет motorbike». Модель читала имя поля как требование, потому что
+    человек так не пишет.
+    """
+    broker = FakeBroker({"verdicts": []})
+
+    await screen(WANTED, [item(1, "байк")], broker=broker)  # type: ignore[arg-type]
+
+    prompt = broker.prompts[0]
+    assert "скутер" in prompt and "мотобайк" in prompt
+    assert "motorbike" not in prompt
+    assert "Нячанг" in prompt and "nha_trang" not in prompt
+
+
+async def test_a_missing_price_is_never_a_reason_to_refuse() -> None:
+    """Половина объявлений Нячанга цену не пишет вовсе.
+
+    Замер 01.09.2026: охранник снял десять карточек из двенадцати с причиной
+    «Цена в тексте отсутствует» — то есть выбросил ровно то, ради чего заведён.
+    Правило теперь стоит в промпте явным пунктом.
+    """
+    broker = FakeBroker({"verdicts": []})
+
+    await screen(WANTED, [item(1, "байк")], broker=broker)  # type: ignore[arg-type]
+
+    assert "отсутствие цены НЕ причина отказа" in broker.prompts[0]
