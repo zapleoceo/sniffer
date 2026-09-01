@@ -14,7 +14,13 @@ from sqlalchemy.dialects.postgresql import insert
 
 from sniffer.db import models
 from sniffer.db.repositories.base import Repository
-from sniffer.domain.records import DiscoveryCandidate, JoinLimits
+from sniffer.domain.records import (
+    CandidateState,
+    DiscoveryCandidate,
+    JoinEvent,
+    JoinLimits,
+    RejectedCandidate,
+)
 
 # Один короткий transaction-level замок на весь аккаунт. Он не держится во
 # время Telegram-вызова: защищает лишь проверку лимитов и запись слота.
@@ -71,6 +77,26 @@ class CandidateRepository(Repository):
             )
         )
 
+    async def snapshot(self, *, limit: int = 100) -> list[CandidateState]:
+        """Очередь так, как её разбирает `reserve()`: приоритет, потом возраст.
+
+        Порядок здесь не украшение. Владелец смотрит на эту таблицу, чтобы
+        понять, кто следующий и почему очередь не двигается, — а не двигается
+        она ровно тогда, когда первый по этому порядку копит `attempts`.
+        """
+        rows = await self._session.scalars(
+            select(models.ChatCandidate)
+            .order_by(models.ChatCandidate.priority, models.ChatCandidate.found_at)
+            .limit(limit)
+        )
+        return [_state(row) for row in rows]
+
+    async def counts_by_status(self) -> dict[str, int]:
+        rows = await self._session.execute(
+            select(models.ChatCandidate.status, func.count()).group_by(models.ChatCandidate.status)
+        )
+        return {str(status): int(total) for status, total in rows}
+
 
 class RejectRepository(Repository):
     async def contains(self, key: str) -> bool:
@@ -79,6 +105,16 @@ class RejectRepository(Repository):
                 select(models.ChatReject.key).where(models.ChatReject.key == key).limit(1)
             )
         )
+
+    async def recent(self, *, limit: int = 50) -> list[RejectedCandidate]:
+        """Кого и почему не взяли. Причина — та же строка, что пишет joiner."""
+        rows = await self._session.scalars(
+            select(models.ChatReject).order_by(models.ChatReject.rejected_at.desc()).limit(limit)
+        )
+        return [
+            RejectedCandidate(key=row.key, reason=row.reason, rejected_at=row.rejected_at)
+            for row in rows
+        ]
 
     async def reject(self, key: str, reason: str) -> None:
         await self._session.execute(
@@ -164,6 +200,33 @@ class JoinLedgerRepository(Repository):
             .values(muted=True, mute_error=None)
         )
 
+    async def recent_events(self, *, limit: int = 30) -> list[JoinEvent]:
+        """Журнал вступлений как есть — включая `claimed` без исхода.
+
+        Строка `claimed` без `tg_id` и есть потраченный впустую слот: она
+        осталась после обрыва или после ответа, из которого чата не достали.
+        Прятать её нельзя — именно по ней видно, куда ушли суточные попытки.
+        """
+        rows = await self._session.scalars(
+            select(models.ChatJoinEvent)
+            .order_by(models.ChatJoinEvent.happened_at.desc())
+            .limit(limit)
+        )
+        return [
+            JoinEvent(
+                id=row.id,
+                kind=row.kind,
+                tg_id=row.tg_id,
+                username=row.username,
+                happened_at=row.happened_at,
+                next_allowed_at=row.next_allowed_at,
+                blocked_until=row.blocked_until,
+                muted=row.muted,
+                mute_error=row.mute_error,
+            )
+            for row in rows
+        ]
+
     async def pending_mutes(self) -> list[int]:
         rows = await self._session.scalars(
             select(models.ChatJoinEvent.tg_id).where(
@@ -182,4 +245,17 @@ def _candidate(row: models.ChatCandidate) -> DiscoveryCandidate:
         invite_hash=row.invite_hash or "",
         found_in=row.found_in,
         priority=row.priority,
+    )
+
+
+def _state(row: models.ChatCandidate) -> CandidateState:
+    return CandidateState(
+        key=row.key,
+        username=row.username or "",
+        invite_hash=row.invite_hash or "",
+        found_in=row.found_in,
+        priority=row.priority,
+        status=row.status,
+        attempts=row.attempts,
+        found_at=row.found_at,
     )

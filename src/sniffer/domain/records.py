@@ -259,3 +259,52 @@ class SessionState:
     last_error_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateState:
+    """Кандидат очереди вместе с ходом разбора — то, чего нет в `DiscoveryCandidate`.
+
+    Второй тип рядом с первым, а не поля с умолчаниями в нём: `join_next()`
+    берёт кандидата, чтобы вступить, и `status` со `attempts` ему только мешают
+    — он их не читает и менять не вправе. Показывать очередь человеку без них,
+    наоборот, бессмысленно: «застряло» видно ровно по числу попыток.
+    """
+
+    key: str
+    username: str = ""
+    invite_hash: str = ""
+    found_in: str = ""
+    priority: int = 100
+    status: str = "queued"
+    attempts: int = 0
+    found_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RejectedCandidate:
+    """Отклонённый кандидат: ключ, причина, когда."""
+
+    key: str
+    reason: str
+    rejected_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class JoinEvent:
+    """Строка журнала вступлений — как её видит человек, а не страж лимитов.
+
+    Стражу хватает `JoinLimits` (сколько за окно, когда можно снова). Здесь
+    нужно другое: чем кончилось конкретное вступление и заглушен ли чат —
+    незаглушенный рабочий аккаунт владелец замечает уведомлениями, а не логом.
+    """
+
+    kind: str
+    happened_at: datetime
+    tg_id: int | None = None
+    username: str | None = None
+    next_allowed_at: datetime | None = None
+    blocked_until: datetime | None = None
+    muted: bool = False
+    mute_error: str | None = None
+    id: int | None = None

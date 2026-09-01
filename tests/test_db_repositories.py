@@ -24,6 +24,7 @@ from sniffer.db.repositories import (
     ListingRepository,
     PassportRepository,
     RawMessageRepository,
+    RejectRepository,
     UserRepository,
 )
 from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
@@ -427,3 +428,120 @@ async def test_two_workers_take_different_jobs(db_engine: AsyncEngine) -> None:
 
     assert taken_first is not None and taken_second is not None
     assert taken_first.id != taken_second.id
+
+
+# ── снимок наполнения для страницы «База» ───────────────────────────────────
+
+
+async def test_registry_snapshot_shows_disabled_chats_too(db_session: AsyncSession) -> None:
+    """`list_all` отвечает «что накоплено», а не «где искать сейчас».
+
+    Выключенный чат из `list_active` исчезает по делу — искать в нём незачем.
+    Но на странице наполнения его отсутствие читалось бы как «мы туда не
+    вступали», то есть ровно наоборот.
+    """
+    repo = ChatRepository(db_session)
+    await repo.add(Chat(tg_id=-100901, title="живой", city="nha_trang"))
+    await repo.add(Chat(tg_id=-100902, title="выключенный", city="nha_trang", is_active=False))
+    await db_session.commit()
+
+    everything = {chat.tg_id for chat in await repo.list_all()}
+
+    assert everything == {-100901, -100902}
+    assert {chat.tg_id for chat in await repo.list_active()} == {-100901}
+
+
+async def test_harvest_counts_are_one_query_per_page_not_per_chat(
+    db_session: AsyncSession,
+) -> None:
+    """Сколько сырья принёс каждый чат — счётчик, по которому видно молчащий чат."""
+    await RawMessageRepository(db_session).add_many(
+        [_raw(1, -100901), _raw(2, -100901), _raw(3, -100902)]
+    )
+    await db_session.commit()
+
+    counts = await RawMessageRepository(db_session).counts_by_chat()
+
+    assert counts == {-100901: 2, -100902: 1}
+
+
+async def test_recent_raw_comes_by_publication_not_by_insert(db_session: AsyncSession) -> None:
+    """Догон истории приходит вразнобой: порядок вставки показал бы старое."""
+    old = RawMessage(
+        chat_tg_id=-100901,
+        msg_id=10,
+        text="старое",
+        text_hash="hash-old",
+        posted_at=NOW - timedelta(days=3),
+    )
+    fresh = RawMessage(
+        chat_tg_id=-100901, msg_id=11, text="свежее", text_hash="hash-new", posted_at=NOW
+    )
+    # Вставляем старое ПОСЛЕ свежего — как и бывает при догоне.
+    await RawMessageRepository(db_session).add_many([fresh])
+    await RawMessageRepository(db_session).add_many([old])
+    await db_session.commit()
+
+    assert [message.text for message in await RawMessageRepository(db_session).recent()] == [
+        "свежее",
+        "старое",
+    ]
+
+
+async def test_queue_snapshot_keeps_the_order_reserve_uses(db_session: AsyncSession) -> None:
+    """Порядок снимка обязан совпадать с порядком разбора.
+
+    Иначе страница показывает «следующий — этот», а `reserve()` берёт другого,
+    и застрявшего кандидата ищут не там, где он стоит.
+    """
+    repo = CandidateRepository(db_session)
+    for key, priority in (("@third", 30), ("@first", 10), ("@second", 20)):
+        await repo.push(DiscoveryCandidate(key=key, username=key.lstrip("@"), priority=priority))
+    await db_session.commit()
+    await repo.release("@first")  # неизвестный исход: попытка засчитана
+    await db_session.commit()
+
+    snapshot = await repo.snapshot()
+
+    assert [item.key for item in snapshot] == ["@first", "@second", "@third"]
+    assert snapshot[0].attempts == 1, "застрявший кандидат виден только по попыткам"
+    assert await repo.counts_by_status() == {"queued": 3}
+
+
+async def test_a_claimed_slot_without_an_outcome_stays_in_the_journal(
+    db_session: AsyncSession,
+) -> None:
+    """Строка `claimed` без чата — потраченный впустую слот, и прятать её нельзя.
+
+    Живой отказ 01.09.2026 выглядел именно так: два `claimed` без `tg_id`,
+    реестр пуст. Если журнал показывает только удачные вступления, этот отказ
+    на странице неотличим от «ещё не пробовали».
+    """
+    ledger = JoinLedgerRepository(db_session)
+    event_id = await ledger.claim_slot(
+        NOW, window=timedelta(hours=24), maximum=10, next_allowed_at=NOW + timedelta(hours=1)
+    )
+    assert event_id is not None
+    await ledger.confirm_join(event_id=event_id, tg_id=-100903, username="joined_one")
+    await ledger.claim_slot(
+        NOW + timedelta(hours=2),
+        window=timedelta(hours=24),
+        maximum=10,
+        next_allowed_at=NOW + timedelta(hours=3),
+    )
+    await db_session.commit()
+
+    events = await ledger.recent_events()
+
+    assert [event.kind for event in events] == ["claimed", "joined"]
+    assert events[0].tg_id is None, "исхода нет — и это ровно то, что надо увидеть"
+
+
+async def test_rejections_are_readable_with_their_reason(db_session: AsyncSession) -> None:
+    repo = RejectRepository(db_session)
+    await repo.reject("@danang001", "foreign_city")
+    await db_session.commit()
+
+    assert [(item.key, item.reason) for item in await repo.recent()] == [
+        ("@danang001", "foreign_city")
+    ]
