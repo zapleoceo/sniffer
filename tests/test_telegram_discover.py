@@ -1439,3 +1439,151 @@ async def test_a_flood_near_midnight_still_stops_for_half_a_day() -> None:
         assert await joiner(db, healthy, now=late + timedelta(hours=hours)).join_next() is None, (
             f"через {hours} ч после флуда вступление прошло — стоп короче полусуток"
         )
+
+
+# ── ответ на join без чата: id добирается чтением ───────────────────────────
+#
+# Живой отказ 01.09.2026: `JoinChannel` в @auto_moto_vietnam ответил без
+# `chats`, клиент бросил `LookupError`, joiner счёл исход неизвестным и вернул
+# кандидата в очередь — то есть через час ушёл ВТОРОЙ join в тот же чат. За
+# сутки: два слота из десяти на один чат, `chats` пуст, чат не заглушен, вся
+# очередь из 35 кандидатов стоит за первым. Ответ без чата бывает штатно
+# (`UpdatesTooLong`), и вступление при этом состоялось.
+
+
+class FakeTelethon:
+    """Клиент, отвечающий по имени TL-запроса. Ничего, кроме диспетчера."""
+
+    def __init__(self, answers: dict[str, Any]) -> None:
+        self.answers = answers
+        self.asked: list[str] = []
+
+    async def __call__(self, request: Any) -> Any:
+        name = type(request).__name__
+        self.asked.append(name)
+        answer = self.answers.get(name)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+
+def a_channel(tg_id: int = 1234567890, *, username: str = "auto_moto_vietnam") -> Any:
+    from telethon.tl.types import Channel
+
+    return Channel(
+        id=tg_id,
+        title="Аренда Байков Нячанг",
+        photo=None,
+        date=None,
+        megagroup=True,
+        username=username,
+    )
+
+
+def a_user(tg_id: int = 777) -> Any:
+    from telethon.tl.types import User as TgUser
+
+    return TgUser(id=tg_id, first_name="человек", username="auto_moto_vietnam")
+
+
+@dataclass
+class Answer:
+    """Ответ Telegram со списками сущностей — как их отдаёт `Updates`."""
+
+    chats: list[Any] = field(default_factory=list)
+    users: list[Any] = field(default_factory=list)
+
+
+class UpdatesTooLongLike:
+    """Ответ без `chats` вовсе — форма, на которой всё и сломалось."""
+
+
+async def test_a_join_answer_without_chats_reads_the_id_instead_of_failing() -> None:
+    """Вступление состоялось — значит и id обязан найтись, а не исход «неизвестен»."""
+    channel = a_channel()
+    client = FakeTelethon(
+        {
+            "JoinChannelRequest": UpdatesTooLongLike(),
+            "ResolveUsernameRequest": Answer(chats=[channel]),
+            "GetFullChannelRequest": None,
+        }
+    )
+
+    tg_id = await telegram_discover_client.TelethonJoiner(client).join_public("@auto_moto_vietnam")
+
+    assert tg_id == -1001234567890
+    assert "ResolveUsernameRequest" in client.asked, "id обязан читаться, а не угадываться"
+    assert client.asked.count("JoinChannelRequest") == 1, "второго вступления быть не должно"
+
+
+async def test_reading_the_id_after_a_join_costs_no_second_action() -> None:
+    """Добор id — только чтение: закрытый список действий CLAUDE.md не растёт."""
+    client = FakeTelethon(
+        {
+            "JoinChannelRequest": UpdatesTooLongLike(),
+            "ResolveUsernameRequest": Answer(chats=[a_channel()]),
+            "GetFullChannelRequest": None,
+        }
+    )
+
+    await telegram_discover_client.TelethonJoiner(client).join_public("@auto_moto_vietnam")
+
+    assert [name for name in client.asked if name in ALLOWED_ACTIONS] == ["JoinChannelRequest"]
+
+
+async def test_an_unreadable_join_stays_an_unknown_outcome() -> None:
+    """Имя перестало разрешаться — id взять неоткуда, и врать про него нельзя."""
+    client = FakeTelethon(
+        {"JoinChannelRequest": UpdatesTooLongLike(), "ResolveUsernameRequest": Answer()}
+    )
+
+    with pytest.raises(LookupError):
+        await telegram_discover_client.TelethonJoiner(client).join_public("@gone")
+
+
+async def test_a_username_that_turned_into_a_person_is_not_a_chat_id() -> None:
+    """`from_user` отдаёт сырой id человека — принять его за чат нельзя."""
+    client = FakeTelethon(
+        {
+            "JoinChannelRequest": UpdatesTooLongLike(),
+            "ResolveUsernameRequest": Answer(users=[a_user()]),
+        }
+    )
+
+    with pytest.raises(LookupError):
+        await telegram_discover_client.TelethonJoiner(client).join_public("@auto_moto_vietnam")
+
+
+async def test_an_invite_answer_without_chats_reads_the_id_from_the_invite() -> None:
+    """У закрытой группы имени нет, зато `CheckChatInvite` знает, что мы внутри."""
+
+    class InviteAlready:
+        chat = a_channel(999, username="")
+
+    client = FakeTelethon(
+        {
+            "ImportChatInviteRequest": UpdatesTooLongLike(),
+            "CheckChatInviteRequest": InviteAlready(),
+            "GetFullChannelRequest": None,
+        }
+    )
+
+    tg_id = await telegram_discover_client.TelethonJoiner(client).join_invite("GoOdHaShAbCdEf12")
+
+    assert tg_id == -1000000000999
+    assert client.asked.count("ImportChatInviteRequest") == 1
+
+
+async def test_an_invite_that_did_not_let_us_in_stays_unknown() -> None:
+    """`ChatInvite` без `chat` — мы снаружи. Тут исход и правда неизвестен."""
+
+    class StillOutside:
+        chat = None
+        title = "Аренда Байков Нячанг"
+
+    client = FakeTelethon(
+        {"ImportChatInviteRequest": UpdatesTooLongLike(), "CheckChatInviteRequest": StillOutside()}
+    )
+
+    with pytest.raises(LookupError):
+        await telegram_discover_client.TelethonJoiner(client).join_invite("GoOdHaShAbCdEf12")
