@@ -16,6 +16,7 @@ import pytest
 
 from sniffer.broker import usage
 from sniffer.broker.client import BrokerClient, BrokerResult
+from sniffer.broker.contracts import UsageSink
 from sniffer.domain.records import BrokerCall
 
 DONE = {
@@ -42,7 +43,7 @@ def transport(body: dict[str, Any]) -> httpx.MockTransport:
     return httpx.MockTransport(handle)
 
 
-def client(body: dict[str, Any], sink: usage.UsageSink) -> BrokerClient:
+def client(body: dict[str, Any], sink: UsageSink) -> BrokerClient:
     return BrokerClient(
         httpx.AsyncClient(transport=transport(body), base_url="https://broker.test"),
         usage=sink,

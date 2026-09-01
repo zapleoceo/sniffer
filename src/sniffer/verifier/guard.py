@@ -41,6 +41,7 @@ from typing import Any
 import structlog
 
 from sniffer.broker.client import BrokerClient, BrokerError
+from sniffer.broker.usage import default_usage_sink
 from sniffer.domain.passport import Currency, Passport
 from sniffer.sources.base import RawItem
 
@@ -119,7 +120,7 @@ async def screen(
         return items
 
     own = broker is None
-    client = broker or BrokerClient()
+    client = broker or BrokerClient(usage=default_usage_sink)
     try:
         payload = await asyncio.wait_for(
             client.structured(
