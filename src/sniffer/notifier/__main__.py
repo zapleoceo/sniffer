@@ -1,8 +1,11 @@
 """Нотифаер: разбирает `outbox` и шлёт сообщения клиентам.
 
-На P0 подписок ещё нет, очередь пуста. Токен всё равно обязателен: отправляет
-он тем же Bot API, что и диалоговый процесс, и без токена доставка невозможна
-в принципе — лучше сказать это в логе сразу, чем при первой же карточке.
+Очередь наполняет `worker/matcher.py`: новая карточка, подошедшая подписке,
+становится строкой в `outbox`. Здесь она превращается в сообщение.
+
+Отдельный процесс, а не задача бота: доставка обязана переживать перезапуск
+диалога, а темп рассылки нельзя ставить в зависимость от того, занят ли бот
+разговором. Токен обязателен — шлём тем же Bot API.
 """
 
 from __future__ import annotations
@@ -10,8 +13,12 @@ from __future__ import annotations
 import asyncio
 
 import structlog
+from aiogram import Bot
+from aiogram.enums import ParseMode
+from aiogram.types import LinkPreviewOptions
 
-from sniffer.config import Settings
+from sniffer.config import Settings, get_settings
+from sniffer.notifier.delivery import Delivery, Sender
 from sniffer.runtime.service import Service, idle_loop, run_service
 
 log = structlog.get_logger(__name__)
@@ -29,12 +36,30 @@ def missing_settings(settings: Settings) -> list[str]:
 
 async def run(stop: asyncio.Event) -> None:
     log.info("notifier.started")
-    await idle_loop(stop, _tick, service=NAME, poll_interval_s=POLL_INTERVAL_S)
+    bot = Bot(token=get_settings().bot_token)
+    delivery = Delivery(_sender(bot))
+    try:
+        await idle_loop(stop, delivery.tick, service=NAME, poll_interval_s=POLL_INTERVAL_S)
+    finally:
+        # Сессия aiohttp живёт внутри Bot: не закрыть её значит оставить
+        # предупреждение в логе на каждой остановке контейнера.
+        await bot.session.close()
 
 
-async def _tick() -> int:
-    """Сколько сообщений доставили за проход. P1: выборка `outbox` по `scheduled_at`."""
-    return 0
+def _sender(bot: Bot) -> Sender:
+    """Отправка через Bot API. Единственное место, где нотифаер знает aiogram."""
+
+    async def send(user_id: int, text: str) -> None:
+        await bot.send_message(
+            user_id,
+            text,
+            parse_mode=ParseMode.HTML,
+            # Ссылка на объявление в карточке одна и она же — единственное, что
+            # клиенту нужно открыть. Предпросмотр рядом с ней только шумит.
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+        )
+
+    return send
 
 
 SERVICE = Service(name=NAME, requires=missing_settings, run=run)

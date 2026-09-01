@@ -75,7 +75,9 @@ class Settings(BaseSettings):
     max_cards: int = 5
     live_search_max_chats: int = 10
     live_search_cache_ttl_s: int = 300
-    raw_retention_days: int = 30
+    # Архив нужен, чтобы догонять объявления, пришедшие до вступления в чат.
+    # 30 дней противоречили схеме и документации, где срок — 90 дней.
+    raw_retention_days: int = 90
     prefilter_batch: int = 20
     extract_batch: int = 10
     default_city: str = "nha_trang"

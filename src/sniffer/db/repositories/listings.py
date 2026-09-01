@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 
 from sniffer.db import models
 from sniffer.db.mappers import to_listing
 from sniffer.db.repositories.base import Repository
-from sniffer.domain.records import Listing
+from sniffer.domain.records import Listing, MatchFilter
 
 
 class ListingRepository(Repository):
@@ -42,6 +42,46 @@ class ListingRepository(Repository):
         self._session.add(row)
         await self._session.flush()
         return to_listing(row)
+
+    async def match(
+        self, spec: MatchFilter, *, after_id: int = 0, limit: int = 50
+    ) -> list[Listing]:
+        """Карточки под условия подписки, начиная с `after_id`.
+
+        Курсор по `id`, а не по времени: воркер идёт по подпискам и обязан
+        двигаться вперёд ровно один раз по каждой карточке. По времени это не
+        получается — две карточки одной секунды либо повторятся, либо
+        потеряются, смотря какое сравнение выбрать.
+
+        Индекс `listings_match_idx` покрывает `city, category, deal_type,
+        is_active, posted_at DESC` — условия ниже подобраны под него.
+        """
+        statement = select(models.Listing).where(
+            models.Listing.id > after_id,
+            models.Listing.city == spec.city,
+            models.Listing.is_active.is_(True),
+        )
+        if spec.category is not None:
+            statement = statement.where(models.Listing.category == spec.category)
+        if spec.deal_type is not None:
+            statement = statement.where(models.Listing.deal_type == spec.deal_type)
+        if spec.since is not None:
+            statement = statement.where(models.Listing.posted_at >= spec.since)
+        if spec.max_price_vnd is not None:
+            # Карточку без цены не отбрасываем: минимальная карточка её ещё не
+            # извлекает, и «цены нет» не значит «дорого». Решает потом score.
+            statement = statement.where(
+                or_(
+                    models.Listing.price_amount.is_(None),
+                    models.Listing.price_amount <= spec.max_price_vnd,
+                )
+            )
+        rows = await self._session.scalars(statement.order_by(models.Listing.id).limit(limit))
+        return [to_listing(row) for row in rows]
+
+    async def max_id(self) -> int:
+        """Верхняя граница курсора: докуда подписке имеет смысл догонять."""
+        return int(await self._session.scalar(select(func.max(models.Listing.id))) or 0)
 
     async def get(self, listing_id: int) -> Listing | None:
         row = await self._session.get(models.Listing, listing_id)

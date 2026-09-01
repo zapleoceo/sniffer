@@ -18,6 +18,7 @@ import httpx
 import structlog
 
 from sniffer.broker.client import BrokerClient, BrokerError
+from sniffer.broker.usage import default_usage_sink
 from sniffer.config import get_settings
 from sniffer.domain.passport import (
     Budget,
@@ -80,7 +81,7 @@ class QueryIntake:
         return merged
 
     async def _ask(self, text: str) -> dict[str, Any]:
-        broker = self._broker or BrokerClient()
+        broker = self._broker or BrokerClient(usage=default_usage_sink)
         self._broker = broker
         return await broker.structured(
             f"Запрос клиента: {text}",

@@ -19,7 +19,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from decimal import Decimal
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
 import structlog
 
@@ -33,12 +33,6 @@ if TYPE_CHECKING:  # pragma: no cover — только для аннотаций
 log = structlog.get_logger(__name__)
 
 _current_request: ContextVar[int | None] = ContextVar("sniffer_client_request", default=None)
-
-
-class UsageSink(Protocol):
-    """Куда клиент брокера сообщает о состоявшемся вызове."""
-
-    async def __call__(self, capability: str, result: BrokerResult) -> None: ...
 
 
 @contextmanager

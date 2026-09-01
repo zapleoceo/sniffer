@@ -934,3 +934,69 @@ def test_the_real_journal_fits_the_recorder_protocol() -> None:
         "sources",
         "error",
     }
+
+
+# ── журнал: ход считается ходом, чем бы его ни начали ───────────────────────
+#
+# Живой след 01.09.2026: запрос №2 отдал клиенту пять карточек Chotot, а в
+# `client_requests` у него `result_count = 0` и пустой `sources`; расход модели
+# на кнопочном поиске приехал с `request_id = NULL`. Причина была структурная:
+# `_Turn` ехал аргументом, и четыре места из шести его теряли.
+
+
+async def test_a_restated_query_still_reports_what_it_found(recorded: FakeJournal) -> None:
+    """Повтор той же просьбы ищет по-настоящему — значит и в журнале не ноль.
+
+    Именно этот путь (`_restated`) и врал в проде: карточки уходили, журнал
+    писал ноль. Тест повторяет его дословно — два одинаковых сообщения подряд.
+    """
+    store = MemoryStore()
+    talker = talk(store, filled(), recorder=recorded)
+
+    await talker.on_text(CLIENT, "ищу скутер", Replies())
+    second = Replies()
+    await talker.on_text(CLIENT, "ищу скутер", second)
+
+    assert any("открыть оригинал" in text for text in second.texts), "карточки клиенту ушли"
+    assert recorded.closed[1]["result_count"] == 1, "а журнал обязан это увидеть"
+
+
+async def test_a_button_press_opens_its_own_journal_entry(recorded: FakeJournal) -> None:
+    """Нажатие кнопки — полноценный поиск: те же деньги, та же запись."""
+    store = MemoryStore()
+    talker = talk(store, bike(), recorder=recorded)
+    await talker.on_text(CLIENT, "ищу скутер", Replies())
+    opened_before = len(recorded.opened)
+
+    replies = Replies()
+    await talker.on_answer(CLIENT, "budget", "500", replies)
+
+    assert len(recorded.opened) == opened_before + 1, "у кнопки обязан быть свой запрос"
+    assert recorded.opened[-1][1].startswith("кнопка:"), recorded.opened[-1]
+
+
+async def test_a_feedback_press_reports_its_results(recorded: FakeJournal) -> None:
+    """«Дорого» перезапускает подбор — и он тоже обязан попасть в журнал."""
+    store = MemoryStore()
+    talker = talk(store, filled(), recorder=recorded)
+    await talker.on_text(CLIENT, "ищу скутер", Replies())
+
+    await talker.on_feedback(CLIENT, Feedback.PRICEY, Replies())
+
+    assert recorded.closed[-1]["result_count"] == 1
+    assert recorded.opened[-1][1] == f"кнопка: {Feedback.PRICEY.value}"
+
+
+def test_the_search_cannot_be_called_without_its_turn() -> None:
+    """Структурная защита: у `_search` нет параметра, который можно забыть.
+
+    Поведенческие тесты выше проверяют шесть известных путей. Седьмой напишут
+    завтра и снова забудут передать ход — если передавать будет что. Поэтому
+    ход берётся из contextvar, а этот тест сторожит саму возможность: появился
+    параметр `turn` — значит вернулась и возможность его потерять.
+    """
+    for name in ("_search", "_ask_or_search"):
+        method = getattr(Conversation, name)
+        assert "turn" not in inspect.signature(method).parameters, (
+            f"{name} снова принимает ход аргументом — его снова забудут передать"
+        )

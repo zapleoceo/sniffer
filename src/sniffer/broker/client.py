@@ -17,7 +17,7 @@ from typing import Any
 import httpx
 import structlog
 
-from sniffer.broker.usage import UsageSink, default_usage_sink
+from sniffer.broker.contracts import UsageSink
 from sniffer.config import get_settings
 
 log = structlog.get_logger(__name__)
@@ -67,10 +67,13 @@ class BrokerClient:
         self._key = settings.broker_project_key
         self._timeout_s = settings.broker_timeout_s
         self._client = client or httpx.AsyncClient(timeout=30.0)
-        # Приёмник учёта внедряется, а не создаётся здесь: клиент брокера не
-        # должен знать ни про базу, ни про репозитории — иначе его нельзя
-        # собрать в тесте без Postgres. `None` означает «учёт по умолчанию»,
-        # который сам решает, есть ли куда писать.
+        # Приёмник учёта внедряется и только внедряется. Раньше здесь стояло
+        # «None означает учёт по умолчанию», и `default_usage_sink` брался
+        # импортом из `broker.usage` — а тот тянет `db.engine` и репозитории.
+        # То есть контракт обещал независимость от базы, а импорт клиента
+        # тянул SQLAlchemy: `pytest` без Postgres, маленькая утилита, любой
+        # процесс без БД платили за это на ровном месте. Кто хочет учёт —
+        # передаёт приёмник (`broker/usage.py::default_usage_sink`).
         self._usage = usage
 
     async def aclose(self) -> None:
@@ -195,9 +198,10 @@ class BrokerClient:
         значило бы выбрасывать то, за что заплатили, из-за недоступной базы.
         Поэтому ошибка идёт в лог, а не наружу.
         """
-        sink = self._usage if self._usage is not None else default_usage_sink
+        if self._usage is None:
+            return
         try:
-            await sink(capability, result)
+            await self._usage(capability, result)
         # Широкий except намеренно: см. докстринг — ответ уже оплачен.
         except Exception as exc:
             log.warning("broker.usage_not_recorded", kind=type(exc).__name__, error=str(exc))

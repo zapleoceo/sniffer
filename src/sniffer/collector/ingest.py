@@ -10,11 +10,11 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from hashlib import sha256
 from typing import Protocol
 
 import structlog
 
+from sniffer.domain.fingerprint import fingerprint
 from sniffer.domain.records import Chat, RawMessage
 from sniffer.sources.telegram_discover_reference import MessageLike
 
@@ -92,7 +92,7 @@ def to_raw(chat: Chat, messages: Sequence[MessageLike]) -> list[RawMessage]:
                 chat_tg_id=chat.tg_id,
                 msg_id=message.id,
                 text=text,
-                text_hash=sha256(text.encode()).hexdigest(),
+                text_hash=fingerprint(text),
                 posted_at=posted_at,
                 # `raw_messages.seller_id` — внутренний PK таблицы sellers,
                 # а Telegram sender_id — другой namespace. Связывать их

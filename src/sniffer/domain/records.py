@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, time
 from decimal import Decimal
 from typing import Any
 
@@ -73,7 +73,7 @@ class JoinLimits:
 
 @dataclass(frozen=True, slots=True)
 class RawMessage:
-    """Сырьё как пришло из Telegram. Живёт 30 дней."""
+    """Сырьё как пришло из Telegram. Непреобразованное живёт 90 дней."""
 
     chat_tg_id: int
     msg_id: int
@@ -313,3 +313,51 @@ class JoinEvent:
     muted: bool = False
     mute_error: str | None = None
     id: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SubscriptionState:
+    """Подписка вместе с ТЕКУЩЕЙ версией паспорта.
+
+    Паспорт здесь не копия на момент создания, а актуальная версия цепочки:
+    клиент правит запрос, и подписка обязана следовать за правкой, а не
+    застывать. Поэтому в таблице лежит корень цепочки, а сюда репозиторий
+    кладёт то, что этот корень означает сегодня.
+    """
+
+    id: int
+    user_id: int
+    passport_root: int
+    passport: StoredPassport
+    mode: str = "instant"
+    max_per_day: int = 5
+    quiet_from: time | None = None
+    quiet_to: time | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class OutboxMessage:
+    """Сообщение, которое ещё не ушло клиенту."""
+
+    id: int
+    user_id: int
+    payload: dict[str, Any]
+    attempts: int = 0
+    scheduled_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MatchFilter:
+    """Условия отбора карточек — значения, а не запрос.
+
+    Живёт в `domain`, потому что нужна двоим по разные стороны границы:
+    `matching` её собирает по паспорту, `db` по ней строит SQL. Положи её в
+    `matching` — и репозиторий начнёт импортировать слой, который сам его
+    вызывает, то есть появится обратная зависимость, запрещённая CLAUDE.md.
+    """
+
+    city: str
+    category: str | None = None
+    deal_type: str | None = None
+    max_price_vnd: Decimal | None = None
+    since: datetime | None = None

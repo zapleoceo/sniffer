@@ -17,6 +17,7 @@ import httpx
 import structlog
 
 from sniffer.broker.client import BrokerClient, BrokerError
+from sniffer.broker.usage import default_usage_sink
 from sniffer.domain.passport import Passport
 from sniffer.search.fallback import fallback_plan
 from sniffer.search.plan import SearchPlan, context_params, parse_tasks
@@ -82,7 +83,7 @@ class SearchPlanner:
         return plan
 
     async def _ask(self, passport: Passport, sources: list[str]) -> dict[str, Any]:
-        broker = self._broker or BrokerClient()
+        broker = self._broker or BrokerClient(usage=default_usage_sink)
         self._broker = broker
         return await broker.structured(
             build_user_prompt(passport, sources),
