@@ -10,10 +10,16 @@ from __future__ import annotations
 import structlog
 from aiogram import F, Router
 from aiogram.filters import CommandStart
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import (
+    CallbackQuery,
+    LabeledPrice,
+    Message,
+    PreCheckoutQuery,
+)
 
-from sniffer.bot.conversation import Conversation, Reply, Send
-from sniffer.bot.keyboards import AnswerCallback, FeedbackCallback, markup
+from sniffer.bot import billing, subscription
+from sniffer.bot.conversation import NO_REQUEST_YET, Conversation, Reply, Send
+from sniffer.bot.keyboards import AnswerCallback, FeedbackCallback, SubscribeCallback, markup
 from sniffer.bot.store import Client, PassportStore
 from sniffer.domain.dialogue import Feedback
 
@@ -100,3 +106,95 @@ def _sender(message: Message) -> Send:
         await message.answer(reply.text, reply_markup=markup(reply))
 
     return send
+
+
+# ── подписка за звёзды ──────────────────────────────────────────────────────
+
+
+@router.callback_query(SubscribeCallback.filter())
+async def subscribe(callback: CallbackQuery, callback_data: SubscribeCallback) -> None:
+    """«Следить за новыми» → счёт на одну звезду в месяц.
+
+    Тема берётся из ТЕКУЩЕГО паспорта клиента, а не из `callback_data`: кнопка
+    живёт в чате неделями, и подписывать надо на то, что человек ищет сейчас.
+    """
+    await callback.answer()
+    message = callback.message
+    if not isinstance(message, Message):
+        # Сообщение старше 48 часов Telegram отдаёт недоступным.
+        return
+
+    tg_user_id = callback.from_user.id
+    root = await subscription.current_root(tg_user_id)
+    if root is None:
+        await message.answer(NO_REQUEST_YET)
+        return
+
+    active = await subscription.active_for(tg_user_id, root)
+    if active is not None and active.expires_at is not None:
+        # Второй раз одно и то же не продаём.
+        await message.answer(billing.ALREADY.format(until=active.expires_at.strftime("%d.%m.%Y")))
+        return
+
+    await message.answer_invoice(
+        title=billing.TITLE,
+        description=billing.DESCRIPTION,
+        payload=billing.payload_for(root),
+        currency=billing.SUBSCRIPTION_CURRENCY,
+        prices=[LabeledPrice(label=billing.LABEL, amount=billing.SUBSCRIPTION_STARS)],
+        subscription_period=billing.SUBSCRIPTION_PERIOD_S,
+        # Пустая строка — так Telegram требует для звёзд: внешнего провайдера
+        # нет, и токена у него взять негде.
+        provider_token="",
+    )
+
+
+@router.pre_checkout_query()
+async def pre_checkout(query: PreCheckoutQuery) -> None:
+    """Последняя точка, где отказ ничего не стоит клиенту.
+
+    Отвечать обязаны за 10 секунд, иначе Telegram отменяет платёж, — поэтому
+    здесь только разбор строки и одна проверка владельца. Ни поиска, ни модели,
+    ни сети к источникам.
+
+    Проверяем именно принадлежность цепочки: `payload` формируем мы, но
+    приходит он от Telegram и доверенным не является.
+    """
+    root = billing.passport_root_from(query.invoice_payload)
+    if root is None or not await subscription.owns(query.from_user.id, root):
+        log.warning("billing.foreign_payload", payload=query.invoice_payload[:64])
+        await query.answer(ok=False, error_message=billing.PAYLOAD_REFUSED)
+        return
+    await query.answer(ok=True)
+
+
+@router.message(F.successful_payment)
+async def paid(message: Message) -> None:
+    """Деньги сняты. Отказывать уже нельзя — можно только включить подписку.
+
+    Апдейт приходит ПОВТОРНО, если бот не ответил вовремя, поэтому зачисление
+    идемпотентно по `telegram_payment_charge_id`. Повтор молчит: второе
+    «подписка включена» на один платёж выглядит как двойное списание.
+    """
+    payment = message.successful_payment
+    if payment is None or message.from_user is None:  # pragma: no cover — фильтр выше
+        return
+    purchase = billing.purchase_from(
+        user_id=message.from_user.id,
+        payload=payment.invoice_payload,
+        charge_id=payment.telegram_payment_charge_id,
+        amount=payment.total_amount,
+        expiration=payment.subscription_expiration_date,
+        is_recurring=bool(payment.is_recurring),
+    )
+    if purchase is None:
+        # Оплатили счёт не нашего формата. Деньги уже сняты, поэтому молчать
+        # нельзя: пусть человек напишет владельцу, а не гадает.
+        log.error("billing.unknown_payload", payload=payment.invoice_payload[:64])
+        await message.answer(billing.PAYMENT_STRANDED)
+        return
+
+    state = await subscription.activate(message.from_user.id, purchase)
+    if state is None:
+        return
+    await message.answer(billing.THANKS.format(max_per_day=state.max_per_day))

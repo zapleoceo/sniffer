@@ -605,6 +605,18 @@ docker exec sniffer-postgres psql -U sniffer -d sniffer   -c "\d chats" | grep b
 Появятся `chats.backfill_msg_id` и `chats.backfill_done` — курсор архива и
 метка «дочитан до начала».
 
+#### Подписка за звёзды (01.09.2026)
+
+```bash
+docker exec -i sniffer-postgres psql -U sniffer -d sniffer -v ON_ERROR_STOP=1   < infra/sql/001_init.sql
+docker exec sniffer-postgres psql -U sniffer -d sniffer   -c "\d subscriptions" | grep -E "since_listing_id|expires_at|charge_id"
+docker exec sniffer-postgres psql -U sniffer -d sniffer -c "\d payments" | head -3
+```
+
+Появятся `subscriptions.since_listing_id` / `expires_at` / `charge_id` и таблица
+`payments`. Схема накатывается ДО деплоя: старому коду новые колонки не мешают,
+новый без них падает на первом же запросе подписок.
+
 #### Диалог-паспорт
 
 Файл `001_init.sql` идемпотентен целиком, поэтому на существующем томе его
