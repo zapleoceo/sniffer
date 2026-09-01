@@ -11,6 +11,7 @@ from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
 from sniffer.sources.base import RawItem
 from sniffer.verifier.guard import screen
 
+NO_BUDGET = Passport(intent=Intent.BUY, category=Category.MOTORBIKE, city="nha_trang")
 WANTED = Passport(
     intent=Intent.BUY,
     category=Category.MOTORBIKE,
@@ -73,7 +74,8 @@ async def test_a_price_written_without_a_label_is_recovered() -> None:
     items = [item(1, "Штормовая скидка! 40 миллионов) Кастомный байк")]
     broker = FakeBroker({"verdicts": [verdict(1, price_vnd="40000000", price_text="40 миллионов")]})
 
-    (card,) = await screen(WANTED, items, broker=broker)  # type: ignore[arg-type]
+    # Паспорт без бюджета: тест про добычу цены, а не про сравнение её с ним.
+    (card,) = await screen(NO_BUDGET, items, broker=broker)  # type: ignore[arg-type]
 
     assert card.price_vnd == 40_000_000
     assert card.price_raw == "40 миллионов", "клиенту показываем слова продавца"
@@ -225,3 +227,52 @@ async def test_a_missing_price_is_never_a_reason_to_refuse() -> None:
     await screen(WANTED, [item(1, "байк")], broker=broker)  # type: ignore[arg-type]
 
     assert "отсутствие цены НЕ причина отказа" in broker.prompts[0]
+
+
+# ── бюджет считает код, а не модель ─────────────────────────────────────────
+
+
+async def test_a_listing_far_over_budget_is_dropped_by_arithmetic() -> None:
+    """Ровно тот случай, с которого всё началось: 100 млн VND на бюджет 300 USD."""
+    items = [item(1, "Honda CB400 Custom. Цена: 100 000 000 VND")]
+    broker = FakeBroker(
+        {"verdicts": [verdict(1, price_vnd="100000000", price_text="Цена: 100 000 000 VND")]}
+    )
+
+    kept = await screen(WANTED, items, broker=broker)  # type: ignore[arg-type]
+
+    assert kept == []
+
+
+async def test_slightly_over_budget_still_reaches_the_client() -> None:
+    """Чуть дороже клиент вправе увидеть и решить сам — как и в ранжировании."""
+    items = [item(1, "Байк. Цена: 11 000 000 VND")]
+    broker = FakeBroker(
+        {"verdicts": [verdict(1, price_vnd="11000000", price_text="Цена: 11 000 000 VND")]}
+    )
+
+    kept = await screen(WANTED, items, broker=broker)  # type: ignore[arg-type]
+
+    assert len(kept) == 1, "бюджет 10 млн, запас 30% — 11 млн проходит"
+
+
+async def test_a_listing_without_a_price_is_not_called_expensive() -> None:
+    """«Цену не написали» не значит «дорого»."""
+    items = [item(1, "Продам байк, звоните")]
+    broker = FakeBroker({"verdicts": [verdict(1)]})
+
+    assert len(await screen(WANTED, items, broker=broker)) == 1  # type: ignore[arg-type]
+
+
+async def test_the_model_is_not_asked_to_compare_prices() -> None:
+    """Арифметику у модели забрали — и промпт обязан это говорить.
+
+    Замер 01.09.2026: на «до 300 USD» она оставила байки за 10–11 млн при
+    потолке 7.8, а на «до 400 USD» отбраковала всё при потолке 10.4. Один
+    промпт, соседние запросы, противоположная строгость.
+    """
+    broker = FakeBroker({"verdicts": []})
+
+    await screen(WANTED, [item(1, "байк")], broker=broker)  # type: ignore[arg-type]
+
+    assert "цену НЕ сравнивай с бюджетом" in broker.prompts[0]
