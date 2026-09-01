@@ -42,6 +42,31 @@ class Chat:
 
 
 @dataclass(frozen=True, slots=True)
+class DiscoveryCandidate:
+    """Кандидат из постоянной очереди вступлений.
+
+    Это не ORM-строка: коллектор получает простую неизменяемую запись и не
+    может случайно унести сессию SQLAlchemy к Telegram-вызову, который может
+    ждать сеть минутами.
+    """
+
+    key: str
+    username: str = ""
+    invite_hash: str = ""
+    found_in: str = ""
+    priority: int = 100
+
+
+@dataclass(frozen=True, slots=True)
+class JoinLimits:
+    """Снимок лимитов вступления из БД, без знания о Telegram-слое."""
+
+    joins_in_window: int
+    next_allowed_at: datetime | None = None
+    blocked_until: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class RawMessage:
     """Сырьё как пришло из Telegram. Живёт 30 дней."""
 

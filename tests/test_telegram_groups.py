@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from structlog.testing import capture_logs
 from telethon.errors import AuthKeyUnregisteredError, FloodWaitError, SessionRevokedError
 
 from sniffer.config import Settings
@@ -642,8 +643,8 @@ def test_registry_knows_the_source() -> None:
     assert isinstance(get_source(SOURCE_NAME), TelegramGroupsSource)
 
 
-async def test_explicitly_disabled_registry_stays_quiet() -> None:
-    """Реестр отключён намеренно — источник молчит и остаётся в плане.
+async def test_explicitly_disabled_registry_is_not_silent() -> None:
+    """Даже явно подставленный пустой реестр не должен скрыть поломку поиска.
 
     Заглушка теперь подставляется руками: по умолчанию адаптер получает боевой
     реестр из базы, и проверяет это `test_source_wiring.py`. Ровно потому, что
@@ -651,7 +652,7 @@ async def test_explicitly_disabled_registry_stays_quiet() -> None:
     """
     source = TelegramGroupsSource(directory=EmptyChatDirectory(), client=FakeTelegram())
     assert await source.search("байк", {}) == []
-    assert source.degraded is False
+    assert source.degraded is True
 
 
 async def test_broken_session_string_degrades_instead_of_throwing() -> None:
@@ -673,3 +674,22 @@ async def test_broken_session_string_degrades_instead_of_throwing() -> None:
 
     assert items == []
     assert source.degraded is True
+
+
+async def test_an_empty_registry_says_so_out_loud() -> None:
+    """Пустой реестр — это «искать негде», и в логе это обязано быть видно.
+
+    Источник числится в плане, ходит в реестр и возвращает ноль. Пока он делал
+    это молча, «в группах не находится» было неотличимо от «в группах нет
+    объявлений» — и разница пряталась до первого вопроса владельца.
+    """
+    source = TelegramGroupsSource(directory=FakeDirectory([]), client=FakeTelegram())
+
+    with capture_logs() as logs:
+        found = await source.search("скутер", {"city": "nha_trang"})
+
+    assert found == []
+    assert source.degraded is True
+    assert any(entry["event"] == "telegram.no_chats" for entry in logs), (
+        "пустой реестр остался незаметным в логе"
+    )

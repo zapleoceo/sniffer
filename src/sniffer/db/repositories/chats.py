@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 
 from sniffer.db import models
 from sniffer.db.mappers import to_chat
@@ -13,6 +13,21 @@ from sniffer.domain.records import Chat
 
 
 class ChatRepository(Repository):
+    async def has_identity(self, *, tg_id: int | None = None, username: str = "") -> bool:
+        """Есть ли уже чат с этим Telegram id или публичным именем."""
+        predicates = []
+        if tg_id is not None:
+            predicates.append(models.Chat.tg_id == tg_id)
+        if username:
+            predicates.append(func.lower(models.Chat.username) == username.lstrip("@").lower())
+        if not predicates:
+            return False
+        statement = select(models.Chat.id).where(or_(*predicates)).limit(1)
+        return bool(await self._session.scalar(statement))
+
+    async def count(self) -> int:
+        return int(await self._session.scalar(select(func.count(models.Chat.id))) or 0)
+
     async def get_by_tg_id(self, tg_id: int) -> Chat | None:
         row = await self._session.scalar(select(models.Chat).where(models.Chat.tg_id == tg_id))
         return to_chat(row) if row is not None else None

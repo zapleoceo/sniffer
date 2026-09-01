@@ -114,6 +114,14 @@ class TelegramGroupsSource(Source):
 
         chats = await self._chats(params)
         if not chats:
+            # Реестр пуст или в нём нет чатов этого города — искать негде, и
+            # сказать это надо ГРОМКО. Молчаливый пустой ответ здесь врал самым
+            # дорогим способом: источник числился в плане, в логе не было ни
+            # строки, и «в группах не находится» неотличимо от «в группах нет
+            # объявлений». Обнаружилось это только когда владелец спросил,
+            # ищем ли мы вообще в группах, — то есть могло прожить недели.
+            self.degraded = True
+            log.warning("telegram.no_chats", city=params.get("city"), reason="реестр пуст")
             return []
         client = await self._reader()
         if client is None:
