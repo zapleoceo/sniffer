@@ -50,6 +50,7 @@ from sniffer.search.planner import SearchPlanner
 from sniffer.search.relevance import rank_items, with_vnd_budget
 from sniffer.search.vocabulary import city_name, is_served, served_cities
 from sniffer.sources.base import RawItem, registered_sources
+from sniffer.verifier import screen
 
 log = structlog.get_logger(__name__)
 
@@ -146,6 +147,11 @@ async def find_live(passport: Passport) -> Found:
     log.info("bot.plan", tasks=len(plan.tasks), fallback=plan.is_fallback, sources=plan.sources())
     items = rank_items(passport, await run_plan(plan), usd_vnd=rate)
     watch.lap("search_ms")
+    # Последняя проверка перед показом. Стоит одну дешёвую пачку и снимает то,
+    # чего детерминированные правила не видят: цену без метки «Цена» и предмет
+    # не из того запроса (verifier/guard.py).
+    items = await screen(passport, items, usd_vnd=rate)
+    watch.lap("guard_ms")
     return Found(
         items=items,
         fallback=plan.is_fallback,

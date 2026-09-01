@@ -12,7 +12,7 @@ from sniffer.domain.records import DIRECTION_IN, REQUEST_FAILED, DialogMessage, 
 # Postgres хранит ключи в своём порядке, и после записи в базу хронология
 # теряется. Незнакомые этапы (появятся с новыми ступенями воронки) идут после
 # известных, чтобы таблица не молчала о них.
-STAGE_ORDER = ("intake_ms", "plan_ms", "search_ms")
+STAGE_ORDER = ("intake_ms", "plan_ms", "search_ms", "guard_ms")
 
 
 def overview_page(view: data.Overview) -> str:
