@@ -42,7 +42,7 @@ import structlog
 
 from sniffer.broker.client import BrokerClient, BrokerError
 from sniffer.broker.usage import default_usage_sink
-from sniffer.domain.passport import Currency, Intent, Passport
+from sniffer.domain.passport import Category, Currency, Intent, Passport
 
 # Словарь рынка — знание о том, как предмет называют люди. Охраннику он
 # нужен ровно за тем же, за чем планировщику: говорить с моделью словами
@@ -86,6 +86,7 @@ class Verdict:
 
     keep: bool
     reason: str = ""
+    subject: str = "unknown"
     price_text: str = ""
     price_vnd: int | None = None
 
@@ -103,6 +104,16 @@ def guard_schema() -> dict[str, Any]:
                     "additionalProperties": False,
                     "properties": {
                         "n": {"type": "integer"},
+                        # Не «подходит ли», а «что это». Первая версия спрашивала
+                        # решение — и на вьетнамских объявлениях о домах модель
+                        # три раза из трёх отвечала «подходит» для запроса про
+                        # мотоцикл: правила были на русском, объявление на
+                        # вьетнамском, и связать их она не смогла. Назвать
+                        # предмет из закрытого списка она может на любом языке.
+                        "subject": {
+                            "type": "string",
+                            "enum": [*[c.value for c in Category], "unknown"],
+                        },
                         "keep": {"type": "boolean"},
                         "why": {"type": "string"},
                         # Строкой, а не числом: провайдеры возвращают то `400`,
@@ -111,7 +122,7 @@ def guard_schema() -> dict[str, Any]:
                         "price_vnd": {"type": "string"},
                         "price_text": {"type": "string"},
                     },
-                    "required": ["n", "keep", "why", "price_vnd", "price_text"],
+                    "required": ["n", "subject", "keep", "why", "price_vnd", "price_text"],
                 },
             }
         },
@@ -155,7 +166,11 @@ async def screen(
             await client.aclose()
 
     verdicts = _verdicts(payload, head)
-    kept = [_apply(item, verdicts.get(number)) for number, item in enumerate(head, start=1)]
+    wanted = passport.category.value if passport.category else None
+    kept = [
+        _apply(item, verdicts.get(number), wanted=wanted)
+        for number, item in enumerate(head, start=1)
+    ]
     ceiling = _ceiling_vnd(passport, usd_vnd)
     passed = [item for item in kept if item is not None and _affordable(item, ceiling)]
     log.info(
@@ -178,6 +193,27 @@ async def screen(
     return passed
 
 
+def _same_subject(subject: str, wanted: str | None) -> bool:
+    """Тот ли предмет. Сравнение строк — работа кода, а не модели.
+
+    Замер 01.09.2026: на пяти вьетнамских объявлениях о домах и земле модель
+    три раза из трёх ответила «подходит» для запроса про мотоцикл. Правила
+    отказа были перечислены по-русски («телефон, ноутбук, часы, колонка»),
+    объявление написано по-вьетнамски (`Bán nhà`, `căn hộ`, `Bán đất`), и связь
+    между ними она не построила. Дописать вьетнамские слова в список значило бы
+    ждать следующего языка.
+
+    Поэтому вопрос к модели теперь другой: не «подходит ли», а «что это» —
+    одним значением из нашего закрытого списка. Назвать предмет она умеет на
+    любом языке; сравнить две строки умеем мы.
+
+    `unknown` проходит: непонятное объявление решает человек, а не мы за него.
+    """
+    if wanted is None or subject in ("", "unknown"):
+        return True
+    return subject == wanted
+
+
 def _affordable(item: RawItem, ceiling: int | None) -> bool:
     """Влезает ли находка в бюджет. Сравнение чисел — работа кода, не модели.
 
@@ -197,7 +233,7 @@ def _affordable(item: RawItem, ceiling: int | None) -> bool:
     return item.price_vnd <= ceiling * PRICE_TOLERANCE
 
 
-def _apply(item: RawItem, verdict: Verdict | None) -> RawItem | None:
+def _apply(item: RawItem, verdict: Verdict | None, *, wanted: str | None) -> RawItem | None:
     """Вердикт на карточку. `None` — карточка не показывается.
 
     Молчание модели о карточке — не отказ: пропущенный номер в ответе означает,
@@ -205,7 +241,7 @@ def _apply(item: RawItem, verdict: Verdict | None) -> RawItem | None:
     """
     if verdict is None:
         return item
-    if not verdict.keep:
+    if not verdict.keep or not _same_subject(verdict.subject, wanted):
         return None
     if verdict.price_vnd is None or not verdict.price_text:
         return item
@@ -233,6 +269,7 @@ def _verdicts(payload: dict[str, Any], head: list[RawItem]) -> dict[int, Verdict
         parsed[number] = Verdict(
             keep=bool(row.get("keep", True)),
             reason=str(row.get("why", ""))[:120],
+            subject=str(row.get("subject", "unknown")).strip().lower(),
             price_text=str(row.get("price_text", "")).strip(),
             price_vnd=_price(row.get("price_vnd")),
         )
@@ -264,16 +301,15 @@ def _prompt(passport: Passport, items: list[RawItem], usd_vnd: float | None) -> 
         lines.append(f"{number}) {text}")
     lines += [
         "",
-        "Реши по каждому объявлению, о том ли оно, что ищет клиент (keep).",
+        "Про каждое объявление ответь, ЧТО в нём продают или сдают —",
+        "одним значением: motorbike, bicycle, car, apartment, room, house,",
+        "other. Не понял — unknown. Объявление может быть на русском,",
+        "вьетнамском или английском; отвечай значением из этого списка.",
         "",
-        "keep=false ТОЛЬКО когда в объявлении явно другой предмет: телефон,",
-        "ноутбук, часы, колонка там, где человек ищет транспорт или жильё.",
-        "",
-        "Во всех остальных случаях keep=true. В частности:",
-        "— цену НЕ сравнивай с бюджетом, это сделают без тебя;",
+        "keep=false ставь, только если объявление явно не о поиске клиента",
+        "и это видно без домыслов. Совпадение предмета проверят без тебя:",
+        "— цену с бюджетом НЕ сравнивай, это сделают без тебя;",
         "— отсутствие цены НЕ причина отказа: её просто не написали;",
-        "— близкая разновидность подходит: скутер, мопед, мотобайк,",
-        "  автомат и механика — всё это транспорт для клиента;",
         "— непонятное или короткое объявление оставляй, решит человек.",
         "",
         "price_text — точный фрагмент объявления с ценой, слово в слово,",

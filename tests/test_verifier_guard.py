@@ -54,7 +54,14 @@ class FakeBroker:
 
 
 def verdict(number: int, **fields: Any) -> dict[str, Any]:
-    row = {"n": number, "keep": True, "why": "", "price_vnd": "", "price_text": ""}
+    row = {
+        "n": number,
+        "keep": True,
+        "why": "",
+        "subject": "motorbike",
+        "price_vnd": "",
+        "price_text": "",
+    }
     row.update(fields)
     return row
 
@@ -198,21 +205,66 @@ async def test_without_a_rate_the_model_is_not_told_a_made_up_budget() -> None:
     assert "бюджет до" not in broker.prompts[0]
 
 
-async def test_the_model_is_told_the_subject_in_human_words() -> None:
+async def test_the_client_request_is_stated_in_human_words() -> None:
     """Со строкой `motorbike` модель отбраковывала скутеры.
 
     Замер 01.09.2026, дословная причина отказа: «Это мопед/скутер электрический,
     а клиент ищет motorbike». Модель читала имя поля как требование, потому что
-    человек так не пишет.
+    человек так не пишет. Запрос клиента описывается словами; список значений
+    для ответа — отдельно, и там имена полей уместны.
     """
     broker = FakeBroker({"verdicts": []})
 
     await screen(WANTED, [item(1, "байк")], broker=broker)  # type: ignore[arg-type]
 
     prompt = broker.prompts[0]
-    assert "скутер" in prompt and "мотобайк" in prompt
-    assert "motorbike" not in prompt
-    assert "Нячанг" in prompt and "nha_trang" not in prompt
+    lines = prompt.split("\n")
+    wanted_line = next(line for line in lines if line.startswith("Клиент ищет"))
+    assert "скутер" in wanted_line and "мотобайк" in wanted_line
+    assert "motorbike" not in wanted_line
+    assert "Нячанг" in wanted_line and "nha_trang" not in wanted_line
+
+
+async def test_the_model_is_asked_what_the_ad_is_about_not_whether_it_fits() -> None:
+    """Вопрос «что это» она отвечает на любом языке; «подходит ли» — нет.
+
+    Замер 01.09.2026: на пяти вьетнамских объявлениях о домах и земле модель
+    ТРИ РАЗА ИЗ ТРЁХ ответила «подходит» для запроса про мотоцикл. Правила
+    отказа были по-русски, объявление по-вьетнамски.
+    """
+    broker = FakeBroker({"verdicts": []})
+
+    await screen(WANTED, [item(1, "Bán nhà 2 tầng")], broker=broker)  # type: ignore[arg-type]
+
+    prompt = broker.prompts[0]
+    assert "ЧТО в нём продают" in prompt
+    assert "вьетнамском" in prompt, "модель обязана знать, что текст может быть не по-русски"
+
+
+async def test_an_ad_about_another_subject_is_dropped_by_code() -> None:
+    """Сравнение двух строк — работа кода, а не модели."""
+    items = [item(1, "Bán nhà 2 tầng hẻm oto"), item(2, "SYM Attila 50cc")]
+    broker = FakeBroker(
+        {
+            "verdicts": [
+                verdict(1, subject="house", keep=True),
+                verdict(2, subject="motorbike", keep=True),
+            ]
+        }
+    )
+
+    kept = await screen(WANTED, items, broker=broker)  # type: ignore[arg-type]
+
+    assert [card.external_id for card in kept] == ["2"]
+
+
+async def test_an_unrecognised_subject_is_left_to_the_client() -> None:
+    """Непонятное объявление решает человек, а не мы за него."""
+    broker = FakeBroker({"verdicts": [verdict(1, subject="unknown")]})
+
+    kept = await screen(WANTED, [item(1, "??? срочно")], broker=broker)  # type: ignore[arg-type]
+
+    assert len(kept) == 1
 
 
 async def test_a_missing_price_is_never_a_reason_to_refuse() -> None:
@@ -275,4 +327,4 @@ async def test_the_model_is_not_asked_to_compare_prices() -> None:
 
     await screen(WANTED, [item(1, "байк")], broker=broker)  # type: ignore[arg-type]
 
-    assert "цену НЕ сравнивай с бюджетом" in broker.prompts[0]
+    assert "цену с бюджетом НЕ сравнивай" in broker.prompts[0]
