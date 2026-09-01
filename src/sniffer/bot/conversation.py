@@ -12,7 +12,9 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Protocol, cast
 
@@ -130,6 +132,9 @@ class Recorder(Protocol):
 
 
 Send = Callable[[Reply], Awaitable[None]]
+# Тело хода: точка входа отдаёт сюда свою работу, а обёртка `_journalled`
+# берёт на себя открытие и закрытие записи. Три точки входа — одна обёртка.
+Body = Callable[["Client", str, Send], Awaitable[None]]
 Finder = Callable[[Passport], Awaitable["Found"]]
 Intake = Callable[[], Parser]
 
@@ -158,6 +163,26 @@ async def find_live(passport: Passport) -> Found:
         sources=tuple(plan.sources()),
         stages=watch.stages,
     )
+
+
+# Текущий ход диалога. Contextvar, а не параметр, — и это лечение класса
+# дефектов, а не одного случая. Раньше `_Turn` ехал аргументом через
+# `_ask_or_search` и `_search`, и ЧЕТЫРЕ места из шести его теряли:
+# `_answer_in_words`, `_restated`, `on_answer`, `on_feedback`. Живой след
+# 01.09.2026: запрос №2 отдал клиенту пять карточек Chotot, а в журнале стоят
+# `result_count = 0` и пустой `sources`; расход модели на кнопочном поиске
+# приехал с `request_id = NULL`. Аргумент, который надо не забыть передать в
+# шести местах, забудут в седьмом — поэтому его больше нет вовсе.
+_current_turn: ContextVar[_Turn | None] = ContextVar("sniffer_dialog_turn", default=None)
+
+
+@contextmanager
+def _turn_scope(turn: _Turn) -> Iterator[None]:
+    token = _current_turn.set(turn)
+    try:
+        yield
+    finally:
+        _current_turn.reset(token)
 
 
 @dataclass(slots=True)
@@ -228,20 +253,27 @@ class Conversation:
         message = text.strip()
         if not message:
             return
+        await self._journalled(client, message, send, self._turn)
 
-        # Ход журналируется целиком, и журнал живёт здесь, а не в хендлере:
-        # границу единицы работы ставит тот, кто владеет ходом, а хендлер о
-        # разборе, вопросах и поиске не знает ничего (architecture.md, 5.1).
+    async def _journalled(self, client: Client, query: str, send: Send, body: Body) -> None:
+        """Один ход диалога целиком: запись открыта, закрыта и не потеряна.
+
+        Журнал живёт здесь, а не в хендлере: границу единицы работы ставит тот,
+        кто владеет ходом, а хендлер о разборе, вопросах и поиске не знает
+        ничего (architecture.md, 5.1). И здесь же — для ВСЕХ трёх точек входа,
+        а не только для текстовой: нажатие кнопки запускает такой же поиск и
+        стоит таких же денег.
+        """
         opened = await self._recorder.open_request(
-            client.tg_user_id, message, username=client.username
+            client.tg_user_id, query, username=client.username
         )
         turn = _Turn(recorder=self._recorder, opened=opened)
         # Расходы на модель принадлежат ЭТОМУ запросу: contextvar доносит его id
         # до клиента брокера через слои, которым он не нужен, и не путается
         # между двумя клиентами, отвечающими одновременно.
-        with request_scope(opened.request_id if opened else None):
+        with request_scope(opened.request_id if opened else None), _turn_scope(turn):
             try:
-                await self._turn(client, message, turn.recording(send), turn)
+                await body(client, query, turn.recording(send))
             except Exception as exc:
                 # Ход обязан закрыться в журнале даже сломанным: иначе в
                 # дашборде видны только удачные запросы, то есть картина ровно
@@ -250,7 +282,7 @@ class Conversation:
                 raise
             await turn.close()
 
-    async def _turn(self, client: Client, message: str, send: Send, turn: _Turn) -> None:
+    async def _turn(self, client: Client, message: str, send: Send) -> None:
         dialogue = await self._store.load(client)
         current = dialogue.passport
         if dialogue.state.pending and current is not None:
@@ -259,7 +291,7 @@ class Conversation:
                 return
 
         passport = await self._intake().parse(message)
-        turn.watch.lap("intake_ms")
+        _lap("intake_ms")
         if current is not None and restates(current.passport, passport):
             # Та же просьба другими словами — не новый запрос. Начни здесь
             # цепочка заново, и повтор фразы обнулял бы собранные ответы вместе
@@ -267,10 +299,23 @@ class Conversation:
             await self._restated(dialogue, send)
             return
         dialogue = await self._store.start(dialogue, passport)
-        await self._ask_or_search(dialogue, send, turn)
+        await self._ask_or_search(dialogue, send)
 
     async def on_answer(self, client: Client, code: str, value: str, send: Send) -> None:
-        """Клиент нажал кнопку под вопросом."""
+        """Клиент нажал кнопку под вопросом. Ход журналируется как текстовый.
+
+        Раньше здесь записи не открывалось вовсе: карточки уходили клиенту, а в
+        дашборде запроса не было, и расход модели приезжал с `request_id = NULL`.
+        Нажатие кнопки запускает такой же поиск и стоит таких же денег.
+        """
+        await self._journalled(
+            client,
+            f"кнопка: {code}={value}",
+            send,
+            lambda _client, _query, recorded: self._answered(client, code, value, recorded),
+        )
+
+    async def _answered(self, client: Client, code: str, value: str, send: Send) -> None:
         dialogue = await self._store.load(client)
         current = dialogue.passport
         question = question_by_code(code)
@@ -300,8 +345,17 @@ class Conversation:
         """Кнопка под выдачей: «дорого», «не то», «нужен автомат».
 
         Показанная выдача уточняет запрос лучше вопроса — поэтому нажатие
-        создаёт новую версию паспорта и перезапускает подбор.
+        создаёт новую версию паспорта и перезапускает подбор. И журналируется
+        как отдельный ход: это полноценный поиск, а не довесок к прошлому.
         """
+        await self._journalled(
+            client,
+            f"кнопка: {kind.value}",
+            send,
+            lambda _client, _query, recorded: self._feedback(client, kind, recorded),
+        )
+
+    async def _feedback(self, client: Client, kind: Feedback, send: Send) -> None:
         dialogue = await self._store.load(client)
         if dialogue.passport is None:
             await send(Reply(NO_REQUEST_YET))
@@ -366,9 +420,7 @@ class Conversation:
             payload={"field": field_name, "skipped": True},
         )
 
-    async def _ask_or_search(
-        self, dialogue: Dialogue, send: Send, turn: _Turn | None = None
-    ) -> None:
+    async def _ask_or_search(self, dialogue: Dialogue, send: Send) -> None:
         if dialogue.passport is None:  # pragma: no cover — сюда приходят с паспортом
             return
         passport = dialogue.passport.passport
@@ -381,7 +433,7 @@ class Conversation:
             return
         question = next_question(passport, dialogue.state.asked)
         if question is None:
-            await self._search(dialogue, send, turn)
+            await self._search(dialogue, send)
             return
         await self._ask(dialogue, question, send)
 
@@ -400,12 +452,13 @@ class Conversation:
         )
         await send(Reply(question.text, question=question))
 
-    async def _search(self, dialogue: Dialogue, send: Send, turn: _Turn | None = None) -> None:
+    async def _search(self, dialogue: Dialogue, send: Send) -> None:
         if dialogue.passport is None:  # pragma: no cover — сюда приходят с паспортом
             return
         passport = dialogue.passport.passport
         await send(Reply(_accepted(passport)))
 
+        turn = _current_turn.get()
         try:
             found = await self._finder(passport)
         except Exception as exc:
@@ -423,6 +476,13 @@ class Conversation:
             await send(Reply(NOTHING_FOUND))
             return
         await send(Reply(render_cards(found.items), feedback=feedback_buttons(passport)))
+
+
+def _lap(stage: str) -> None:
+    """Отметить этап у текущего хода, если он есть."""
+    turn = _current_turn.get()
+    if turn is not None:
+        turn.watch.lap(stage)
 
 
 def _unserved(city: str | None) -> str:
