@@ -49,6 +49,23 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "-v --strict-markers"
 
+[tool.coverage.run]
+source = ["src/sniffer"]
+# Точки входа процессов: их «покрытие» означало бы запуск контейнера в тесте.
+omit = ["*/__main__.py"]
+
+[tool.coverage.report]
+# Порог — храповик, а не цель. Ставится по факту на день установки и только
+# растёт: цифра выше текущей уронила бы сборку сегодня же и ничего не защитила,
+# цифра ниже разрешала бы регресс. Поднимать вместе с ростом покрытия.
+fail_under = 85
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    '\.\.\.$',
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"

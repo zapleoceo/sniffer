@@ -17,6 +17,7 @@ import structlog
 from sniffer.config import Settings
 from sniffer.runtime.service import Service, idle_loop, run_service
 from sniffer.worker.archive import ArchivePipeline
+from sniffer.worker.matcher import Matcher
 from sniffer.worker.retention import Retention
 
 log = structlog.get_logger(__name__)
@@ -32,16 +33,21 @@ async def run(stop: asyncio.Event) -> None:
     log.info("worker.started")
     retention = Retention()
     archive = ArchivePipeline()
-    await idle_loop(stop, lambda: _tick(retention, archive), service=NAME)
+    matcher = Matcher()
+    await idle_loop(stop, lambda: _tick(retention, archive, matcher), service=NAME)
 
 
-async def _tick(retention: Retention, archive: ArchivePipeline) -> int:
+async def _tick(retention: Retention, archive: ArchivePipeline, matcher: Matcher) -> int:
     """Сколько работы сделали за проход.
 
     Возврат числа, а не флага, нужен циклу: пока пачки полные, спать незачем.
     """
+    # Порядок обязателен: сопоставление обязано видеть карточки, созданные
+    # этим же проходом, иначе подписчик узнаёт о находке на четверть часа позже
+    # без всякой причины.
     processed = await archive.tick()
-    return processed + await retention.tick()
+    matched = await matcher.tick()
+    return processed + matched + await retention.tick()
 
 
 SERVICE = Service(name=NAME, requires=missing_settings, run=run)

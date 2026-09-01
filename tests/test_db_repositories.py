@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -29,6 +31,7 @@ from sniffer.db.repositories import (
     RejectRepository,
     UserRepository,
 )
+from sniffer.db.repositories.delivery import DeliveryRepository
 from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
 from sniffer.domain.records import Chat, DiscoveryCandidate, Listing, RawMessage
 
@@ -773,3 +776,178 @@ async def test_the_stage_pass_can_refresh_a_stale_fingerprint(db_session: AsyncS
     stored = await repo.get_by_key(-100123, 1)
     assert stored is not None
     assert (stored.stage, stored.text_hash) == ("extracted", "свежий-отпечаток")
+
+
+# ── подписки и доставка ─────────────────────────────────────────────────────
+
+
+async def _subscriber(session: AsyncSession, passport: Passport) -> tuple[int, int]:
+    """Клиент с подпиской на текущую версию паспорта. Возврат: (user_id, sub_id)."""
+    user = await UserRepository(session).get_or_create(555, username="подписчик")
+    assert user.id is not None
+    stored = await PassportRepository(session).save_new(user.id, passport)
+    await session.flush()
+    row = models.Subscription(user_id=user.id, passport_root=stored.id)
+    session.add(row)
+    await session.flush()
+    assert row.id is not None
+    return user.id, row.id
+
+
+async def test_a_subscription_follows_the_passport_it_was_made_for(
+    db_session: AsyncSession,
+) -> None:
+    """Клиент правит запрос — подписка обязана следовать за правкой.
+
+    Подписка хранит корень цепочки, а не версию. Проверять это надо на живой
+    базе: всё держится на join по `COALESCE(root_id, id)` и частичном индексе
+    `is_current`, а на подделке они не существуют.
+    """
+    passport = Passport(
+        intent=Intent.BUY, category=Category.MOTORBIKE, city="nha_trang", raw_query="ищу скутер"
+    )
+    user_id, sub_id = await _subscriber(db_session, passport)
+    await db_session.commit()
+
+    repo = PassportRepository(db_session)
+    current = await repo.get_current(user_id)
+    assert current is not None
+    revised = passport.model_copy(update={"budget": Budget(max=400, currency=Currency.USD)})
+    await repo.save_revision(current, revised)
+    await db_session.commit()
+
+    live = await DeliveryRepository(db_session).active_subscriptions()
+
+    assert [item.id for item in live] == [sub_id]
+    assert live[0].passport.passport.budget.max == 400, "подписка застыла на старой версии"
+
+
+async def test_the_same_listing_is_never_queued_twice(db_session: AsyncSession) -> None:
+    """Воркер идёт пачками и встретит карточку снова — дважды слать нельзя."""
+    passport = Passport(intent=Intent.BUY, category=Category.MOTORBIKE, city="nha_trang")
+    user_id, sub_id = await _subscriber(db_session, passport)
+    (raw_id,) = await RawMessageRepository(db_session).add_many([_raw(1)])
+    card = await ListingRepository(db_session).add(
+        Listing(
+            raw_message_id=raw_id,
+            deal_type="buy",
+            category="motorbike",
+            city="nha_trang",
+            title="Honda Vision",
+            summary="Автомат",
+            tg_link="https://t.me/c/1/1",
+            posted_at=NOW,
+        )
+    )
+    await db_session.commit()
+    assert card.id is not None
+
+    repo = DeliveryRepository(db_session)
+    first = await repo.enqueue(
+        subscription_id=sub_id, user_id=user_id, listing_id=card.id, score=0.9, payload={"a": 1}
+    )
+    second = await repo.enqueue(
+        subscription_id=sub_id, user_id=user_id, listing_id=card.id, score=0.9, payload={"a": 1}
+    )
+    await db_session.commit()
+
+    assert (first, second) == (True, False)
+    assert len(await repo.take_pending()) == 1, "в очереди обязана быть одна строка"
+    assert await repo.sent_since(sub_id, since=NOW) == 1
+
+
+async def test_a_message_scheduled_for_later_is_not_taken_now(db_session: AsyncSession) -> None:
+    """Повтор после неудачи ждёт своего часа, а не крутится в цикле."""
+    passport = Passport(intent=Intent.BUY, category=Category.MOTORBIKE, city="nha_trang")
+    user_id, _ = await _subscriber(db_session, passport)
+    # Время ставим явно: у колонок стоит server_default now(), и тест, который
+    # на него полагается, проверяет не запрос, а показания часов машины.
+    db_session.add(models.Outbox(user_id=user_id, payload={"a": 1}, scheduled_at=NOW))
+    await db_session.commit()
+
+    repo = DeliveryRepository(db_session)
+    (message,) = await repo.take_pending(now=NOW)
+    await repo.mark_failed(message.id, retry_at=NOW + timedelta(minutes=15))
+    await db_session.commit()
+
+    assert await repo.take_pending(now=NOW) == []
+    assert len(await repo.take_pending(now=NOW + timedelta(minutes=16))) == 1
+
+
+async def test_a_new_listing_reaches_the_subscriber_queue(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Замыкающее звено контура: карточка → подписка → очередь доставки.
+
+    Проверяется на живой базе целиком, потому что весь смысл здесь в join между
+    подпиской, паспортом и карточками — на подделке он зелёный при любой
+    ошибке. До этой ветки звена не существовало: `listings` копились, а
+    `outbox` не наполнял никто.
+    """
+    from sniffer.worker import matcher as module
+
+    passport = Passport(
+        intent=Intent.BUY, category=Category.MOTORBIKE, city="nha_trang", raw_query="ищу скутер"
+    )
+    user_id, sub_id = await _subscriber(db_session, passport)
+    (raw_id,) = await RawMessageRepository(db_session).add_many([_raw(1)])
+    await ListingRepository(db_session).add(
+        Listing(
+            raw_message_id=raw_id,
+            deal_type="buy",
+            category="motorbike",
+            city="nha_trang",
+            title="Honda Vision 2021",
+            summary="Автомат, документы есть",
+            tg_link="https://t.me/c/1/1",
+            posted_at=NOW,
+        )
+    )
+    await db_session.commit()
+
+    monkeypatch.setattr(module, "session_scope", lambda: _borrowed(db_session))
+    queued = await module.Matcher().tick(now=NOW)
+
+    assert queued == 1
+    repo = DeliveryRepository(db_session)
+    (message,) = await repo.take_pending(now=NOW)
+    assert message.user_id == user_id
+    assert message.payload["title"] == "Honda Vision 2021"
+    assert await repo.sent_since(sub_id, since=NOW.replace(hour=0)) == 1
+
+    # Второй проход не шлёт то же самое второй раз.
+    assert await module.Matcher().tick(now=NOW) == 0
+
+
+async def test_a_listing_from_another_city_is_not_sent(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Дананговская карточка нячангскому подписчику — это спам, а не находка."""
+    from sniffer.worker import matcher as module
+
+    passport = Passport(intent=Intent.BUY, category=Category.MOTORBIKE, city="nha_trang")
+    await _subscriber(db_session, passport)
+    (raw_id,) = await RawMessageRepository(db_session).add_many([_raw(1)])
+    await ListingRepository(db_session).add(
+        Listing(
+            raw_message_id=raw_id,
+            deal_type="buy",
+            category="motorbike",
+            city="da_nang",
+            title="Honda Vision",
+            summary="Автомат",
+            tg_link="https://t.me/c/1/1",
+            posted_at=NOW,
+        )
+    )
+    await db_session.commit()
+
+    monkeypatch.setattr(module, "session_scope", lambda: _borrowed(db_session))
+
+    assert await module.Matcher().tick(now=NOW) == 0
+
+
+@asynccontextmanager
+async def _borrowed(session: AsyncSession) -> AsyncIterator[AsyncSession]:
+    """Сессия теста вместо своей: проверяем запросы, а не сборку соединения."""
+    yield session
