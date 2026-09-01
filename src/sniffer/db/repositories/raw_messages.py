@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
 from typing import cast
 
 from sqlalchemy import Table, func, select, update
@@ -82,6 +83,38 @@ class RawMessageRepository(Repository):
             .limit(limit)
         )
         return [to_raw_message(row) for row in rows]
+
+    async def delete_expired(self, *, older_than: datetime, limit: int) -> int:
+        """Убрать протухшее сырьё пачкой. Возврат — сколько строк удалено.
+
+        Два условия, и оба обязательны.
+
+        **По `ingested_at`, а не по `posted_at`.** Срок здесь про диск: «мы
+        держим скачанное столько-то», а не «объявление устарело». По дате
+        публикации догон истории удалялся бы ровно с той скоростью, с какой
+        приходит: коллектор дочитывает архив чата на годы назад, и такая
+        уборка стёрла бы его в тот же проход.
+
+        **Только то, из чего не вышло карточки.** У `listings.raw_message_id`
+        стоит `ON DELETE CASCADE` — удаление сырья унесло бы с собой живую
+        карточку, показанную клиенту, вместе с текстом, по которому verifier
+        её сверяет. Поэтому строки с карточкой не трогаем вовсе; их срок
+        жизни решает сама карточка, а не возраст сырья.
+
+        Пачкой, а не одним `DELETE`: на первой уборке накопленного за месяцы
+        один запрос держал бы длинную транзакцию и таблицу под замком.
+        """
+        table = cast(Table, models.RawMessage.__table__)
+        expired = (
+            select(table.c.id)
+            .outerjoin(models.Listing, models.Listing.raw_message_id == table.c.id)
+            .where(table.c.ingested_at < older_than, models.Listing.id.is_(None))
+            .limit(limit)
+        )
+        deleted = await self._session.execute(
+            table.delete().where(table.c.id.in_(expired.scalar_subquery())).returning(table.c.id)
+        )
+        return len(deleted.scalars().all())
 
     async def set_stage(self, ids: Sequence[int], stage: str) -> None:
         if not ids:
