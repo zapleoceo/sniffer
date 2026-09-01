@@ -333,6 +333,10 @@ class SubscriptionState:
     max_per_day: int = 5
     quiet_from: time | None = None
     quiet_to: time | None = None
+    # С какой карточки начинается слежение. Подписка обещает НОВЫЕ посты, а не
+    # пересказ той выдачи, из которой клиент ничего не выбрал.
+    since_listing_id: int = 0
+    expires_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -361,3 +365,25 @@ class MatchFilter:
     deal_type: str | None = None
     max_price_vnd: Decimal | None = None
     since: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Payment:
+    """Платёж за подписку.
+
+    `external_id` — `telegram_payment_charge_id`, и он уникален в таблице.
+    Telegram повторяет апдейт, если бот не ответил вовремя; без уникальности
+    один платёж продлил бы подписку дважды. Деньги нельзя обработать
+    «примерно один раз».
+    """
+
+    user_id: int
+    amount: int
+    external_id: str
+    subscription_id: int | None = None
+    provider: str = "telegram_stars"
+    currency: str = "XTR"
+    status: str = "paid"
+    is_recurring: bool = False
+    created_at: datetime | None = None
+    id: int | None = None

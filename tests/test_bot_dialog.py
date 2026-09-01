@@ -248,7 +248,26 @@ async def test_nothing_found_is_said_out_loud() -> None:
     replies = Replies()
     await talk(MemoryStore(), filled(), items=[]).on_text(CLIENT, "ищу вертолёт", replies)
 
-    assert replies.texts[-1] == NOTHING_FOUND
+    assert NOTHING_FOUND in replies.texts[-1]
+
+
+async def test_an_empty_answer_offers_to_keep_watching() -> None:
+    """Искать больше негде, а новое появится — честный повод предложить слежение."""
+    replies = Replies()
+    await talk(MemoryStore(), filled(), items=[]).on_text(CLIENT, "ищу вертолёт", replies)
+
+    assert replies.sent[-1].offer_subscription is True
+    assert "звезда в месяц" in replies.texts[-1], "цену называем до нажатия, а не после"
+
+
+async def test_results_the_client_may_not_like_offer_to_keep_watching() -> None:
+    """Предложение появляется там же, где обратная связь «дорого» и «не то»."""
+    replies = Replies()
+    await talk(MemoryStore(), filled()).on_text(CLIENT, "ищу скутер", replies)
+
+    cards = replies.sent[-1]
+    assert "открыть оригинал" in cards.text
+    assert cards.offer_subscription is True and cards.feedback
 
 
 async def test_broken_search_still_answers() -> None:

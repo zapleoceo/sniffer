@@ -311,12 +311,58 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     quiet_to       TIME,
     sent_today     INT         NOT NULL DEFAULT 0,
     day_bucket     DATE,
+    -- Подписка платная: 1 звезда Telegram в месяц. Ниже те же колонки стоят
+    -- отдельными ALTER — для живой базы, где CREATE TABLE IF NOT EXISTS не
+    -- сработает (deploy.md 7.1).
+    since_listing_id BIGINT    NOT NULL DEFAULT 0,
+    expires_at     TIMESTAMPTZ,
+    charge_id      TEXT,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (user_id, passport_root)
 );
 
 -- Дедуп доставки: одно объявление уходит в одну подписку ровно один раз,
 -- даже если матчер отработал по нему дважды после рестарта.
+-- Подписка платная: 1 звезда Telegram в месяц. Колонки добавлены отдельными
+-- ALTER, потому что CREATE TABLE IF NOT EXISTS существующую таблицу не трогает
+-- (deploy.md 7.1).
+--
+-- `since_listing_id` — с какой карточки начинается слежение. Без него свежая
+-- подписка вываливает клиенту весь двухнедельный запас разом, включая ровно те
+-- объявления, которые он только что посмотрел и не выбрал. Подписка обещает
+-- НОВЫЕ посты, а не пересказ выдачи.
+--
+-- `charge_id` — идентификатор платежа Telegram. Он же ключ отмены через
+-- `editUserStarSubscription`, поэтому хранится, а не выбрасывается.
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS since_listing_id BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS charge_id TEXT;
+
+-- Деньги. Отдельной таблицей, а не колонкой в подписке: у одной подписки
+-- платежей столько, сколько месяцев её продлевали, и продление обязано
+-- оставлять след, даже если подписку потом выключили.
+--
+-- `external_id` уникален намеренно и это главное свойство таблицы. Telegram
+-- ПОВТОРЯЕТ апдейт, если бот не ответил вовремя, и без уникальности один
+-- платёж продлил бы подписку дважды. Идемпотентность здесь не украшение:
+-- деньги нельзя обработать «примерно один раз».
+CREATE TABLE IF NOT EXISTS payments (
+    id              BIGSERIAL PRIMARY KEY,
+    user_id         BIGINT      NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    subscription_id BIGINT      REFERENCES subscriptions(id) ON DELETE SET NULL,
+    provider        TEXT        NOT NULL DEFAULT 'telegram_stars',
+    amount          INT         NOT NULL,
+    currency        TEXT        NOT NULL DEFAULT 'XTR',
+    -- paid | refunded
+    status          TEXT        NOT NULL DEFAULT 'paid',
+    -- telegram_payment_charge_id: уникален у Telegram, уникален и у нас
+    external_id     TEXT        NOT NULL UNIQUE,
+    is_recurring    BOOLEAN     NOT NULL DEFAULT FALSE,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS payments_user_idx ON payments (user_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS notifications (
     id              BIGSERIAL PRIMARY KEY,
     subscription_id BIGINT      NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,

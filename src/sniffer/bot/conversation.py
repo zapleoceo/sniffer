@@ -21,6 +21,7 @@ from typing import Protocol, cast
 import structlog
 
 from sniffer.bot import journal
+from sniffer.bot.billing import OFFER
 from sniffer.bot.cards import render_cards
 from sniffer.bot.store import Client, Dialogue, DialogueStore
 from sniffer.broker.usage import request_scope
@@ -60,6 +61,9 @@ NOTHING_FOUND = (
     "По этому запросу ничего не нашлось. Попробуйте иначе: без марки, "
     "с другим бюджетом или другой формулировкой."
 )
+# Пустая выдача — самый честный повод предложить слежение: искать больше
+# негде, а новое появится.
+EMPTY_WITH_OFFER = NOTHING_FOUND + "\n\n" + OFFER
 SEARCH_FAILED = "Не смог доискать: источники не ответили. Попробуйте ещё раз через пару минут."
 NO_REQUEST_YET = "Сначала напишите, что ищете, — а потом уточним."
 NOTHING_TO_REFINE = "Уточнить больше нечего. Переформулируйте запрос, и поищу заново."
@@ -76,6 +80,9 @@ class Reply:
     text: str
     question: Question | None = None
     feedback: tuple[Option, ...] = field(default_factory=tuple)
+    # Предложить слежение за новыми объявлениями. Признак, а не готовая кнопка:
+    # домен решает «уместно ли», разметку рисует `keyboards`.
+    offer_subscription: bool = False
 
 
 class Parser(Protocol):
@@ -473,9 +480,17 @@ class Conversation:
         if turn is not None:
             turn.found = found
         if not found.items:
-            await send(Reply(NOTHING_FOUND))
+            # Пустая выдача — самый честный повод предложить слежение: искать
+            # больше негде, а новое появится.
+            await send(Reply(EMPTY_WITH_OFFER, offer_subscription=True))
             return
-        await send(Reply(render_cards(found.items), feedback=feedback_buttons(passport)))
+        await send(
+            Reply(
+                render_cards(found.items),
+                feedback=feedback_buttons(passport),
+                offer_subscription=True,
+            )
+        )
 
 
 def _lap(stage: str) -> None:

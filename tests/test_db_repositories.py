@@ -33,7 +33,7 @@ from sniffer.db.repositories import (
 )
 from sniffer.db.repositories.delivery import DeliveryRepository
 from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
-from sniffer.domain.records import Chat, DiscoveryCandidate, Listing, RawMessage
+from sniffer.domain.records import Chat, DiscoveryCandidate, Listing, Payment, RawMessage
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("TEST_DATABASE_URL"),
@@ -1007,3 +1007,172 @@ async def test_one_broken_message_does_not_stop_the_whole_batch(
     broken = await RawMessageRepository(db_session).get_by_key(-100123, 2)
     assert broken is not None and broken.stage == "rejected"
     assert broken.gate_signals.get("reason") == "pipeline_error"
+
+
+# ── деньги: подписка за звёзды ──────────────────────────────────────────────
+
+
+async def test_the_same_payment_never_extends_a_subscription_twice(
+    db_session: AsyncSession,
+) -> None:
+    """Идемпотентность платежа. Telegram ПОВТОРЯЕТ апдейт, если бот не ответил.
+
+    Проверять надо на живой базе: держится всё на `payments.external_id UNIQUE`
+    и `ON CONFLICT DO NOTHING`, а на подделке ни того, ни другого нет. Деньги
+    нельзя обработать «примерно один раз».
+    """
+    passport = Passport(intent=Intent.BUY, category=Category.MOTORBIKE, city="nha_trang")
+    user = await UserRepository(db_session).get_or_create(777, username="платящий")
+    assert user.id is not None
+    stored = await PassportRepository(db_session).save_new(user.id, passport)
+    await db_session.commit()
+
+    repo = DeliveryRepository(db_session)
+    payment = Payment(user_id=user.id, amount=1, external_id="charge-повтор")
+    until = NOW + timedelta(days=30)
+
+    first = await repo.pay_and_activate(
+        payment, passport_root=stored.id, until=until, since_listing_id=100
+    )
+    await db_session.commit()
+    second = await repo.pay_and_activate(
+        payment, passport_root=stored.id, until=until + timedelta(days=30), since_listing_id=999
+    )
+    await db_session.commit()
+
+    assert (first, second) == (True, False), "повторный апдейт не должен продлевать"
+    state = await repo.subscription_for(user_id=user.id, passport_root=stored.id)
+    assert state is not None
+    assert state.expires_at == until, "срок остался от первого платежа"
+    assert state.since_listing_id == 100, "точка отсчёта не сдвинулась"
+
+
+async def test_a_renewal_extends_the_term_but_keeps_the_starting_point(
+    db_session: AsyncSession,
+) -> None:
+    """Продление сдвигает срок и НЕ трогает точку отсчёта.
+
+    Иначе клиент терял бы всё, что накопилось за оплаченный месяц: подписка
+    начинала бы считать «новое» заново с момента списания.
+    """
+    passport = Passport(intent=Intent.BUY, category=Category.MOTORBIKE, city="nha_trang")
+    user = await UserRepository(db_session).get_or_create(778)
+    assert user.id is not None
+    stored = await PassportRepository(db_session).save_new(user.id, passport)
+    await db_session.commit()
+
+    repo = DeliveryRepository(db_session)
+    await repo.pay_and_activate(
+        Payment(user_id=user.id, amount=1, external_id="месяц-1"),
+        passport_root=stored.id,
+        until=NOW + timedelta(days=30),
+        since_listing_id=50,
+    )
+    await db_session.commit()
+    await repo.pay_and_activate(
+        Payment(user_id=user.id, amount=1, external_id="месяц-2", is_recurring=True),
+        passport_root=stored.id,
+        until=NOW + timedelta(days=60),
+        since_listing_id=900,
+    )
+    await db_session.commit()
+
+    state = await repo.subscription_for(user_id=user.id, passport_root=stored.id)
+    assert state is not None
+    assert state.expires_at == NOW + timedelta(days=60)
+    assert state.since_listing_id == 50, "продление не начинает слежение заново"
+
+
+async def test_an_expired_subscription_stops_receiving_cards(db_session: AsyncSession) -> None:
+    """Кончились деньги — кончилась рассылка, и без всякого сторожа.
+
+    Срок проверяется прямо в запросе активных подписок: пропущенный проход
+    отдельного сторожа означал бы бесплатную рассылку, а пропущенное условие в
+    запросе не означает ничего — его просто нет.
+    """
+    passport = Passport(intent=Intent.BUY, category=Category.MOTORBIKE, city="nha_trang")
+    user = await UserRepository(db_session).get_or_create(779)
+    assert user.id is not None
+    stored = await PassportRepository(db_session).save_new(user.id, passport)
+    await db_session.commit()
+
+    repo = DeliveryRepository(db_session)
+    await repo.pay_and_activate(
+        Payment(user_id=user.id, amount=1, external_id="истёкший"),
+        passport_root=stored.id,
+        until=NOW,
+        since_listing_id=0,
+    )
+    await db_session.commit()
+
+    assert await repo.active_subscriptions(now=NOW - timedelta(days=1)) != []
+    assert await repo.active_subscriptions(now=NOW + timedelta(seconds=1)) == []
+
+
+async def test_a_forged_payload_cannot_subscribe_to_someone_elses_request(
+    db_session: AsyncSession,
+) -> None:
+    """`payload` формируем мы, но приходит он от Telegram и доверенным не является."""
+    passport = Passport(intent=Intent.BUY, category=Category.MOTORBIKE, city="nha_trang")
+    mine = await UserRepository(db_session).get_or_create(780)
+    stranger = await UserRepository(db_session).get_or_create(781)
+    assert mine.id is not None and stranger.id is not None
+    stored = await PassportRepository(db_session).save_new(mine.id, passport)
+    await db_session.commit()
+
+    repo = DeliveryRepository(db_session)
+
+    assert await repo.owns_chain(user_id=mine.id, passport_root=stored.id) is True
+    assert await repo.owns_chain(user_id=stranger.id, passport_root=stored.id) is False
+    assert await repo.owns_chain(user_id=mine.id, passport_root=stored.id + 999) is False
+
+
+async def test_a_subscription_only_gets_listings_newer_than_itself(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Подписка обещает НОВЫЕ посты, а не пересказ выдачи, из которой не выбрали.
+
+    Без точки отсчёта свежая подписка вываливает клиенту весь двухнедельный
+    запас разом — включая ровно те объявления, за отсутствие интереса к которым
+    он и заплатил.
+    """
+    from sniffer.worker import matcher as module
+
+    passport = Passport(intent=Intent.BUY, category=Category.MOTORBIKE, city="nha_trang")
+    user = await UserRepository(db_session).get_or_create(782)
+    assert user.id is not None
+    stored = await PassportRepository(db_session).save_new(user.id, passport)
+    old_raw, new_raw = await RawMessageRepository(db_session).add_many([_raw(1), _raw(2)])
+    listings = ListingRepository(db_session)
+    seen = await listings.add(_card(old_raw, "Показывали до подписки"))
+    await db_session.commit()
+    assert seen.id is not None
+
+    await DeliveryRepository(db_session).pay_and_activate(
+        Payment(user_id=user.id, amount=1, external_id="за-новое"),
+        passport_root=stored.id,
+        until=NOW + timedelta(days=30),
+        since_listing_id=seen.id,
+    )
+    fresh = await listings.add(_card(new_raw, "Появилось после подписки"))
+    await db_session.commit()
+    assert fresh.id is not None
+
+    monkeypatch.setattr(module, "session_scope", lambda: _borrowed(db_session))
+    assert await module.Matcher().tick(now=NOW) == 1
+
+    (message,) = await DeliveryRepository(db_session).take_pending(now=NOW)
+    assert message.payload["title"] == "Появилось после подписки"
+
+
+def _card(raw_message_id: int, title: str) -> Listing:
+    return Listing(
+        raw_message_id=raw_message_id,
+        deal_type="buy",
+        category="motorbike",
+        city="nha_trang",
+        title=title,
+        summary="Автомат",
+        tg_link="https://t.me/c/1/1",
+        posted_at=NOW,
+    )

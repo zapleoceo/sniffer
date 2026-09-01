@@ -80,7 +80,13 @@ class Matcher:
             return 0
 
         queued = 0
-        for listing in await listings.match(spec, limit=LISTINGS_PER_SUBSCRIPTION):
+        # Точка отсчёта подписки. Без неё свежая подписка вываливает клиенту
+        # весь двухнедельный запас разом — включая ровно те объявления, которые
+        # он посмотрел и не выбрал перед тем, как заплатить. Подписка обещает
+        # НОВЫЕ посты, и обещание держится этим аргументом.
+        for listing in await listings.match(
+            spec, after_id=subscription.since_listing_id, limit=LISTINGS_PER_SUBSCRIPTION
+        ):
             if queued >= left:
                 break
             if listing.id is None or not worth_sending(listing, passport, now=moment):

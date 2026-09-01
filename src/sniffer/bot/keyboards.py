@@ -22,6 +22,10 @@ from sniffer.bot.conversation import Reply
 # ряд ещё читаются, длинные подписи телефон обрежет.
 ROW = 2
 
+# Цена стоит прямо на кнопке. Кнопка «следить», ведущая к счёту без
+# предупреждения о деньгах, — это тёмный паттерн, даже если речь про звезду.
+SUBSCRIBE_LABEL = "🔔 Следить за новыми — 1 ⭐/мес"
+
 
 class AnswerCallback(CallbackData, prefix="ans"):
     """Ответ на уточняющий вопрос: код поля и значение кнопки."""
@@ -36,6 +40,15 @@ class FeedbackCallback(CallbackData, prefix="fb"):
     kind: str
 
 
+class SubscribeCallback(CallbackData, prefix="sub"):
+    """«Следить за новыми». Данных не несёт: тема берётся из текущего паспорта.
+
+    Класть корень цепочки в `callback_data` было бы удобнее и хуже: кнопка
+    живёт в чате неделями, а паспорт за это время сменится, и клиент оплатил бы
+    подписку на тот запрос, который видел когда-то, а не на свой нынешний.
+    """
+
+
 def markup(reply: Reply) -> InlineKeyboardMarkup | None:
     """Разметка сообщения. Нет кнопок — нет и клавиатуры."""
     if reply.question is not None:
@@ -46,14 +59,27 @@ def markup(reply: Reply) -> InlineKeyboardMarkup | None:
             )
             for option in reply.question.buttons
         )
-    if reply.feedback:
-        return _rows(
+    if reply.feedback or reply.offer_subscription:
+        buttons = [
             InlineKeyboardButton(
                 text=option.label,
                 callback_data=FeedbackCallback(kind=option.value).pack(),
             )
             for option in reply.feedback
-        )
+        ]
+        rows = [buttons[start : start + ROW] for start in range(0, len(buttons), ROW)]
+        if reply.offer_subscription:
+            # Отдельной строкой и во всю ширину: это не ещё один вариант
+            # обратной связи, а действие с деньгами. Рядом с «дорого» и «не то»
+            # его нажимают, не глядя.
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=SUBSCRIBE_LABEL, callback_data=SubscribeCallback().pack()
+                    )
+                ]
+            )
+        return InlineKeyboardMarkup(inline_keyboard=rows)
     return None
 
 
