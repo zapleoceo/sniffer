@@ -139,6 +139,38 @@ class BrokerClient:
             raise BrokerError(f"провайдер {result.provider} вернул невалидный JSON") from exc
         return parsed
 
+    async def transcribe(self, audio: bytes, *, filename: str = "voice.ogg") -> str:
+        """Голос → текст. Синхронный запрос: у брокера это прокси, не очередь.
+
+        Отдельным методом, а не через `chat`, потому что это другой протокол:
+        multipart с файлом вместо JSON с сообщениями, и свой эндпоинт
+        `/v1/transcribe`. Общего у них только ключ проекта и учёт расходов.
+
+        Ответ отдаёт `request_id` из `usage_log` брокера — тот же якорь, по
+        которому связываются расходы обычных вызовов (docs/dashboard.md).
+        """
+        response = await self._client.post(
+            f"{self._base_url}/v1/transcribe",
+            headers={"X-Project-Key": self._key},
+            files={"file": (filename, audio, "application/octet-stream")},
+            timeout=self._timeout_s,
+        )
+        if response.status_code >= 400:
+            raise BrokerError(f"transcribe {response.status_code}: {response.text[:200]}")
+        body = response.json()
+        await self._account(
+            "transcription",
+            BrokerResult(
+                text="",
+                provider=body.get("provider"),
+                cost_usd=body.get("cost_usd"),
+                request_id=_as_int(body.get("request_id")),
+                model=body.get("model"),
+                latency_ms=_as_int(body.get("latency_ms")),
+            ),
+        )
+        return str(body.get("text") or "").strip()
+
     async def _submit(self, capability: str, payload: dict[str, Any]) -> int:
         response = await self._client.post(
             f"{self._base_url}/v1/jobs",

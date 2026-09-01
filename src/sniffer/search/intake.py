@@ -29,6 +29,7 @@ from sniffer.domain.passport import (
     PassportStatus,
     PricePeriod,
 )
+from sniffer.search.engine_size import MAX_CC, MIN_CC
 from sniffer.search.intake_rules import parse_query
 from sniffer.search.market_terms import ALL_CITY_NAMES
 from sniffer.search.planner import StructuredCaller
@@ -107,7 +108,16 @@ def intake_schema() -> dict[str, Any]:
     return {
         "type": "object",
         "additionalProperties": False,
-        "required": ["intent", "category", "city", "budget_max", "currency", "period", "brand"],
+        "required": [
+            "intent",
+            "category",
+            "city",
+            "budget_max",
+            "currency",
+            "period",
+            "brand",
+            "engine_cc",
+        ],
         "properties": {
             "intent": _enum(Intent),
             "category": _enum(Category),
@@ -116,6 +126,14 @@ def intake_schema() -> dict[str, Any]:
             "currency": _enum(Currency),
             "period": _enum(PricePeriod),
             "brand": {"type": "string"},
+            # Своё поле под объём двигателя — и это лечение, а не удобство.
+            # Пока его не было, единственным числовым полем оставался
+            # `budget_max`, и модель клала туда «200 кубиков». Она не виновата:
+            # когда для числа есть ровно одно место, оно туда и попадает.
+            "engine_cc": {
+                "type": "string",
+                "description": "объём двигателя в кубических сантиметрах, пусто если не назван",
+            },
         },
     }
 
@@ -136,6 +154,12 @@ def merge(rules: Passport, payload: Any) -> Passport:
     brand = str(payload.get("brand") or "").strip().lower()
     if brand:
         attributes["brand"] = brand
+    # Правила уже могли вынуть объём регулярным выражением — и это точнее
+    # модели, поэтому её ответ идёт вторым и только на пустое место.
+    if "engine_cc" not in attributes:
+        engine_cc = _digits(payload.get("engine_cc"))
+        if engine_cc is not None and MIN_CC <= engine_cc <= MAX_CC:
+            attributes["engine_cc"] = engine_cc
 
     category = _member(Category, payload.get("category")) or rules.category
     city = str(payload.get("city") or "").strip() or rules.city
@@ -175,3 +199,9 @@ def _number(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if number > 0 else None
+
+
+def _digits(value: object) -> int | None:
+    """Число из ответа модели. Она возвращает то `200`, то `"200 cc"`."""
+    text = "".join(char for char in str(value or "") if char.isdigit())
+    return int(text) if text else None

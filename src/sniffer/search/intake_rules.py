@@ -19,6 +19,7 @@ from typing import Any
 
 from sniffer.domain.passport import Category, Intent, Passport, PassportStatus
 from sniffer.search.budget_rules import parse_budget
+from sniffer.search.engine_size import read_engine_cc, without_engine_cc
 from sniffer.search.market_terms import ALL_CITY_NAMES
 from sniffer.search.vocabulary import city_variants
 
@@ -142,8 +143,15 @@ def parse_query(text: str, *, default_city: str = "") -> Passport:
     if intent is None:
         intent = Intent.RENT if category in _RENTED_CATEGORIES else Intent.BUY
 
-    budget = parse_budget(query, intent=intent)
     attributes: dict[str, Any] = {}
+    # Объём двигателя вынимается ПЕРВЫМ и вырезается из текста: «200 кубиков»
+    # и «до 200» отличаются одним словом после числа, и разбор бюджета обязан
+    # его не увидеть. Живой отказ 01.09.2026 — «200 кубиков» стали бюджетом в
+    # 200000 VND (семь долларов), и поиск, разумеется, не нашёл ничего.
+    engine_cc = read_engine_cc(query)
+    if engine_cc is not None:
+        attributes["engine_cc"] = engine_cc
+    budget = parse_budget(without_engine_cc(query), intent=intent)
     brand = detect_brand(query)
     if brand:
         attributes["brand"] = brand

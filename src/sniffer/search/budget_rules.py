@@ -80,7 +80,7 @@ _VND_THRESHOLD = 100_000
 
 def parse_budget(text: str, *, intent: Intent | None = None) -> Budget:
     """Что клиент готов заплатить. Ничего не нашли — пустой бюджет, не ноль."""
-    amounts = _amounts(text)
+    amounts = _amounts(_without_rejected(text))
     lows = [value for value, mark in amounts if mark == "low"]
     highs = [value for value, mark in amounts if mark == "high"]
     plain = [value for value, mark in amounts if mark is None]
@@ -97,6 +97,29 @@ def parse_budget(text: str, *, intent: Intent | None = None) -> Budget:
         currency=_currency(text) or _guess_currency(highs + lows),
         period=_period(text, intent),
     )
+
+
+# Клиент поправляет бота: «не 200000 VND, а объём двигателя». Число после «не»
+# — то, от чего он ОТКАЗЫВАЕТСЯ, и читать его как бюджет значит повторить
+# ровно ту ошибку, которую человек только что вслух исправил.
+#
+# Живой случай 01.09.2026: бот принял «200 кубиков» за 200000 VND, клиент
+# написал «не 200000 VND, а обьем мощность двигателя до 200 кубических
+# сантиметров» — и получил тот же бюджет 200000 VND второй раз. Поправка,
+# которую система не слышит, хуже первой ошибки: первая — недоразумение,
+# вторая — ощущение, что тебя не слушают.
+_REJECTED_RE = re.compile(
+    r"(?:^|[^а-яё])"
+    r"не\s+(?:по\s+)?"
+    r"\d[\d\s.,]*\s*"
+    r"(?:[$€₫]|usd|eur|vnd|đ|донг\w*|доллар\w*|млн|k|к)?",
+    re.IGNORECASE,
+)
+
+
+def _without_rejected(text: str) -> str:
+    """Убрать суммы, которые клиент прямо отверг словом «не»."""
+    return _REJECTED_RE.sub(" ", text)
 
 
 def _amounts(text: str) -> list[tuple[float, str | None]]:

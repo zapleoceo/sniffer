@@ -18,6 +18,7 @@ from aiogram.types import (
 )
 
 from sniffer.bot import billing, subscription
+from sniffer.bot import voice as voice_input
 from sniffer.bot.conversation import NO_REQUEST_YET, Conversation, Reply, Send
 from sniffer.bot.keyboards import AnswerCallback, FeedbackCallback, SubscribeCallback, markup
 from sniffer.bot.store import Client, PassportStore
@@ -58,6 +59,37 @@ async def search(message: Message) -> None:
     if client is None:
         return
     await conversation().on_text(client, message.text or "", _sender(message))
+
+
+@router.message(F.voice)
+async def voice(message: Message) -> None:
+    """Голосовой запрос. Распознаём и дальше идём обычным текстовым путём.
+
+    Услышанное показываем всегда: распознавание ошибается, и клиент обязан
+    видеть, по какой фразе пошёл поиск, — иначе непонятную выдачу не с чем
+    сопоставить, и поправить её нечем.
+    """
+    client = _client(message)
+    if client is None or message.voice is None:  # pragma: no cover — фильтр выше
+        return
+
+    if message.voice.duration > voice_input.MAX_VOICE_SECONDS:
+        await message.answer(voice_input.TOO_LONG)
+        return
+
+    file_id = message.voice.file_id
+
+    async def download() -> bytes | None:
+        stream = await message.bot.download(file_id) if message.bot else None
+        return None if stream is None else stream.read()
+
+    text = await voice_input.transcribe(duration=message.voice.duration, download=download)
+    if not text:
+        await message.answer(voice_input.NOT_RECOGNISED)
+        return
+
+    await message.answer(voice_input.HEARD.format(text=text))
+    await conversation().on_text(client, text, _sender(message))
 
 
 @router.callback_query(AnswerCallback.filter())
