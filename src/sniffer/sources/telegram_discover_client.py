@@ -112,9 +112,19 @@ class TelethonJoiner:
 
         result = await self._client(JoinChannelRequest(channel=username.lstrip("@")))
         chat = first_chat(result)
-        if chat is None:
-            raise LookupError(f"вступили в {username}, но чат не вернулся")
-        return marked_id(chat)
+        if chat is not None:
+            return marked_id(chat)
+        # Ответ без чата — это НЕ «вступления не было». Telegram отдаёт
+        # `UpdatesTooLong` вместо списка обновлений, когда очередь обновлений
+        # аккаунта переполнена, и чата в таком ответе нет вовсе. Запрос при
+        # этом состоялся, аккаунт в группе, слот потрачен.
+        #
+        # Раньше здесь сразу летел `LookupError`, то есть «исход неизвестен», а
+        # неизвестный исход возвращает кандидата в очередь — и через час уходил
+        # ВТОРОЙ join в тот же чат. Замер на боевом аккаунте 01.09.2026: два
+        # слота из десяти на @auto_moto_vietnam за сутки, реестр пуст, чат не
+        # заглушен, очередь из 35 кандидатов стоит за первым.
+        return await self._id_of_joined(username, answer=type(result).__name__)
 
     async def join_invite(self, invite_hash: str) -> int:
         """Та же дверь, что и `join_public`, только для закрытой группы."""
@@ -122,9 +132,34 @@ class TelethonJoiner:
 
         result = await self._client(ImportChatInviteRequest(hash=invite_hash))
         chat = first_chat(result)
-        if chat is None:
-            raise LookupError("вступили по приглашению, но чат не вернулся")
-        return marked_id(chat)
+        if chat is not None:
+            return marked_id(chat)
+        # Та же дыра и то же лечение, что в `join_public`. Имени у закрытой
+        # группы нет, зато есть приглашение: после вступления `CheckChatInvite`
+        # отдаёт `ChatInviteAlready` — с чатом и его id. Это чтение, слота оно
+        # не стоит.
+        log.warning("discover.join_without_chat", answer=type(result).__name__, invite=True)
+        resolved = await self.check_invite(invite_hash)
+        if resolved is None or not resolved.already_member or not resolved.tg_id:
+            # `ChatInvite` без признака участника означает, что внутрь мы так и
+            # не попали. Вот теперь исход действительно неизвестен.
+            raise LookupError("вступили по приглашению, но чат не вернулся и не читается")
+        return resolved.tg_id
+
+    async def _id_of_joined(self, username: str, *, answer: str) -> int:
+        """Id чата, в который только что вступили, — чтением, а не догадкой.
+
+        `ResolveUsername` ничего не отправляет и в чате не виден, поэтому
+        добор id не тратит ни суточный слот, ни право на действие: закрытый
+        список CLAUDE.md ограничивает действия, а это чтение.
+        """
+        log.warning("discover.join_without_chat", username=username, answer=answer)
+        resolved = await self.resolve_username(username)
+        if resolved is None or resolved.is_user or not resolved.tg_id:
+            # Имя перестало разрешаться или указывает на человека: вступать
+            # было некуда, и придумывать id не из чего.
+            raise LookupError(f"вступили в {username}, но чат не вернулся и не читается")
+        return resolved.tg_id
 
     async def set_muted(self, tg_id: int) -> None:
         """Исключение 2: аккаунт рабочий, и два десятка барахолок его хоронят."""
