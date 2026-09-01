@@ -951,3 +951,59 @@ async def test_a_listing_from_another_city_is_not_sent(
 async def _borrowed(session: AsyncSession) -> AsyncIterator[AsyncSession]:
     """Сессия теста вместо своей: проверяем запросы, а не сборку соединения."""
     yield session
+
+
+async def test_one_broken_message_does_not_stop_the_whole_batch(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Единая точка отказа с чужим текстом на входе — это не надёжность.
+
+    Живой отказ 01.09.2026: одно объявление с невставляемой ценой уронило пачку,
+    воркер ушёл в цикл перезапуска, и вся воронка встала навсегда. Проверять
+    надо на живой базе: падает именно вставка, и на подделке её нет.
+    """
+    from sniffer.pipeline import archive as pipeline
+    from sniffer.worker import archive as module
+
+    chat = Chat(tg_id=-100123, title="Барахолка", city="nha_trang", username="flea")
+    await ChatRepository(db_session).add(chat)
+    good, bad = await RawMessageRepository(db_session).add_many(
+        [
+            RawMessage(
+                chat_tg_id=-100123,
+                msg_id=1,
+                text="Продам Honda Vision 2021, цена 15.000.000 VND, документы есть",
+                text_hash="хороший",
+                posted_at=NOW,
+            ),
+            RawMessage(
+                chat_tg_id=-100123,
+                msg_id=2,
+                text="Продам Yamaha NVX, цена 20.000.000 VND, срочно",
+                text_hash="сломанный",
+                posted_at=NOW,
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    # Ломаем ровно одно сообщение — так, как это сделала неправдоподобная цена.
+    real_listing = pipeline.listing_from
+
+    def explode(raw: RawMessage, chat_row: Chat, result: object) -> object:
+        if raw.id == bad:
+            raise ValueError("цена не влезла в колонку")
+        return real_listing(raw, chat_row, result)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(module, "listing_from", explode)
+    monkeypatch.setattr(module, "session_scope", lambda: _borrowed(db_session))
+
+    handled = await module.ArchivePipeline().tick()
+
+    assert handled == 2, "оба сообщения обязаны быть разобраны, а не одно"
+    listings = ListingRepository(db_session)
+    assert await listings.get_by_raw_message(good) is not None, "здоровое стало карточкой"
+    assert await listings.get_by_raw_message(bad) is None
+    broken = await RawMessageRepository(db_session).get_by_key(-100123, 2)
+    assert broken is not None and broken.stage == "rejected"
+    assert broken.gate_signals.get("reason") == "pipeline_error"
