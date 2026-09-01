@@ -97,13 +97,22 @@ class TelethonJoiner:
         result = await self._client(SearchRequest(q=query, limit=limit))
         return [from_chat(chat) for chat in getattr(result, "chats", ())]
 
-    async def history(self, entity: int | str, *, limit: int, min_id: int) -> Sequence[Any]:
-        """Последние сообщения после курсора, без отметки о прочтении.
+    async def history(
+        self, entity: int | str, *, limit: int, min_id: int = 0, max_id: int = 0
+    ) -> Sequence[Any]:
+        """Окно истории без отметки о прочтении.
 
-        `get_messages` — чтение истории. В отличие от `send_read_acknowledge`
-        оно не меняет состояние диалога у аккаунта и никому не видно.
+        `get_messages` — чтение. В отличие от `send_read_acknowledge` оно не
+        меняет состояние диалога у аккаунта и никому не видно.
+
+        Два курсора, потому что лента читается в обе стороны: `min_id` даёт
+        новое сверху (догон свежих постов), `max_id` — старое снизу (добор
+        архива). Ноль у обоих означает «без границы» — так их понимает сам
+        Telegram, и своей трактовки мы не выдумываем.
         """
-        messages = await self._client.get_messages(entity, limit=limit, min_id=min_id)
+        messages = await self._client.get_messages(
+            entity, limit=limit, min_id=min_id, max_id=max_id
+        )
         return cast(Sequence[Any], messages)
 
     async def join_public(self, username: str) -> int:

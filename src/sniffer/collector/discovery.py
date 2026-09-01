@@ -18,6 +18,7 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sniffer.collector.alerts import session_unavailable
+from sniffer.collector.backfill import HistoryBackfill
 from sniffer.collector.history_store import DatabaseHistoryStore
 from sniffer.collector.ingest import HistorySyncer
 from sniffer.config import Settings, get_settings
@@ -162,14 +163,25 @@ class HistoryLike(Protocol):
     async def sync(self) -> int: ...
 
 
+class BackfillLike(Protocol):
+    async def run(self) -> int: ...
+
+
 JoinerFactory = Callable[[TelegramJoiner], JoinerLike]
 HistoryFactory = Callable[[TelegramJoiner], HistoryLike]
+BackfillFactory = Callable[[TelegramJoiner], BackfillLike]
 ClientFactory = Callable[[Settings], TelegramJoiner]
 OwnerAlert = Callable[[Settings, str], Awaitable[None]]
 
 
 class DiscoveryRunner:
-    """Один проход: догнать mute и, если лимиты разрешают, один join."""
+    """Один проход: догнать mute, при разрешённых лимитах — join, потом чтение.
+
+    Чтения два и они разные: `HistorySyncer` берёт свежее сверху ленты,
+    `HistoryBackfill` дочитывает архив снизу. Второй появился потому, что без
+    него чат отдавал только те 200 сообщений, что висели в нём на момент
+    вступления (`backfill.py`).
+    """
 
     def __init__(
         self,
@@ -178,12 +190,14 @@ class DiscoveryRunner:
         client_factory: ClientFactory = new_joiner,
         joiner_factory: JoinerFactory | None = None,
         history_factory: HistoryFactory | None = None,
+        backfill_factory: BackfillFactory | None = None,
         owner_alert: OwnerAlert = session_unavailable,
     ) -> None:
         self._settings = settings or get_settings()
         self._client_factory = client_factory
         self._joiner_factory = joiner_factory or self._new_joiner
         self._history_factory = history_factory or self._new_history
+        self._backfill_factory = backfill_factory or self._new_backfill
         self._owner_alert = owner_alert
         self._unavailable_reported = False
 
@@ -215,6 +229,10 @@ class DiscoveryRunner:
             muted = await joiner.retry_mutes()
             joined = await joiner.join_next()
             await self._history_factory(client).sync()
+            # Архив добирается ПОСЛЕ свежего и последним в проходе. Порядок не
+            # случайный: свежее объявление клиенту нужнее вчерашнего, а добор
+            # длинный и может оборваться на середине — обрывать при этом нечего.
+            await self._backfill_factory(client).run()
             if joined is None:
                 return muted
             log.info("collector.chat_joined", tg_id=joined.tg_id, chat=joined.username)
@@ -245,6 +263,9 @@ class DiscoveryRunner:
             store=DatabaseHistoryStore(),
             discover=discovery.harvest,
         )
+
+    def _new_backfill(self, client: TelegramJoiner) -> HistoryBackfill:
+        return HistoryBackfill(reader=client, store=DatabaseHistoryStore())
 
 
 def _candidate(candidate: ChatCandidate) -> DiscoveryCandidate:

@@ -636,3 +636,71 @@ async def test_retention_deletes_in_batches(db_session: AsyncSession) -> None:
     assert await repo.delete_expired(older_than=NOW - timedelta(days=90), limit=3) == 1
     await db_session.commit()
     assert await repo.delete_expired(older_than=NOW - timedelta(days=90), limit=3) == 0
+
+
+# ── курсор архива ───────────────────────────────────────────────────────────
+
+
+async def test_the_archive_cursor_moves_down_not_up(db_session: AsyncSession) -> None:
+    """Зеркало `mark_synced`, и сторона тут решает всё.
+
+    `least` вместо `greatest`: перепутать значит либо застрять на месте, либо
+    перескочить непрочитанное — второе тише и потому хуже. Ноль означает «ещё
+    не начинали», поэтому в сравнение он попадать не должен вовсе.
+    """
+    repo = ChatRepository(db_session)
+    await repo.add(Chat(tg_id=-100777, title="Барахолка", city="nha_trang"))
+    await db_session.commit()
+
+    await repo.mark_backfilled(-100777, oldest_msg_id=5000, done=False)
+    await db_session.commit()
+    first = await repo.get_by_tg_id(-100777)
+    assert first is not None and first.backfill_msg_id == 5000, "нуль не должен выиграть у 5000"
+
+    await repo.mark_backfilled(-100777, oldest_msg_id=4000, done=False)
+    await db_session.commit()
+    lower = await repo.get_by_tg_id(-100777)
+    assert lower is not None and lower.backfill_msg_id == 4000
+
+    await repo.mark_backfilled(-100777, oldest_msg_id=9000, done=False)
+    await db_session.commit()
+    back = await repo.get_by_tg_id(-100777)
+    assert back is not None and back.backfill_msg_id == 4000, "курсор назад вверх не отпрыгивает"
+
+
+async def test_a_finished_archive_is_never_offered_again(db_session: AsyncSession) -> None:
+    repo = ChatRepository(db_session)
+    await repo.add(Chat(tg_id=-100777, title="Дочитанная", city="nha_trang"))
+    await repo.add(Chat(tg_id=-100888, title="Недочитанная", city="nha_trang"))
+    await db_session.commit()
+    await repo.mark_backfilled(-100777, oldest_msg_id=1, done=True)
+    await db_session.commit()
+
+    picked = await repo.next_backfill()
+
+    assert picked is not None and picked.tg_id == -100888
+
+
+async def test_an_untouched_chat_gets_the_archive_before_a_started_one(
+    db_session: AsyncSession,
+) -> None:
+    """Чат без архива бесполезнее, чем чат с половиной архива."""
+    repo = ChatRepository(db_session)
+    await repo.add(Chat(tg_id=-100777, title="Начатая", city="nha_trang"))
+    await repo.add(Chat(tg_id=-100888, title="Нетронутая", city="nha_trang"))
+    await db_session.commit()
+    await repo.mark_backfilled(-100777, oldest_msg_id=500, done=False)
+    await db_session.commit()
+
+    picked = await repo.next_backfill()
+
+    assert picked is not None and picked.tg_id == -100888
+    assert picked.backfill_msg_id == 0
+
+
+async def test_a_disabled_chat_is_not_backfilled(db_session: AsyncSession) -> None:
+    repo = ChatRepository(db_session)
+    await repo.add(Chat(tg_id=-100777, title="Выключенная", city="nha_trang", is_active=False))
+    await db_session.commit()
+
+    assert await repo.next_backfill() is None

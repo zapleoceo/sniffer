@@ -58,6 +58,52 @@ class ChatRepository(Repository):
         )
         return [to_chat(row) for row in rows]
 
+    async def next_backfill(self) -> Chat | None:
+        """Чей архив дочитываем в этот проход. Один чат за раз, и это нарочно.
+
+        Догон архива — это сотни запросов подряд к одному аккаунту. Идти по
+        десяти чатам сразу значит выглядеть как выкачка; по одному — как
+        человек, листающий ленту вверх. Берём тот, что дальше от конца:
+        нетронутый (`backfill_msg_id = 0`) раньше начатого, потому что первый
+        чат без архива бесполезнее, чем второй с половиной архива.
+        """
+        rows = await self._session.scalars(
+            select(models.Chat)
+            .where(
+                models.Chat.is_active.is_(True),
+                models.Chat.backfill_done.is_(False),
+            )
+            # `nullif(…, 0)`: ноль значит «не начинали», а не «дочитали до
+            # первого сообщения». Под простым DESC он уезжал в конец очереди,
+            # то есть нетронутый чат получал архив ПОСЛЕДНИМ — ровно наоборот
+            # к замыслу. Поймано тестом на живом Postgres, не рассуждением.
+            .order_by(
+                func.nullif(models.Chat.backfill_msg_id, 0).desc().nullsfirst(),
+                models.Chat.search_rank,
+            )
+            .limit(1)
+        )
+        row = rows.first()
+        return to_chat(row) if row is not None else None
+
+    async def mark_backfilled(self, tg_id: int, *, oldest_msg_id: int, done: bool) -> None:
+        """Докуда дочитан архив. Курсор идёт ВНИЗ, поэтому `least`, а не `greatest`.
+
+        Зеркало `mark_synced`, и различие не косметическое: перепутать сторону
+        значит либо застрять на месте, либо перескочить непрочитанное — второе
+        тише и хуже.
+        """
+        await self._session.execute(
+            update(models.Chat)
+            .where(models.Chat.tg_id == tg_id)
+            .values(
+                backfill_msg_id=func.least(
+                    func.nullif(models.Chat.backfill_msg_id, 0), oldest_msg_id
+                ),
+                backfill_done=done,
+            )
+        )
+
     async def add(self, chat: Chat) -> Chat:
         row = models.Chat(
             tg_id=chat.tg_id,

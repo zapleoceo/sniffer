@@ -26,7 +26,9 @@ class FakeReader:
     messages: list[FakeMessage]
     calls: list[tuple[int | str, int, int]] = field(default_factory=list)
 
-    async def history(self, entity: int | str, *, limit: int, min_id: int) -> Sequence[MessageLike]:
+    async def history(
+        self, entity: int | str, *, limit: int, min_id: int = 0, max_id: int = 0
+    ) -> Sequence[MessageLike]:
         self.calls.append((entity, limit, min_id))
         return cast(Sequence[MessageLike], self.messages)
 
