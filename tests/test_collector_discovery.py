@@ -43,6 +43,16 @@ class FakeJoiner:
         return self.joined
 
 
+@dataclass
+class FakeHistory:
+    synced: int = 0
+    calls: int = 0
+
+    async def sync(self) -> int:
+        self.calls += 1
+        return self.synced
+
+
 def _settings() -> Settings:
     return Settings(tg_api_id=1, tg_api_hash="hash", tg_session="session")
 
@@ -53,15 +63,17 @@ async def test_cycle_connects_joins_once_retries_mutes_and_disconnects() -> None
         DiscoveredChat(tg_id=-100123, username="nha_flea", title="Барахолка", city="nha_trang"),
         muted=2,
     )
+    history = FakeHistory(synced=7)
     runner = DiscoveryRunner(
         _settings(),
         client_factory=lambda _settings: cast(TelegramJoiner, client),
         joiner_factory=lambda _client: joiner,
+        history_factory=lambda _client: history,
     )
 
     assert await runner.tick() == 3
     assert (client.connected, client.disconnected) == (1, 1)
-    assert (joiner.mute_calls, joiner.join_calls) == (1, 1)
+    assert (joiner.mute_calls, joiner.join_calls, history.calls) == (1, 1, 1)
 
 
 async def test_unavailable_telegram_does_not_enter_the_queue_or_retry_in_a_loop() -> None:
@@ -78,6 +90,7 @@ async def test_unavailable_telegram_does_not_enter_the_queue_or_retry_in_a_loop(
         _settings(),
         client_factory=lambda _settings: cast(TelegramJoiner, client),
         joiner_factory=make_joiner,
+        history_factory=lambda _client: FakeHistory(),
         owner_alert=lambda _settings, _error: _record_alert(alerts, _error),
     )
 

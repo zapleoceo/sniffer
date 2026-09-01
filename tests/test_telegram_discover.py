@@ -2,7 +2,7 @@
 
 Сети здесь нет и быть не должно: клиент подменён фейком, который знает ровно
 разрешённые методы и падает на любом другом обращении. Тест, который ходит в
-Telegram, проверяет не разведку, а связь, — и тратит те самые три вступления в
+Telegram, проверяет не разведку, а связь, — и тратит те самые десять вступлений в
 сутки, ради сохранности которых всё и написано так осторожно.
 
 Хранилище тоже фейковое, но устроено как база: `FakeDb` — это «диск», а
@@ -82,7 +82,9 @@ FORBIDDEN_CALL = re.compile(
 )
 
 # Единственные запросы Telegram, которые вправе встречаться в этих модулях:
-# четыре чтения и три запроса на два действия. Закрытый список CLAUDE.md
+# четыре чтения и три запроса на два действия. История идёт через
+# высокоуровневый `get_messages`, поэтому в перечень явных TL Request не входит.
+# Закрытый список CLAUDE.md
 # ограничивает именно
 # ДЕЙСТВИЯ — их по-прежнему два, вступление и беззвучный режим. `CheckChatInvite`
 # в него не входит и входить не может: это чтение, оно никому не адресовано и в
@@ -704,44 +706,44 @@ async def test_queue_is_drained_in_priority_order() -> None:
     assert chat is not None and chat.username == "first"
 
 
-async def test_third_join_passes_and_the_fourth_does_not() -> None:
-    """CLAUDE.md: не больше 3 вступлений в сутки. Проверяем на границе."""
-    names = ("one", "two", "three", "four")
+async def test_tenth_join_passes_and_the_eleventh_does_not() -> None:
+    """CLAUDE.md: не больше 10 вступлений в сутки. Проверяем на границе."""
+    names = tuple(f"chat{number}" for number in range(1, 12))
     db = seeded_db(*names)
     client = joiner_client(*names)
     # Пауза в час выдержана — упирается именно в суточный счётчик.
-    moments = [NOON + timedelta(hours=hour) for hour in range(4)]
+    moments = [NOON + timedelta(hours=hour) for hour in range(11)]
 
     joined = [await joiner(db, client, now=moment).join_next() for moment in moments]
 
-    assert [chat.username for chat in joined[:3] if chat is not None] == ["one", "two", "three"]
-    assert joined[3] is None
-    assert client.joined == ["one", "two", "three"]
-    # Четвёртый кандидат остался в очереди, а не потерялся.
-    assert any(row["key"] == "@four" and row["status"] == "queued" for row in db.candidates)
+    assert [chat.username for chat in joined[:10] if chat is not None] == list(names[:10])
+    assert joined[10] is None
+    assert client.joined == list(names[:10])
+    # Одиннадцатый кандидат остался в очереди, а не потерялся.
+    assert any(row["key"] == "@chat11" and row["status"] == "queued" for row in db.candidates)
 
 
-async def test_the_fourth_join_is_still_refused_after_a_restart() -> None:
+async def test_the_eleventh_join_is_still_refused_after_a_restart() -> None:
     """Процесс перезапускается, а лимит Telegram нет.
 
-    Счётчик в памяти обнулился бы вместе с процессом и разрешил бы ещё три
+    Счётчик в памяти обнулился бы вместе с процессом и разрешил бы ещё десять
     вступления после каждого деплоя. Здесь «диск» тот же, объекты новые.
     """
-    names = ("one", "two", "three", "four")
+    names = tuple(f"chat{number}" for number in range(1, 12))
     db = seeded_db(*names)
     client = joiner_client(*names)
-    for hour in range(3):
+    for hour in range(10):
         await joiner(db, client, now=NOON + timedelta(hours=hour)).join_next()
 
     # Перезапуск: разведка, реестр, очередь и журнал созданы заново.
-    restarted = joiner(db, joiner_client(*names), now=NOON + timedelta(hours=3))
+    restarted = joiner(db, joiner_client(*names), now=NOON + timedelta(hours=10))
     assert await restarted.join_next() is None
     assert len(db.chats) == MAX_JOINS_PER_DAY
 
     # А через сутки после первого вступления окно сдвинулось и слот освободился.
     later = joiner(db, client, now=NOON + timedelta(hours=24, minutes=1))
     chat = await later.join_next()
-    assert chat is not None and chat.username == "four"
+    assert chat is not None and chat.username == "chat11"
 
 
 async def test_an_hour_must_pass_between_joins() -> None:
@@ -804,7 +806,7 @@ async def test_reserved_candidate_is_not_taken_twice() -> None:
 async def test_lost_connection_costs_a_slot_but_not_the_candidate() -> None:
     """Обрыв посреди вступления: прошло оно или нет — неизвестно.
 
-    Слот остаётся потраченным (недосчитать безопаснее, чем сделать четвёртое),
+    Слот остаётся потраченным (недосчитать безопаснее, чем сделать одиннадцатое),
     кандидат возвращается в очередь — разбирать её больше некому.
     """
     db = seeded_db("one")
@@ -1067,6 +1069,7 @@ def test_the_joiner_protocol_has_no_extra_methods() -> None:
         "resolve_username",
         "check_invite",
         "search_contacts",
+        "history",
         "join_public",
         "join_invite",
         "set_muted",
@@ -1075,7 +1078,7 @@ def test_the_joiner_protocol_has_no_extra_methods() -> None:
 
 def test_limits_match_the_rules_they_were_copied_from() -> None:
     """Числа — из CLAUDE.md, а не из удобства."""
-    assert MAX_JOINS_PER_DAY == 3
+    assert MAX_JOINS_PER_DAY == 10
     assert telegram_discover_reference.MIN_JOIN_PAUSE == timedelta(hours=1)
     assert telegram_discover_reference.JOIN_WINDOW == timedelta(hours=24)
 
@@ -1248,13 +1251,13 @@ async def test_sent_join_request_spends_the_slot() -> None:
     assert db.rejects["+ModeratedAbCdEf1"] == REJECT_JOIN_REQUEST_SENT
 
 
-async def test_three_sent_requests_exhaust_the_day() -> None:
-    """Ровно три исходящих запроса в сутки, даже если все ушли в заявки.
+async def test_ten_sent_requests_exhaust_the_day() -> None:
+    """Ровно десять исходящих запросов в сутки, даже если все ушли в заявки.
 
-    Это и есть регресс на посчитанные рецензентом 24 запроса вместо 3: пока слот
+    Это и есть регресс на посчитанные рецензентом 24 запроса вместо 10: пока слот
     возвращался, каждый час освобождал новую попытку.
     """
-    hashes = ("OneAbCdEfGhIjKl1", "TwoAbCdEfGhIjKl2", "ThreeAbCdEfGhIj3", "FourAbCdEfGhIjK4")
+    hashes = tuple(f"Hash{number:02d}AbCdEfGhIjKl" for number in range(1, 12))
     db = seeded_invite_db(*hashes)
     client = FakeTelegram(
         invites={name: invite("Барахолка Нячанг") for name in hashes},
@@ -1262,20 +1265,18 @@ async def test_three_sent_requests_exhaust_the_day() -> None:
     )
 
     attempts = [
-        await joiner(db, client, now=NOON + timedelta(hours=hour)).join_next() for hour in range(4)
+        await joiner(db, client, now=NOON + timedelta(hours=hour)).join_next() for hour in range(11)
     ]
 
-    assert attempts == [None, None, None, None]
-    # Наружу ушло ровно три запроса, четвёртый не состоялся.
+    assert attempts == [None] * 11
+    # Наружу ушло ровно десять запросов, одиннадцатый не состоялся.
     assert [call for call in client.calls if call.startswith("join_invite")] == [
-        "join_invite:OneAbCdEfGhIjKl1",
-        "join_invite:TwoAbCdEfGhIjKl2",
-        "join_invite:ThreeAbCdEfGhIj3",
+        f"join_invite:{invite_hash}" for invite_hash in hashes[:10]
     ]
     assert len(db.events) == MAX_JOINS_PER_DAY
-    # Четвёртый кандидат остался в очереди — он ни в чём не виноват.
+    # Одиннадцатый кандидат остался в очереди — он ни в чём не виноват.
     assert any(
-        row["key"] == "+FourAbCdEfGhIjK4" and row["status"] == "queued" for row in db.candidates
+        row["key"] == f"+{hashes[10]}" and row["status"] == "queued" for row in db.candidates
     )
 
 
@@ -1317,7 +1318,7 @@ def test_broadcast_is_never_taken_for_a_group(
 
 
 # --------------------------------------------------------------------------
-# Три способа превысить три вступления в сутки. Каждый замерен прогоном по
+# Три способа превысить десять вступлений в сутки. Каждый замерен прогоном по
 # суткам, поэтому и закреплён отдельным тестом: суточный лимит — единственное,
 # что отделяет рабочий аккаунт от бана.
 # --------------------------------------------------------------------------

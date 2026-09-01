@@ -18,6 +18,8 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sniffer.collector.alerts import session_unavailable
+from sniffer.collector.history_store import DatabaseHistoryStore
+from sniffer.collector.ingest import HistorySyncer
 from sniffer.config import Settings, get_settings
 from sniffer.db.engine import session_scope
 from sniffer.db.repositories.chats import ChatRepository
@@ -27,6 +29,7 @@ from sniffer.db.repositories.discovery import (
     RejectRepository,
 )
 from sniffer.domain.records import Chat, DiscoveryCandidate
+from sniffer.sources.telegram_discover import ChatDiscovery
 from sniffer.sources.telegram_discover_client import new_joiner
 from sniffer.sources.telegram_discover_joiner import ChatJoiner
 from sniffer.sources.telegram_discover_reference import (
@@ -155,7 +158,12 @@ class JoinerLike(Protocol):
     async def retry_mutes(self) -> int: ...
 
 
+class HistoryLike(Protocol):
+    async def sync(self) -> int: ...
+
+
 JoinerFactory = Callable[[TelegramJoiner], JoinerLike]
+HistoryFactory = Callable[[TelegramJoiner], HistoryLike]
 ClientFactory = Callable[[Settings], TelegramJoiner]
 OwnerAlert = Callable[[Settings, str], Awaitable[None]]
 
@@ -169,11 +177,13 @@ class DiscoveryRunner:
         *,
         client_factory: ClientFactory = new_joiner,
         joiner_factory: JoinerFactory | None = None,
+        history_factory: HistoryFactory | None = None,
         owner_alert: OwnerAlert = session_unavailable,
     ) -> None:
         self._settings = settings or get_settings()
         self._client_factory = client_factory
         self._joiner_factory = joiner_factory or self._new_joiner
+        self._history_factory = history_factory or self._new_history
         self._owner_alert = owner_alert
         self._unavailable_reported = False
 
@@ -204,6 +214,7 @@ class DiscoveryRunner:
             joiner = self._joiner_factory(client)
             muted = await joiner.retry_mutes()
             joined = await joiner.join_next()
+            await self._history_factory(client).sync()
             if joined is None:
                 return muted
             log.info("collector.chat_joined", tg_id=joined.tg_id, chat=joined.username)
@@ -219,6 +230,20 @@ class DiscoveryRunner:
             rejected=DatabaseRejected(),
             client=client,
             city=self._settings.default_city,
+        )
+
+    def _new_history(self, client: TelegramJoiner) -> HistorySyncer:
+        discovery = ChatDiscovery(
+            registry=DatabaseRegistry(),
+            queue=DatabaseQueue(),
+            rejected=DatabaseRejected(),
+            client=client,
+            city=self._settings.default_city,
+        )
+        return HistorySyncer(
+            reader=client,
+            store=DatabaseHistoryStore(),
+            discover=discovery.harvest,
         )
 
 
