@@ -73,7 +73,7 @@ class JoinLimits:
 
 @dataclass(frozen=True, slots=True)
 class RawMessage:
-    """Сырьё как пришло из Telegram. Живёт 30 дней."""
+    """Сырьё как пришло из Telegram. Непреобразованное живёт 90 дней."""
 
     chat_tg_id: int
     msg_id: int

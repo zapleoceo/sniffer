@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from sniffer.sources.telegram_mapping import price_hint
+from sniffer.domain.prices import price_hint
 
 
 @pytest.mark.parametrize(

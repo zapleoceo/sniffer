@@ -116,9 +116,14 @@ class RawMessageRepository(Repository):
         )
         return len(deleted.scalars().all())
 
-    async def set_stage(self, ids: Sequence[int], stage: str) -> None:
+    async def set_stage(
+        self, ids: Sequence[int], stage: str, *, gate_signals: dict[str, object] | None = None
+    ) -> None:
         if not ids:
             return
+        values: dict[str, object] = {"stage": stage}
+        if gate_signals is not None:
+            values["gate_signals"] = gate_signals
         await self._session.execute(
-            update(models.RawMessage).where(models.RawMessage.id.in_(ids)).values(stage=stage)
+            update(models.RawMessage).where(models.RawMessage.id.in_(ids)).values(**values)
         )
