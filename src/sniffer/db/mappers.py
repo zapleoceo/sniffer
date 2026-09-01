@@ -37,6 +37,8 @@ def to_chat(row: models.Chat) -> Chat:
         search_rank=row.search_rank,
         msg_count_24h=row.msg_count_24h,
         last_msg_id=row.last_msg_id,
+        backfill_msg_id=row.backfill_msg_id,
+        backfill_done=row.backfill_done,
         last_synced_at=row.last_synced_at,
         added_at=row.added_at,
     )

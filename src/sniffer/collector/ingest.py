@@ -26,7 +26,7 @@ HISTORY_MESSAGES_PER_CHAT = 200
 
 class HistoryReader(Protocol):
     async def history(
-        self, entity: int | str, *, limit: int, min_id: int
+        self, entity: int | str, *, limit: int, min_id: int = 0, max_id: int = 0
     ) -> Sequence[MessageLike]: ...
 
 
@@ -57,7 +57,7 @@ class HistorySyncer:
                     min_id=chat.last_msg_id,
                 )
                 cursor = max((message.id for message in messages), default=chat.last_msg_id)
-                inserted += await self.store.store(chat, _raw(chat, messages), cursor)
+                inserted += await self.store.store(chat, to_raw(chat, messages), cursor)
                 discovered = await self.discover(messages, chat.username or str(chat.tg_id))
                 log.info(
                     "collector.history_synced",
@@ -77,7 +77,7 @@ class HistorySyncer:
         return inserted
 
 
-def _raw(chat: Chat, messages: Sequence[MessageLike]) -> list[RawMessage]:
+def to_raw(chat: Chat, messages: Sequence[MessageLike]) -> list[RawMessage]:
     """Только пригодные к хранению посты; сервисные и пустые не засоряют сырьё."""
     raw: list[RawMessage] = []
     for message in messages:

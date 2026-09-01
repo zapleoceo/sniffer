@@ -45,6 +45,9 @@ class Chat(BigIdMixin, Base):
     search_rank: Mapped[int] = mapped_column(Integer, nullable=False, server_default=sa_text("100"))
     msg_count_24h: Mapped[int] = mapped_column(Integer, nullable=False, server_default=ZERO)
     last_msg_id: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=ZERO)
+    # Курсор архива: движется ВНИЗ, в отличие от `last_msg_id` (см. DDL).
+    backfill_msg_id: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=ZERO)
+    backfill_done: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=FALSE)
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     added_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=NOW

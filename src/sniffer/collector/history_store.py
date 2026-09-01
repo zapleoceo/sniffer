@@ -37,3 +37,23 @@ class DatabaseHistoryStore:
             if cursor > chat.last_msg_id:
                 await ChatRepository(session).mark_synced(chat.tg_id, cursor)
             return len(inserted)
+
+    async def next_backfill(self) -> Chat | None:
+        async with _session() as session:
+            return await ChatRepository(session).next_backfill()
+
+    async def store_archive(
+        self, chat: Chat, messages: list[RawMessage], *, oldest_msg_id: int, done: bool
+    ) -> int:
+        """Страница архива и её курсор — одной транзакцией, как и у догона.
+
+        Порядок тот же и по той же причине: сдвинуть курсор отдельно от вставки
+        значит при падении между шагами потерять страницу навсегда — вниз к ней
+        уже никто не вернётся.
+        """
+        async with _session() as session:
+            inserted = await RawMessageRepository(session).add_many(messages)
+            await ChatRepository(session).mark_backfilled(
+                chat.tg_id, oldest_msg_id=oldest_msg_id, done=done
+            )
+            return len(inserted)

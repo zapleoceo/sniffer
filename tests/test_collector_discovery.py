@@ -47,10 +47,26 @@ class FakeJoiner:
 class FakeHistory:
     synced: int = 0
     calls: int = 0
+    order: list[str] | None = None
 
     async def sync(self) -> int:
         self.calls += 1
+        if self.order is not None:
+            self.order.append("sync")
         return self.synced
+
+
+@dataclass
+class FakeBackfill:
+    inserted: int = 0
+    calls: int = 0
+    order: list[str] | None = None
+
+    async def run(self) -> int:
+        self.calls += 1
+        if self.order is not None:
+            self.order.append("backfill")
+        return self.inserted
 
 
 def _settings() -> Settings:
@@ -64,16 +80,40 @@ async def test_cycle_connects_joins_once_retries_mutes_and_disconnects() -> None
         muted=2,
     )
     history = FakeHistory(synced=7)
+    backfill = FakeBackfill(inserted=11)
     runner = DiscoveryRunner(
         _settings(),
         client_factory=lambda _settings: cast(TelegramJoiner, client),
         joiner_factory=lambda _client: joiner,
         history_factory=lambda _client: history,
+        backfill_factory=lambda _client: backfill,
     )
 
     assert await runner.tick() == 3
     assert (client.connected, client.disconnected) == (1, 1)
-    assert (joiner.mute_calls, joiner.join_calls, history.calls) == (1, 1, 1)
+    assert (joiner.mute_calls, joiner.join_calls) == (1, 1)
+    assert (history.calls, backfill.calls) == (1, 1)
+
+
+async def test_the_archive_is_read_after_the_fresh_posts_never_before() -> None:
+    """Свежее объявление клиенту нужнее вчерашнего, а добор длинный.
+
+    Порядок держится тестом, а не памятью автора: поменяй местами две строки в
+    `tick()` — и на чате с архивом в двадцать восемь тысяч сообщений свежие
+    посты будут ждать конца добора, то есть часами.
+    """
+    order: list[str] = []
+    runner = DiscoveryRunner(
+        _settings(),
+        client_factory=lambda _settings: cast(TelegramJoiner, FakeClient()),
+        joiner_factory=lambda _client: FakeJoiner(None),
+        history_factory=lambda _client: FakeHistory(order=order),
+        backfill_factory=lambda _client: FakeBackfill(order=order),
+    )
+
+    await runner.tick()
+
+    assert order == ["sync", "backfill"]
 
 
 async def test_unavailable_telegram_does_not_enter_the_queue_or_retry_in_a_loop() -> None:
@@ -91,6 +131,7 @@ async def test_unavailable_telegram_does_not_enter_the_queue_or_retry_in_a_loop(
         client_factory=lambda _settings: cast(TelegramJoiner, client),
         joiner_factory=make_joiner,
         history_factory=lambda _client: FakeHistory(),
+        backfill_factory=lambda _client: FakeBackfill(),
         owner_alert=lambda _settings, _error: _record_alert(alerts, _error),
     )
 

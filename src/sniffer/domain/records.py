@@ -36,6 +36,11 @@ class Chat:
     search_rank: int = 100
     msg_count_24h: int = 0
     last_msg_id: int = 0
+    # Докуда дочитан архив вниз; 0 — добор не начинался. Отдельно от
+    # `last_msg_id`, потому что это два курсора в разные стороны по одной
+    # ленте, а не одно значение в разных состояниях.
+    backfill_msg_id: int = 0
+    backfill_done: bool = False
     last_synced_at: datetime | None = None
     added_at: datetime | None = None
     id: int | None = None
