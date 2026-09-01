@@ -116,14 +116,47 @@ class RawMessageRepository(Repository):
         )
         return len(deleted.scalars().all())
 
+    async def has_listing_for(self, text_hash: str, *, besides: int) -> bool:
+        """Есть ли карточка у ДРУГОГО сообщения с тем же отпечатком.
+
+        Так ловится кросспост: одно объявление выкладывают в пять групп, и
+        каждая копия приходит своим `msg_id`. Уникальность `(chat_tg_id,
+        msg_id)` тут не помогает — сообщения разные, объявление одно.
+
+        `besides` обязателен: без него сообщение на повторном проходе считало
+        бы дубликатом само себя.
+        """
+        statement = (
+            select(models.Listing.id)
+            .join(models.RawMessage, models.Listing.raw_message_id == models.RawMessage.id)
+            .where(models.RawMessage.text_hash == text_hash, models.RawMessage.id != besides)
+            .limit(1)
+        )
+        return bool(await self._session.scalar(statement))
+
     async def set_stage(
-        self, ids: Sequence[int], stage: str, *, gate_signals: dict[str, object] | None = None
+        self,
+        ids: Sequence[int],
+        stage: str,
+        *,
+        gate_signals: dict[str, object] | None = None,
+        text_hash: str | None = None,
     ) -> None:
+        """Стадия, а заодно — освежённый отпечаток.
+
+        `text_hash` здесь потому, что схема отпечатка сменилась
+        (`domain/fingerprint.py`): строки, принятые старым коллектором, несут
+        побайтовый хеш и с новыми не сойдутся никогда. Отдельный проход
+        пересчёта не нужен — воронка и так читает каждую строку ровно один раз
+        и в этот момент держит текст в руках.
+        """
         if not ids:
             return
         values: dict[str, object] = {"stage": stage}
         if gate_signals is not None:
             values["gate_signals"] = gate_signals
+        if text_hash is not None:
+            values["text_hash"] = text_hash
         await self._session.execute(
             update(models.RawMessage).where(models.RawMessage.id.in_(ids)).values(**values)
         )

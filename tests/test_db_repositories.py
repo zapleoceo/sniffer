@@ -704,3 +704,72 @@ async def test_a_disabled_chat_is_not_backfilled(db_session: AsyncSession) -> No
     await db_session.commit()
 
     assert await repo.next_backfill() is None
+
+
+# ── дедуп кросспостов ───────────────────────────────────────────────────────
+
+
+async def test_a_crosspost_is_recognised_by_its_fingerprint(db_session: AsyncSession) -> None:
+    """Одно объявление в двух группах — две строки сырья и ОДНА карточка.
+
+    Уникальность `(chat_tg_id, msg_id)` тут бесполезна: сообщения разные.
+    Ловит только совпадение отпечатка, и проверять это надо на живой базе —
+    вопрос в join между `listings` и `raw_messages`.
+    """
+    repo = RawMessageRepository(db_session)
+    first, second = await repo.add_many(
+        [
+            RawMessage(
+                chat_tg_id=-100111,
+                msg_id=1,
+                text="Продам Honda Vision 2021",
+                text_hash="одинаковый-отпечаток",
+                posted_at=NOW,
+            ),
+            RawMessage(
+                chat_tg_id=-100222,
+                msg_id=1,
+                text="Продам Honda Vision 2021",
+                text_hash="одинаковый-отпечаток",
+                posted_at=NOW,
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    # Пока карточки нет ни у кого, дубликатом никто не считается.
+    assert await repo.has_listing_for("одинаковый-отпечаток", besides=second) is False
+
+    await ListingRepository(db_session).add(
+        Listing(
+            raw_message_id=first,
+            deal_type="sell",
+            category="motorbike",
+            city="nha_trang",
+            title="Honda Vision 2021",
+            summary="Автомат",
+            tg_link="https://t.me/c/100111/1",
+            posted_at=NOW,
+        )
+    )
+    await db_session.commit()
+
+    assert await repo.has_listing_for("одинаковый-отпечаток", besides=second) is True
+    assert await repo.has_listing_for("одинаковый-отпечаток", besides=first) is False, (
+        "сообщение не может быть дубликатом самого себя"
+    )
+    assert await repo.has_listing_for("другой-отпечаток", besides=second) is False
+
+
+async def test_the_stage_pass_can_refresh_a_stale_fingerprint(db_session: AsyncSession) -> None:
+    """Схема отпечатка сменилась — старые строки чинятся тем же проходом воронки."""
+    repo = RawMessageRepository(db_session)
+    (raw_id,) = await repo.add_many([_raw(1)])
+    await db_session.commit()
+
+    await repo.set_stage([raw_id], "extracted", text_hash="свежий-отпечаток")
+    await db_session.commit()
+
+    stored = await repo.get_by_key(-100123, 1)
+    assert stored is not None
+    assert (stored.stage, stored.text_hash) == ("extracted", "свежий-отпечаток")

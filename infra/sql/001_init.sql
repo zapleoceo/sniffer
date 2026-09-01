@@ -163,7 +163,7 @@ CREATE TABLE IF NOT EXISTS raw_messages (
     has_media    BOOLEAN     NOT NULL DEFAULT FALSE,
     posted_at    TIMESTAMPTZ NOT NULL,
     ingested_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    -- pending → gated → prefiltered → extracted → rejected
+    -- pending → extracted | rejected | duplicate (кросспост: карточка уже есть)
     stage        TEXT        NOT NULL DEFAULT 'pending',
     gate_signals JSONB       NOT NULL DEFAULT '{}',
     UNIQUE (chat_tg_id, msg_id)

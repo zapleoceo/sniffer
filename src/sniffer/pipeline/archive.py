@@ -17,6 +17,10 @@ from sniffer.pipeline.gate import GateResult, gate
 STAGE_GATED = "gated"
 STAGE_EXTRACTED = "extracted"
 STAGE_REJECTED = "rejected"
+# Кросспост: объявление уже стало карточкой из другой группы. Отдельная стадия,
+# а не `rejected`: сообщение не мусор, просто карточка у него уже есть, и
+# разбираться в отклонённых потом придётся именно по этой разнице.
+STAGE_DUPLICATE = "duplicate"
 
 
 def classify(raw: RawMessage) -> GateResult:
