@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Protocol, cast
@@ -42,9 +43,11 @@ from sniffer.domain.dialogue import (
 )
 from sniffer.domain.passport import Passport
 from sniffer.search.answers import interpret, is_skip
+from sniffer.search.currency import usd_vnd_rate
 from sniffer.search.intake import QueryIntake
 from sniffer.search.live import run_plan
 from sniffer.search.planner import SearchPlanner
+from sniffer.search.relevance import rank_items, with_vnd_budget
 from sniffer.search.vocabulary import city_name, is_served, served_cities
 from sniffer.sources.base import RawItem, registered_sources
 
@@ -133,10 +136,15 @@ Intake = Callable[[], Parser]
 async def find_live(passport: Passport) -> Found:
     watch = journal.Stopwatch()
     sources = sorted(registered_sources())
+    # План и курс независимы. Если курс не ответил, поиск всё равно идёт, но
+    # цену на доске не фильтруем по выдуманной константе.
+    rate_task = asyncio.create_task(usd_vnd_rate(), name="usd-vnd-rate")
     plan = await SearchPlanner().plan(passport, sources)
+    rate = await rate_task
+    plan = with_vnd_budget(plan, passport, rate)
     watch.lap("plan_ms")
     log.info("bot.plan", tasks=len(plan.tasks), fallback=plan.is_fallback, sources=plan.sources())
-    items = await run_plan(plan)
+    items = rank_items(passport, await run_plan(plan), usd_vnd=rate)
     watch.lap("search_ms")
     return Found(
         items=items,
