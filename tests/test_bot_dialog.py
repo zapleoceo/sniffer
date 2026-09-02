@@ -17,7 +17,7 @@ import pytest
 from aiogram.types import Message
 
 from sniffer.bot import app as bot_app
-from sniffer.bot import journal
+from sniffer.bot import journal, query_menu
 from sniffer.bot.conversation import (
     NO_REQUEST_YET,
     NOTHING_FOUND,
@@ -198,9 +198,23 @@ class FakeMessage:
         self.chat = FakeChat()
         self.from_user = from_user
         self.answers: list[tuple[str, Any]] = []
+        self.invoices: list[dict[str, Any]] = []
 
     async def answer(self, text: str, **kwargs: Any) -> None:
         self.answers.append((text, kwargs.get("reply_markup")))
+
+    async def answer_invoice(self, **kwargs: Any) -> None:
+        self.invoices.append(kwargs)
+
+
+class FakeCallback:
+    def __init__(self, message: FakeMessage) -> None:
+        self.message = message
+        self.from_user = message.from_user or FakeUser()
+        self.answered = False
+
+    async def answer(self, **_kwargs: Any) -> None:
+        self.answered = True
 
 
 def found(external_id: str, *, age_days: int = 1) -> RawItem:
@@ -937,6 +951,69 @@ async def test_handler_draws_the_buttons(monkeypatch: pytest.MonkeyPatch) -> Non
     assert "что ищем" in text.lower()
     labels = [button.text for row in keyboard.inline_keyboard for button in row]
     assert "не важно, показать что есть" in labels
+
+
+async def test_request_menu_handler_covers_the_whole_navigation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    item = QueryOverview(root=7, passport=bike(raw_query="Honda Vision"), monitoring="active")
+    items = [item]
+    selected: list[tuple[int, bool]] = []
+    repeated: list[int] = []
+
+    async def list_for(_client: Client) -> list[QueryOverview]:
+        return items
+
+    async def select(_client: Client, root: int, *, editing: bool = False) -> bool:
+        selected.append((root, editing))
+        return True
+
+    async def toggle(_client: Client, root: int, *, active: bool) -> bool:
+        items[0] = replace(items[0], monitoring="active" if active else "paused")
+        return root == 7
+
+    class Talker:
+        async def repeat(self, _client: Client, root: int, _send: Any) -> None:
+            repeated.append(root)
+
+    monkeypatch.setattr(handler, "Message", FakeMessage)
+    monkeypatch.setattr(query_menu, "list_for", list_for)
+    monkeypatch.setattr(query_menu, "select", select)
+    monkeypatch.setattr(query_menu, "toggle", toggle)
+    monkeypatch.setattr(handler, "conversation", lambda: Talker())
+    message = FakeMessage("", from_user=FakeUser())
+    callback = cast(Any, FakeCallback(message))
+
+    await handler.manage_request(callback, RequestsCallback(action="list"))
+    await handler.manage_request(callback, RequestsCallback(action="open", root=7))
+    await handler.manage_request(callback, RequestsCallback(action="search", root=7))
+    await handler.manage_request(callback, RequestsCallback(action="edit", root=7))
+    await handler.manage_request(callback, RequestsCallback(action="pause", root=7))
+    await handler.manage_request(callback, RequestsCallback(action="resume", root=7))
+
+    assert callback.answered
+    assert repeated == [7]
+    assert (7, True) in selected
+    assert any("Ваши запросы" in text for text, _keyboard in message.answers)
+    assert any("Изменяем" in text for text, _keyboard in message.answers)
+
+
+async def test_empty_and_stale_request_menus_answer_plainly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def nothing(_client: Client) -> list[QueryOverview]:
+        return []
+
+    monkeypatch.setattr(handler, "Message", FakeMessage)
+    monkeypatch.setattr(query_menu, "list_for", nothing)
+    message = FakeMessage("", from_user=FakeUser())
+    callback = cast(Any, FakeCallback(message))
+
+    await handler.requests(cast(Message, message))
+    await handler.manage_request(callback, RequestsCallback(action="open", root=999))
+
+    assert "Запросов пока нет" in message.answers[0][0]
+    assert "не найден" in message.answers[1][0]
 
 
 def test_answer_and_feedback_fit_the_callback_limit() -> None:
