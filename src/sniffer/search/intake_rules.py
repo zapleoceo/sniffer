@@ -2,7 +2,7 @@
 
 Работает всегда: когда брокер лежит, когда исчерпан дневной cap и когда ключа
 просто нет. Разбирает три вещи, которые определяют выдачу, — намерение,
-категорию и город, — плюс бюджет и бренд.
+категорию и город, — плюс бюджет, марку и модель.
 
 Почему это не дублирует `pipeline.gate` и `search.vocabulary`. Гейт читает
 объявление продавца и обязан ловить бренды и модели; словарь рынка отвечает на
@@ -21,7 +21,13 @@ from sniffer.domain.passport import Category, Intent, Passport, PassportStatus
 from sniffer.search.budget_rules import parse_budget
 from sniffer.search.engine_size import read_engine_cc, without_engine_cc
 from sniffer.search.market_terms import ALL_CITY_NAMES
-from sniffer.search.vocabulary import city_variants
+from sniffer.search.motorbike_models import MOTORBIKE_BRANDS
+from sniffer.search.vocabulary import (
+    city_variants,
+    model_brand,
+    model_named_in,
+    model_transmission,
+)
 
 # Порядок значим: побеждает первое совпадение. «Ищу квартиру в аренду» — это
 # аренда, а не покупка, поэтому глаголы сделки идут раньше общего «ищу».
@@ -79,27 +85,15 @@ _CATEGORY_RULES: tuple[tuple[Category, re.Pattern[str]], ...] = (
     ),
 )
 
-# Бренд приезжает в `attributes` и оттуда попадает первым запросом в шаблонный
-# план: пишется он одинаково на всех трёх языках рынка.
-_BRANDS: tuple[str, ...] = (
-    "honda",
-    "yamaha",
-    "suzuki",
-    "piaggio",
-    "vespa",
-    "sym",
-    "vision",
-    "air blade",
-    "airblade",
-    "lead",
-    "nouvo",
-    "sirius",
-    "winner",
-    "exciter",
-    "janus",
-    "wave",
-)
-_BRAND_RE = re.compile(r"\b(?:" + "|".join(_BRANDS) + r")\b", re.IGNORECASE)
+# Марка приезжает в `attributes` и оттуда попадает первым запросом в шаблонный
+# план: пишется она одинаково на всех трёх языках рынка.
+#
+# Здесь ТОЛЬКО производители. Модели лежат отдельной таблицей
+# (`motorbike_models`), и разделение это не косметическое: пока оба списка были
+# одним, побеждало первое совпадение regex — «honda lead» читалось как «honda»,
+# модель терялась, план уходил по всем Хондам, и клиент, просивший Lead,
+# получал Airblade (жалоба владельца 02.09.2026).
+_BRAND_RE = re.compile(r"\b(?:" + "|".join(MOTORBIKE_BRANDS) + r")\b", re.IGNORECASE)
 
 
 def _city_pattern(slug: str) -> re.Pattern[str]:
@@ -152,7 +146,10 @@ def parse_query(text: str, *, default_city: str = "") -> Passport:
     if engine_cc is not None:
         attributes["engine_cc"] = engine_cc
     budget = parse_budget(without_engine_cc(query), intent=intent)
-    brand = detect_brand(query)
+    model = detect_model(query, category)
+    if model:
+        attributes["model"] = model
+    brand = detect_brand(query, category)
     if brand:
         attributes["brand"] = brand
 
@@ -162,7 +159,7 @@ def parse_query(text: str, *, default_city: str = "") -> Passport:
         category=category,
         city=known_city,
         budget=budget,
-        attributes=attributes,
+        attributes=with_model_facts(attributes),
         raw_query=query,
         confidence=_confidence(category, city, budget.max),
         missing_fields=_missing(category, city, budget.max),
@@ -184,10 +181,54 @@ def detect_category(text: str) -> Category | None:
     return None
 
 
-def detect_brand(text: str) -> str | None:
-    """Марка техники. Пишется одинаково на всех трёх языках рынка."""
+def detect_brand(text: str, category: Category | None = None) -> str | None:
+    """Марка техники. Пишется одинаково на всех трёх языках рынка.
+
+    Названа прямо — берём названное. Названа только модель — марка следует из
+    таблицы: «лид» без слова «honda» это всё равно Honda, и спрашивать об этом
+    клиента незачем.
+    """
     found = _BRAND_RE.search(text)
-    return found.group(0).lower() if found else None
+    if found is not None:
+        return found.group(0).lower()
+    return model_brand(detect_model(text, category))
+
+
+def detect_model(text: str, category: Category | None = None) -> str | None:
+    """Модель техники: «honda lead» → `lead`, «нужен лид» → тоже `lead`.
+
+    Порядок совпадений здесь не решает ничего (`models_named_in` выбирает по
+    длине написания) — в отличие от прежнего разбора, где марка и модель лежали
+    одним списком и побеждало первое совпадение.
+
+    Категорию спрашивает таблица, а не ветка в коде: у жилья моделей нет, и
+    «квартира Vision» — это название дома. Неизвестная категория читает весь
+    модельный ряд: «honda lead» без слова «скутер» — обычная формулировка.
+
+    Незнакомая модель остаётся неузнанной, и это осознанный предел: таблица
+    короткая намеренно, а неузнанная модель возвращает прежнее поведение —
+    поиск по марке.
+    """
+    return model_named_in(category, text)
+
+
+def with_model_facts(attributes: dict[str, Any]) -> dict[str, Any]:
+    """Что следует из названной модели: марка и коробка передач.
+
+    Выводится ТОЛЬКО на пустое место — та же дисциплина, что у объёма
+    двигателя: сказанное клиентом главнее выведенного. «Lead на механике» —
+    заведомо несуществующий байк, но спорить с клиентом не наше дело: он увидит
+    выдачу и поправит её кнопкой.
+
+    Живёт одной функцией, потому что путей к паспорту два — правила и ответ
+    модели. Вывод, сделанный только в одном из них, — дефект, заметный лишь на
+    боевом пути с работающим брокером.
+    """
+    model = str(attributes.get("model") or "")
+    if not model:
+        return attributes
+    derived = {"brand": model_brand(model), "transmission": model_transmission(model)}
+    return {**{key: value for key, value in derived.items() if value is not None}, **attributes}
 
 
 def detect_city(text: str) -> str | None:

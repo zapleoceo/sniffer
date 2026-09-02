@@ -15,10 +15,16 @@
 знают слова «chotot»: они спрашивают у профиля «принимает ли этот источник
 жаргон» и «нужен ли ему город в тексте». Новый источник — строка в
 SOURCE_PROFILES; забыли строку — работает по осторожному DEFAULT_PROFILE.
+
+Здесь же чтение модельного ряда (`motorbike_models`), и здесь по той же
+причине: имя модели ищут в тексте двое — разбор запроса клиента и отбор находок
+перед показом, — а знание у них одно. Разложи его по обоим модулям, и однажды
+поправят только один.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -37,6 +43,11 @@ from sniffer.search.market_terms import (
     JARGON,
     MARKET_LANGS,
     LangTerms,
+)
+from sniffer.search.motorbike_models import (
+    MODELS_BY_CATEGORY,
+    TRANSMISSION_BY_BODY,
+    MotorbikeModel,
 )
 
 
@@ -300,3 +311,86 @@ def served_cities(lang: str) -> tuple[str, ...]:
     руками, разъехался бы с реальностью на первом же новом городе.
     """
     return tuple(city_name(slug, lang) for slug in CITY_NAMES)
+
+
+ModelPatterns = tuple[tuple[str, re.Pattern[str]], ...]
+
+
+def _patterns(models: tuple[MotorbikeModel, ...]) -> ModelPatterns:
+    """Написания моделей → regex. Пробел значит «может быть, а может не быть».
+
+    «air blade» и «airblade» — одно имя, и держать оба строками значило бы
+    однажды забыть третье. Тот же приём, что у написаний города.
+    """
+    return tuple(
+        (
+            model.slug,
+            re.compile(
+                r"\b(?:"
+                + "|".join(re.escape(name).replace(r"\ ", r"\s*") for name in model.spellings)
+                + r")\b",
+                re.IGNORECASE,
+            ),
+        )
+        for model in models
+    )
+
+
+_MODELS: dict[str, MotorbikeModel] = {
+    model.slug: model for models in MODELS_BY_CATEGORY.values() for model in models
+}
+_PATTERNS_BY_CATEGORY: dict[Category, ModelPatterns] = {
+    category: _patterns(models) for category, models in MODELS_BY_CATEGORY.items()
+}
+_ALL_PATTERNS: ModelPatterns = tuple(
+    entry for patterns in _PATTERNS_BY_CATEGORY.values() for entry in patterns
+)
+
+
+def models_named_in(category: Category | None, text: str) -> tuple[str, ...]:
+    """Модели, названные в тексте, — от самого конкретного написания к общему.
+
+    Порядок задаёт ДЛИНА совпавшего написания, а не порядок строк в таблице:
+    «winner x» конкретнее «winner», и решать, что назвал клиент, обязано
+    написание. Ровно этим прежний разбор и болел — он брал первое совпадение
+    regex, поэтому «honda lead» читалось как «honda».
+
+    Одинаковую длину разводит позиция в тексте, а её — слаг: у одного и того же
+    текста ответ обязан быть один и тот же всегда.
+
+    Категория решает, какие имена вообще искать, и делает это таблицей, а не
+    проверкой: у жилья моделей нет, поэтому «квартира Vision» — название дома.
+    Неизвестная категория читает все, какие есть: «honda lead» без слова
+    «скутер» — обычная формулировка, и модель в ней настоящая.
+    """
+    patterns = _ALL_PATTERNS if category is None else _PATTERNS_BY_CATEGORY.get(category, ())
+    found = [
+        (len(match.group(0)), match.start(), slug)
+        for slug, pattern in patterns
+        if (match := pattern.search(text)) is not None
+    ]
+    found.sort(key=lambda entry: (-entry[0], entry[1], entry[2]))
+    return tuple(slug for _, _, slug in found)
+
+
+def model_named_in(category: Category | None, text: str) -> str | None:
+    """Самая конкретная из названных моделей. `None` — ни одной знакомой."""
+    named = models_named_in(category, text)
+    return named[0] if named else None
+
+
+def model_brand(model: str | None) -> str | None:
+    """Производитель модели: `lead` → `honda`. Незнакомая модель — `None`."""
+    known = _MODELS.get(str(model or ""))
+    return known.brand if known else None
+
+
+def model_transmission(model: str | None) -> str | None:
+    """Коробка, однозначно следующая из модели. `None` — не следует.
+
+    `None` означает именно «вывести нельзя», а не «данных нет»: у электробайка
+    коробки в этом смысле не существует, и приписать ему «автомат» значило бы
+    отправить источнику фильтр, который электробайки исключает.
+    """
+    known = _MODELS.get(str(model or ""))
+    return TRANSMISSION_BY_BODY.get(known.body) if known else None

@@ -142,6 +142,11 @@ def test_every_package_of_the_project_is_judged_or_named() -> None:
         # test_source_wiring.py.
         "search",
         "sources",
+        # Симулятор диалога: шестая точка входа (`python -m sniffer.simulation`),
+        # не сервис. Своей предметной логики нет — он водит бота через публичный
+        # интерфейс и считает метрики, поэтому импортирует слои по праву, как и
+        # остальные точки входа. Что он меряет — docs/passport.md.
+        "simulation",
     }
     packages = {path.name for path in SRC.iterdir() if path.is_dir() and path.name != "__pycache__"}
 

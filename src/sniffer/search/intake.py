@@ -30,7 +30,7 @@ from sniffer.domain.passport import (
     PricePeriod,
 )
 from sniffer.search.engine_size import MAX_CC, MIN_CC
-from sniffer.search.intake_rules import parse_query
+from sniffer.search.intake_rules import detect_model, parse_query, with_model_facts
 from sniffer.search.market_terms import ALL_CITY_NAMES
 from sniffer.search.planner import StructuredCaller
 
@@ -47,7 +47,9 @@ city — латинский слаг города из перечисления 
 подменяй похожим: оставь поле пустым.
 budget_max — число без пробелов и валюты; «10 млн донгов» → 10000000.
 currency — валюта суммы; «млн» без валюты во Вьетнаме означает донги.
-brand — марка техники, если названа."""
+brand — производитель, если назван: Honda, Yamaha, Suzuki, Piaggio, SYM.
+model — модель, если названа: Lead, Air Blade, Vision, Wave, Exciter, Vespa.
+Марка и модель — РАЗНЫЕ поля: «honda lead» это brand=honda и model=lead."""
 
 
 class QueryIntake:
@@ -116,6 +118,7 @@ def intake_schema() -> dict[str, Any]:
             "currency",
             "period",
             "brand",
+            "model",
             "engine_cc",
         ],
         "properties": {
@@ -126,6 +129,21 @@ def intake_schema() -> dict[str, Any]:
             "currency": _enum(Currency),
             "period": _enum(PricePeriod),
             "brand": {"type": "string"},
+            # Модель — своё поле рядом с маркой, потому что без него модели
+            # некуда деться: она приезжала в `brand`, и «honda lead» становилось
+            # запросом по всем Хондам (жалоба владельца 02.09.2026).
+            #
+            # Перечисления здесь НЕТ, в отличие от города, и это ровно тот же
+            # урок, прочитанный с другой стороны. У городов список закрыт, и
+            # модель физически не может назвать несуществующий. Модельный ряд
+            # рынка закрытым списком не бывает: закрепи в `enum` четырнадцать
+            # имён — и на «Honda SH» модель выберет ближайшее из них, то есть
+            # соврёт увереннее, чем промолчала бы. Незнакомое имя мы отбрасываем
+            # сами при разборе: пустая модель — прежнее поведение, чужая — брак.
+            "model": {
+                "type": "string",
+                "description": "модель техники, если названа; пусто если нет",
+            },
             # Своё поле под объём двигателя — и это лечение, а не удобство.
             # Пока его не было, единственным числовым полем оставался
             # `budget_max`, и модель клала туда «200 кубиков». Она не виновата:
@@ -150,10 +168,20 @@ def merge(rules: Passport, payload: Any) -> Passport:
         currency=_member(Currency, payload.get("currency")) or rules.budget.currency,
         period=_member(PricePeriod, payload.get("period")) or rules.budget.period,
     )
+    category = _member(Category, payload.get("category")) or rules.category
     attributes = dict(rules.attributes)
     brand = str(payload.get("brand") or "").strip().lower()
     if brand:
         attributes["brand"] = brand
+    # Ответ модели проходит через тот же разбор написаний, что и текст клиента:
+    # она пишет то «Honda Lead», то «air blade», то «SH» — а в паспорте обязан
+    # лежать слаг из таблицы, иначе фильтр выдачи не с чем сверять. Незнакомое
+    # имя молча исчезает: искать по марке — прежнее поведение, искать по чужой
+    # модели — брак. Категория здесь по той же причине, что и в правилах: у
+    # жилья моделей нет, и «квартира Vision» — это название дома.
+    model = detect_model(str(payload.get("model") or ""), category)
+    if model:
+        attributes["model"] = model
     # Правила уже могли вынуть объём регулярным выражением — и это точнее
     # модели, поэтому её ответ идёт вторым и только на пустое место.
     if "engine_cc" not in attributes:
@@ -161,7 +189,6 @@ def merge(rules: Passport, payload: Any) -> Passport:
         if engine_cc is not None and MIN_CC <= engine_cc <= MAX_CC:
             attributes["engine_cc"] = engine_cc
 
-    category = _member(Category, payload.get("category")) or rules.category
     city = str(payload.get("city") or "").strip() or rules.city
     return rules.model_copy(
         update={
@@ -169,7 +196,10 @@ def merge(rules: Passport, payload: Any) -> Passport:
             "category": category,
             "city": city,
             "budget": budget,
-            "attributes": attributes,
+            # Модель могла приехать только от LLM — тогда марку и коробку из неё
+            # выводить всё равно надо, и делает это та же функция, что в
+            # правилах: иначе вывод работал бы ровно на том пути, где брокер лёг.
+            "attributes": with_model_facts(attributes),
             # Модель прочитала смысл, а не слова, — это заметно точнее правил.
             "confidence": 0.8,
             "missing_fields": [

@@ -64,6 +64,11 @@ MOTORBIKE_ATTRIBUTES: dict[str, tuple[Any, ...]] = {
     "engine_cc": (50, 125, 400),
     "year_min": (2018, 2024),
     "brand": ("Honda", "Vespa", "Zongshen"),
+    # Модель — атрибут без структурного поля у доски (`motorbiketype`,
+    # `motorbikecapacity`, `motorbikebrand` — и всё). Стоит здесь ровно затем,
+    # чтобы инварианты `q` распространялись и на неё: имя модели выглядит
+    # безопасным текстом объявления, а на доске гасит те фильтры, что есть.
+    "model": ("lead", "air_blade"),
     "delivery": (True, False),
     "test_ride": (True, False),
 }
