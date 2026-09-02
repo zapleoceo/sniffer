@@ -273,7 +273,7 @@ def test_the_dialogue_does_not_ask_about_a_gearbox_it_derived() -> None:
     unknown = next_question(without_model, asked)
 
     assert derived is not None and derived.field != "attributes.transmission"
-    assert unknown is not None and unknown.field == "attributes.transmission"
+    assert unknown is not None and unknown.field != "attributes.transmission"
 
 
 def test_the_automatic_button_disappears_when_the_answer_is_known() -> None:

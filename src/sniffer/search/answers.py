@@ -17,7 +17,12 @@ import re
 
 from sniffer.domain.dialogue import AnswerValue
 from sniffer.search.budget_rules import parse_budget
-from sniffer.search.intake_rules import detect_brand, detect_category, detect_transmission
+from sniffer.search.intake_rules import (
+    detect_brand,
+    detect_category,
+    detect_city,
+    detect_transmission,
+)
 
 # «Не важно» в любом виде. Кнопка есть, но нажимают не всегда: половина людей
 # отвечает словами, и «да пофиг» обязано означать то же, что нажатие.
@@ -79,6 +84,8 @@ def interpret(field: str, text: str) -> AnswerValue | None:
     if field == "category":
         category = detect_category(text)
         return category.value if category else None
+    if field == "city":
+        return detect_city(text)
     if field == "attributes.brand":
         return detect_brand(text)
     if field == "attributes.transmission":

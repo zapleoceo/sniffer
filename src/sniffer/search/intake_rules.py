@@ -26,7 +26,7 @@ from sniffer.domain.passport import Category, Intent, Passport, PassportStatus
 from sniffer.search.budget_rules import parse_budget
 from sniffer.search.engine_size import read_engine_cc, without_engine_cc
 from sniffer.search.market_terms import ALL_CITY_NAMES, ATTRIBUTE_TERMS, LangTerms
-from sniffer.search.motorbike_models import MOTORBIKE_BRANDS
+from sniffer.search.motorbike_models import BODY_SCOOTER, MOTORBIKE_BRANDS
 from sniffer.search.vocabulary import (
     city_variants,
     model_brand,
@@ -202,6 +202,7 @@ _CITY_RULES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
 _RENTED_CATEGORIES = (Category.APARTMENT, Category.ROOM, Category.HOUSE)
 
 MAX_QUERY_CHARS = 500
+_SCOOTER_RE = re.compile(r"\b(?:скутер\w*|scooters?|xe\s+(?:tay\s+)?ga)\b", re.IGNORECASE)
 
 
 def parse_query(text: str, *, default_city: str = "") -> Passport:
@@ -237,6 +238,11 @@ def parse_query(text: str, *, default_city: str = "") -> Passport:
     transmission = detect_transmission(query, category)
     if transmission:
         attributes["transmission"] = transmission
+    if category is Category.MOTORBIKE and _SCOOTER_RE.search(query):
+        # «Скутер» уже называет и кузов, и способ переключения. Спрашивать
+        # после этого «автомат или механика?» — заставлять клиента повторяться.
+        attributes["body_type"] = BODY_SCOOTER
+        attributes.setdefault("transmission", "automatic")
 
     known_city = city or default_city or None
     return Passport(

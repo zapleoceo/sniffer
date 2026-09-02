@@ -44,7 +44,7 @@ from sniffer.domain.dialogue import (
     question_for,
     restates,
 )
-from sniffer.domain.passport import Passport
+from sniffer.domain.passport import Category, Passport
 from sniffer.search.answers import interpret, is_skip
 from sniffer.search.currency import usd_vnd_rate
 from sniffer.search.intake import QueryIntake
@@ -462,6 +462,10 @@ class Conversation:
         if dialogue.passport is None:  # pragma: no cover — сюда приходят с паспортом
             return
         passport = dialogue.passport.passport
+        category_question = blocking_question(passport, dialogue.state.asked)
+        if category_question is not None and category_question.field == "category":
+            await self._ask(dialogue, category_question, send)
+            return
         if not is_served(passport.city):
             # Искать в городе, под который не собран ни реестр чатов, ни
             # параметры досок, нечем. Сказать это прямо — единственный честный
@@ -555,7 +559,17 @@ def _accepted(passport: Passport) -> str:
     """Показываем, что поняли, — это дешевле лишнего уточняющего вопроса."""
     parts: list[str] = []
     if passport.category:
-        parts.append(passport.category.value)
+        category = (
+            "скутер"
+            if passport.attributes.get("body_type") == "tay_ga"
+            else {
+                Category.MOTORBIKE: "мотобайк",
+                Category.APARTMENT: "квартира",
+                Category.ROOM: "комната",
+                Category.HOUSE: "дом",
+            }.get(passport.category, passport.category.value)
+        )
+        parts.append(category)
     city = city_name(passport.city, "ru")
     if city:
         parts.append(city)

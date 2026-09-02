@@ -48,31 +48,27 @@ def runs() -> dict[str, Metrics]:
 # ── инварианты качества: утверждения обо ВСЁМ наборе ────────────────────────
 
 
-def test_a_known_category_is_never_paid_for_with_a_question(runs: dict[str, Metrics]) -> None:
-    """Категория названа — значит план поиска собрать есть из чего, и мы ищем.
-
-    Это перевёрнутое правило владельца из passport.md: показать выдачу рано и
-    уточнять обратной связью. Вопрос вместо помощи и есть та «тупизна», на
-    которую он жаловался.
-    """
+def test_each_dialogue_asks_only_for_fields_missing_from_the_request(
+    runs: dict[str, Metrics],
+) -> None:
+    """Сценарий задаёт потолок, равный числу действительно недостающих полей."""
     guilty = {
         key: metrics.asked_fields
         for key, metrics in runs.items()
-        if metrics.scenario.max_questions_before_results == 0
-        and metrics.questions_before_results > 0
+        if metrics.questions_before_results > metrics.scenario.max_questions_before_results
     }
 
-    assert not guilty, f"вопросы до выдачи там, где категория известна: {guilty}"
+    assert not guilty, f"лишние вопросы до выдачи: {guilty}"
 
 
-def test_no_dialogue_ever_asks_more_than_one_question_before_results(
+def test_no_dialogue_ever_asks_more_than_three_questions_before_results(
     runs: dict[str, Metrics],
 ) -> None:
-    """Потолок абсолютный: без категории — один вопрос, и это максимум для всех."""
+    """Абсолютный потолок: предмет, город и бюджет — новых анкет не строим."""
     over = {
         key: metrics.questions_before_results
         for key, metrics in runs.items()
-        if metrics.questions_before_results > 1
+        if metrics.questions_before_results > 3
     }
 
     assert not over, f"допрос до выдачи: {over}"
@@ -155,12 +151,11 @@ def test_an_unserved_city_gets_an_answer_and_not_a_search(runs: dict[str, Metric
     assert any("Хойан" in text for text in metrics.replies)
 
 
-def test_feedback_is_the_place_for_questions(runs: dict[str, Metrics]) -> None:
-    """Вопрос после нажатой кнопки клиент запросил сам — до выдачи он лишний."""
-    for key in ("pricey_after_results", "wrong_after_results"):
-        metrics = runs[key]
-        assert metrics.questions_before_results == 0, f"{key}: спросил до выдачи"
-        assert metrics.reached_results, f"{key}: выдачи не было вовсе"
+def test_feedback_starts_only_after_the_search_funnel(runs: dict[str, Metrics]) -> None:
+    assert runs["pricey_after_results"].questions_before_results == 0
+    assert runs["wrong_after_results"].questions_before_results == 1
+    assert runs["pricey_after_results"].reached_results
+    assert runs["wrong_after_results"].reached_results
 
 
 # ── харнес меряет бота, а не себя ───────────────────────────────────────────

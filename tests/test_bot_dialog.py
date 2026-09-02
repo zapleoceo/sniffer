@@ -45,6 +45,7 @@ from sniffer.domain.dialogue import (
     DialogueState,
     Feedback,
     advance,
+    question_for,
     replay,
 )
 from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
@@ -166,7 +167,7 @@ class RulesIntake:
     """
 
     async def parse(self, text: str) -> Passport:
-        return parse_query(text, default_city="nha_trang")
+        return parse_query(text)
 
 
 class Replies:
@@ -234,6 +235,7 @@ def bike(**overrides: object) -> Passport:
         "intent": Intent.BUY,
         "category": Category.MOTORBIKE,
         "city": "nha_trang",
+        "budget": Budget(max=400, currency=Currency.USD),
         "raw_query": "ищу скутер в Нячанге",
     }
     fields.update(overrides)
@@ -347,15 +349,8 @@ async def test_repeat_searches_the_selected_request_without_a_new_version() -> N
     assert len(store.rows) == 2
 
 
-async def test_a_scooter_request_searches_without_a_form() -> None:
-    """Жалоба владельца дословно: «нужен скутер» — это выдача, а не анкета.
-
-    Категория известна, значит план поиска собрать есть из чего. Ни бюджет, ни
-    коробку, ни состояние бот до первой выдачи не спрашивает — эти уточнения
-    переехали на кнопки под карточками (passport.md: показать рано, уточнять
-    обратной связью). Разбор настоящий (`RulesIntake`), чтобы тест ловил именно
-    поведение бота на живой фразе, а не подставленный паспорт.
-    """
+async def test_a_scooter_request_asks_city_and_budget_before_search() -> None:
+    """Живая жалоба: скутер уже автомат, но город и бюджет ещё неизвестны."""
 
     async def found_one(_passport: Passport) -> Found:
         return Found(items=[found("1")])
@@ -364,14 +359,22 @@ async def test_a_scooter_request_searches_without_a_form() -> None:
     talker = Conversation(store, intake=RulesIntake, finder=found_one, recorder=FakeJournal())
 
     replies = Replies()
-    await talker.on_text(CLIENT, "нужен скутер honda lead", replies)
+    await talker.on_text(CLIENT, "нужен скутер", replies)
+    assert replies.sent[-1].question is not None
+    assert replies.sent[-1].question.field == "city"
 
-    assert "Понял" in replies.texts[0] and "Ищу" in replies.texts[0]
-    assert "открыть оригинал" in replies.texts[1], "карточки пришли сразу, без анкеты"
-    # До выдачи не задано ни одного вопроса — ни про коробку, ни про бюджет, ни про состояние.
-    assert [reply.question for reply in replies.sent] == [None, None]
+    await talker.on_answer(CLIENT, "city", "nha_trang", replies)
+    assert replies.sent[-1].question is not None
+    assert replies.sent[-1].question.field == "budget.max"
+
+    await talker.on_answer(CLIENT, "budget", "500 USD", replies)
+    assert "Понял: скутер, Нячанг, до 500 USD" in replies.texts[-2]
+    assert "открыть оригинал" in replies.texts[-1]
     asked = {reply.question.field for reply in replies.sent if reply.question is not None}
-    assert not asked & {"attributes.transmission", "budget.max", "attributes.condition"}
+    assert asked == {"city", "budget.max"}
+    current = await store.load(CLIENT)
+    assert current.passport is not None
+    assert current.passport.passport.attributes["transmission"] == "automatic"
 
 
 async def test_cards_carry_the_feedback_buttons() -> None:
@@ -442,13 +445,7 @@ async def test_empty_message_is_ignored() -> None:
 # ── уточняющие вопросы ──────────────────────────────────────────────────────
 
 
-async def test_a_known_category_searches_without_asking_budget() -> None:
-    """Перевёрнутый инвариант владельца: категория известна — ищем сразу.
-
-    Раньше бот держал выдачу, пока не спросит бюджет; passport.md требует
-    обратного — показать что есть рано и уточнять обратной связью. Бюджет до
-    первой выдачи не звучит вовсе, карточки приходят сразу.
-    """
+async def test_a_known_category_does_not_search_without_budget() -> None:
     searched: list[Passport] = []
 
     async def find(passport: Passport) -> Found:
@@ -456,15 +453,16 @@ async def test_a_known_category_searches_without_asking_budget() -> None:
         return Found(items=[found("1")])
 
     replies = Replies()
-    await talk(MemoryStore(), bike(), finder=find).on_text(CLIENT, "ищу скутер", replies)
+    await talk(MemoryStore(), bike(budget=Budget()), finder=find).on_text(
+        CLIENT, "ищу скутер", replies
+    )
 
-    assert [reply.question for reply in replies.sent] == [None, None], "ни одного вопроса до выдачи"
-    assert "Ищу" in replies.texts[0]
-    assert "открыть оригинал" in replies.texts[1]
-    assert searched, "поиск стартовал сразу, а не после вопроса про бюджет"
+    assert replies.sent[0].question is not None
+    assert replies.sent[0].question.field == "budget.max"
+    assert searched == []
 
 
-async def test_every_question_offers_a_way_out() -> None:
+async def test_only_optional_questions_offer_a_way_out() -> None:
     """У любого вопроса есть «не важно» — теперь это вопрос категории.
 
     Единственный вопрос до выдачи — «что ищем?». У него, как и у прежнего вопроса
@@ -477,7 +475,10 @@ async def test_every_question_offers_a_way_out() -> None:
     question = replies.sent[0].question
     assert question is not None
     assert question.field == "category"
-    assert [option.value for option in question.buttons][-1] == SKIP
+    assert SKIP not in [option.value for option in question.buttons]
+    budget = question_for("budget.max")
+    assert budget is not None
+    assert [option.value for option in budget.buttons][-1] == SKIP
 
 
 async def test_at_most_one_question_before_the_search() -> None:
@@ -602,9 +603,8 @@ async def test_repeating_the_same_words_keeps_what_was_collected() -> None:
     обходился бы копипастом собственного сообщения.
     """
     store = MemoryStore()
-    talker = talk(store, bike())
+    talker = talk(store, bike(budget=Budget()))
     await talker.on_text(CLIENT, "ищу скутер в нячанге", Replies())
-    await talker.on_feedback(CLIENT, Feedback.WRONG, Replies())
     await talker.on_answer(CLIENT, "budget", "500", Replies())
     await talker.on_feedback(CLIENT, Feedback.WRONG, Replies())
     await talker.on_answer(CLIENT, "trans", "automatic", Replies())
@@ -637,9 +637,8 @@ async def test_a_shorter_wording_of_the_same_request_is_not_a_new_one() -> None:
     (коробка) просто переспрашивается: короткая формулировка — не новый запрос.
     """
     store = MemoryStore()
-    talker = talk(store, bike())
+    talker = talk(store, bike(budget=Budget()))
     await talker.on_text(CLIENT, "ищу скутер в нячанге", Replies())
-    await talker.on_feedback(CLIENT, Feedback.WRONG, Replies())
     await talker.on_answer(CLIENT, "budget", "500", Replies())
     await talker.on_feedback(CLIENT, Feedback.WRONG, Replies())
 
@@ -709,7 +708,8 @@ async def test_a_city_outside_the_dictionary_is_not_a_repeat_either() -> None:
     assert current.passport is not None
     assert current.passport.passport.raw_query == "ищу скутер в куангнгае", "новая цепочка"
     assert current.passport.version == 1, "новая просьба — новая цепочка версий, а не правка старой"
-    assert "Ищу" in replies.texts[0], "новую просьбу ищем сразу, а не переспросом старого вопроса"
+    assert replies.sent[0].question is not None
+    assert replies.sent[0].question.field == "city"
 
 
 async def test_a_repeat_while_a_question_hangs_asks_it_again() -> None:
@@ -793,9 +793,8 @@ async def test_stale_button_does_not_answer_twice() -> None:
     вопросу, которого бот уже не ждёт, — не меняет ничего.
     """
     store = MemoryStore()
-    talker = talk(store, bike())
+    talker = talk(store, bike(budget=Budget()))
     await talker.on_text(CLIENT, "ищу скутер", Replies())
-    await talker.on_feedback(CLIENT, Feedback.WRONG, Replies())
     await talker.on_answer(CLIENT, "budget", "500", Replies())
 
     replies = Replies()
@@ -845,7 +844,7 @@ async def test_automatic_feedback_fixes_the_transmission() -> None:
 
 async def test_pricey_without_a_budget_asks_instead_of_guessing() -> None:
     store = MemoryStore()
-    talker = talk(store, bike())
+    talker = talk(store, bike(budget=Budget()))
     await talker.on_text(CLIENT, "ищу скутер", Replies())
     await talker.on_answer(CLIENT, "budget", SKIP, Replies())
     await talker.on_answer(CLIENT, "trans", SKIP, Replies())
@@ -951,7 +950,7 @@ async def test_handler_draws_the_buttons(monkeypatch: pytest.MonkeyPatch) -> Non
     text, keyboard = request.answers[0]
     assert "что ищем" in text.lower()
     labels = [button.text for row in keyboard.inline_keyboard for button in row]
-    assert "не важно, показать что есть" in labels
+    assert "не важно, показать что есть" not in labels
 
 
 async def test_request_menu_handler_covers_the_whole_navigation(
