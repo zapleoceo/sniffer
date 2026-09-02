@@ -86,7 +86,7 @@ MOTORBIKE_MODELS: tuple[MotorbikeModel, ...] = (
     MotorbikeModel("air_blade", "honda", BODY_SCOOTER, ("air blade", "эйрблейд", "аирблейд")),
     MotorbikeModel("vision", "honda", BODY_SCOOTER, ("vision", "вижн")),
     MotorbikeModel("vario", "honda", BODY_SCOOTER, ("vario", "варио")),
-    MotorbikeModel("pcx", "honda", BODY_SCOOTER, ("pcx",)),
+    MotorbikeModel("pcx", "honda", BODY_SCOOTER, ("pcx", "пцх")),
     MotorbikeModel("wave", "honda", BODY_UNDERBONE, ("wave", "вейв")),
     MotorbikeModel("winner", "honda", BODY_MANUAL, ("winner", "winner x", "виннер")),
     MotorbikeModel("nouvo", "yamaha", BODY_SCOOTER, ("nouvo", "нуво")),

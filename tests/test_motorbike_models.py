@@ -413,3 +413,17 @@ def test_an_unknown_model_from_the_answer_is_dropped() -> None:
 
     assert "model" not in merged.attributes
     assert merged.attributes["brand"] == "honda"
+
+
+def test_pcx_is_read_in_cyrillic() -> None:
+    """«пцх» — то, как PCX пишут кириллицей, и без написания модель терялась.
+
+    У Lead есть «лид», у Vision «вижн», а PCX оставался одной латиницей, и на
+    «хочу пцх» бот не узнавал ни модель, ни категорию — спрашивал «что ищем?»
+    там, где предмет назван. Аудит написаний по базе Нячанга (realcheck).
+    """
+    passport = parse_query("хочу пцх", default_city=CITY)
+
+    assert passport.category is Category.MOTORBIKE
+    assert passport.attributes["model"] == "pcx"
+    assert passport.attributes["brand"] == "honda"

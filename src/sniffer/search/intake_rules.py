@@ -237,6 +237,9 @@ def parse_query(text: str, *, default_city: str = "") -> Passport:
     transmission = detect_transmission(query, category)
     if transmission:
         attributes["transmission"] = transmission
+    papers = detect_papers(query, category)
+    if papers:
+        attributes["papers"] = papers
 
     known_city = city or default_city or None
     return Passport(
@@ -316,6 +319,24 @@ def detect_transmission(text: str, category: Category | None = None) -> str | No
     категории в этом слове нет.
     """
     return _attribute_named_in(category, "transmission", text)
+
+
+def detect_papers(text: str, category: Category | None = None) -> str | None:
+    """Документы, названные словом: «блюкарт», «синяя карта», «giấy tờ đầy đủ».
+
+    Мягкий сигнал, а не фильтр, и это осознанно: продавец без блюкарта об этом
+    обычно молчит, «нет документов» в объявлении почти не пишут. Жёсткий отсев по
+    документам оставил бы клиента с пустой выдачей вместо той, где документные
+    лоты просто выше. Поэтому `papers` в паспорте поднимает балл лота с блюкартом
+    (`relevance._attribute_fit`), но чужую карточку не выбрасывает — в отличие от
+    марки и коробки. Кому нужно строго «только с документами» — это deal_breaker,
+    отдельный механизм (passport.md).
+
+    Слова — из того же словаря рынка (`PAPERS_WORDS` через `ATTRIBUTE_TERMS`),
+    которым документы узнаются и в тексте объявления: разъехаться двум копиям
+    негде.
+    """
+    return _attribute_named_in(category, "papers", text)
 
 
 def _attribute_named_in(category: Category | None, attribute: str, text: str) -> str | None:

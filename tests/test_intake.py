@@ -367,3 +367,25 @@ def test_merge_ignores_unknown_values() -> None:
     assert merged.category is Category.MOTORBIKE
     assert merged.budget.currency is Currency.USD
     assert merged.budget.max == 400
+
+
+def test_papers_are_read_from_the_query() -> None:
+    """«блюкарт»/«с блюкартом» → papers=blue_card, и падеж не мешает.
+
+    Весь ручной поиск байка держался на блюкарте («без доков не надо»), а разбор
+    его не читал вовсе — документное требование терялось, и документные лоты не
+    поднимались в выдаче. Слова — из PAPERS_WORDS, тем же знанием, что и в тексте
+    объявления.
+    """
+    assert (
+        parse_query("байк с блюкартом", default_city=CITY).attributes.get("papers") == "blue_card"
+    )
+    assert (
+        parse_query("скутер, документы есть", default_city=CITY).attributes.get("papers")
+        == "blue_card"
+    )
+
+
+def test_papers_are_a_soft_signal_not_a_gearbox() -> None:
+    """Документы — не коробка: отсутствие слова не заполняет и не отсеивает."""
+    assert "papers" not in parse_query("нужен скутер honda lead", default_city=CITY).attributes
