@@ -322,15 +322,11 @@ def test_another_model_does_not_reach_the_cards() -> None:
     assert shown(wants(model="lead"), [*airblades, lead]) == ["Honda Lead 2019"]
 
 
-def test_a_lot_that_names_no_model_is_not_thrown_away() -> None:
-    """Отсутствующее слово — неизвестность, а не несовпадение.
-
-    То же правило, что у прочих атрибутов: продавец не обязан называть модель, а
-    выбрасывать за это значит терять половину чатов.
-    """
+def test_a_specific_model_requires_positive_evidence() -> None:
+    """На запрос Lead безымянный скутер не точнее честного пустого ответа."""
     silent = lot("Скутер Хонда 2019, автомат, блюкарт")
 
-    assert shown(wants(model="lead"), [silent, lot("Honda Air Blade 2021")]) == [silent.title]
+    assert shown(wants(model="lead"), [silent, lot("Honda Air Blade 2021")]) == []
 
 
 def test_no_lead_on_the_market_is_an_honest_empty_answer() -> None:
@@ -343,17 +339,12 @@ def test_no_lead_on_the_market_is_an_honest_empty_answer() -> None:
     assert shown(wants(model="lead"), [lot("Honda Air Blade 2021"), lot("Yamaha Sirius")]) == []
 
 
-def test_the_model_in_the_passport_does_not_punish_every_lot() -> None:
-    """Модель — имя, а не свойство: слов рынка у неё нет.
-
-    Если считать её несовпавшей всегда, добавление модели в паспорт молча
-    роняет балл каждого лота, и порядок начинает решать что угодно, кроме
-    просьбы клиента.
-    """
+def test_the_named_model_is_the_only_proven_match() -> None:
+    """Неизвестный скутер не подмешивается к явно найденному Lead."""
     named = lot("Honda Lead 2019", age_days=1)
     silent = lot("Скутер, автомат", age_days=1)
 
-    assert shown(wants(model="lead"), [silent, named]) == [named.title, silent.title]
+    assert shown(wants(model="lead"), [silent, named]) == [named.title]
 
 
 # ── 6. Порог показа и подстраховка ──────────────────────────────────────────

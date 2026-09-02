@@ -30,6 +30,8 @@ from typing import Protocol
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sniffer.domain.passport import Intent, counterpart_deal_type
+from sniffer.domain.records import Listing, MatchFilter
 from sniffer.sources.telegram_reference import ChatDirectory, ChatLike
 
 log = structlog.get_logger(__name__)
@@ -129,3 +131,46 @@ def new_directory() -> ChatDirectory:
     from sniffer.db import ChatRepository, session_scope
 
     return RepositoryChatDirectory(session_scope, ChatRepository)
+
+
+async def search_listings(params: dict[str, object], *, limit: int) -> list[Listing]:
+    """Архивный поиск за единственной дверью `sources → db`."""
+    from decimal import Decimal
+
+    from sniffer.db import ListingRepository, session_scope
+
+    city = str(params.get("city") or "").strip()
+    if not city:
+        return []
+    raw_intent = str(params.get("intent") or "").strip()
+    try:
+        intent = Intent(raw_intent) if raw_intent else None
+    except ValueError:
+        intent = None
+    ceiling = None
+    budget = params.get("budget")
+    if isinstance(budget, dict) and budget.get("currency") == "VND":
+        value = budget.get("max")
+        if isinstance(value, (int, float)) and value >= 0:
+            ceiling = Decimal(str(value))
+    spec = MatchFilter(
+        city=city,
+        category=str(params.get("category") or "").strip() or None,
+        deal_type=counterpart_deal_type(intent),
+        max_price_vnd=ceiling,
+    )
+    async with session_scope() as session:
+        return await ListingRepository(session).search_catalog(spec, limit=limit)
+
+
+async def store_listings(listings: list[Listing]) -> int:
+    """Материализация live-находок за той же DB-дверью."""
+    from sniffer.db import ListingRepository, session_scope
+
+    async with session_scope() as session:
+        repo = ListingRepository(session)
+        inserted = 0
+        for listing in listings:
+            inserted += await repo.upsert_external(listing)
+        await session.commit()
+        return inserted

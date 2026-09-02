@@ -7,6 +7,7 @@ import pytest
 from sniffer.domain.prices import MAX_PLAUSIBLE_VND, price_hint
 from sniffer.domain.records import Chat, RawMessage
 from sniffer.pipeline.archive import STAGE_REJECTED, classify, listing_from
+from sniffer.search.intake_rules import parse_query
 
 
 @pytest.fixture
@@ -34,6 +35,23 @@ def test_passing_archive_message_becomes_linked_listing(chat: Chat) -> None:
     assert listing.city == "nha_trang"
     assert listing.price_amount == 3_700_000
     assert listing.tg_link == "https://t.me/nha_trang_flea/88"
+
+
+def test_explicit_attributes_survive_the_archive_pipeline(chat: Chat) -> None:
+    message = raw("Продам Honda Lead 125, автомат, 12 млн VND")
+    parsed = parse_query(message.text, default_city=chat.city)
+    listing = listing_from(
+        message,
+        chat,
+        classify(message),
+        deal_type="sell",
+        attributes=dict(parsed.attributes),
+    )
+
+    assert listing.deal_type == "sell"
+    assert listing.attributes["brand"] == "honda"
+    assert listing.attributes["model"] == "lead"
+    assert listing.attributes["transmission"] == "automatic"
 
 
 @pytest.mark.parametrize(

@@ -84,6 +84,31 @@ class RawMessageRepository(Repository):
         )
         return [to_raw_message(row) for row in rows]
 
+    async def take_by_stage(self, stage: str = STAGE_PENDING) -> RawMessage | None:
+        """Занять одну строку до конца транзакции.
+
+        Два worker не должны извлекать одну карточку одновременно. Блокировка
+        живёт только во время обработки одной строки, поэтому медленная или
+        битая соседняя строка очередь не удерживает.
+        """
+        row = await self._session.scalar(
+            select(models.RawMessage)
+            .where(models.RawMessage.stage == stage)
+            .order_by(models.RawMessage.posted_at.desc())
+            .limit(1)
+            .with_for_update(skip_locked=True)
+        )
+        return to_raw_message(row) if row is not None else None
+
+    async def lock_fingerprint(self, text_hash: str) -> None:
+        """Сериализовать проверку и вставку одного кросспоста.
+
+        Уникальность принадлежит нормализованному тексту, но карточка ссылается
+        на конкретное сырьё, поэтому обычный UNIQUE на listings её не выражает.
+        Транзакционный advisory lock закрывает окно SELECT → INSERT.
+        """
+        await self._session.scalar(func.pg_advisory_xact_lock(func.hashtextextended(text_hash, 0)))
+
     async def delete_expired(self, *, older_than: datetime, limit: int) -> int:
         """Убрать протухшее сырьё пачкой. Возврат — сколько строк удалено.
 

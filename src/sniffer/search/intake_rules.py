@@ -100,6 +100,10 @@ _CATEGORY_RULES: tuple[tuple[Category, re.Pattern[str]], ...] = (
 # модель терялась, план уходил по всем Хондам, и клиент, просивший Lead,
 # получал Airblade (жалоба владельца 02.09.2026).
 _BRAND_RE = re.compile(r"\b(?:" + "|".join(MOTORBIKE_BRANDS) + r")\b", re.IGNORECASE)
+_BRAND_ALIASES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("honda", re.compile(r"\bхонд(?:а|у|ы|е|ой)?\b", re.IGNORECASE)),
+    ("yamaha", re.compile(r"\bямах(?:а|у|и|е|ой)?\b", re.IGNORECASE)),
+)
 
 # Буквы, которыми кончается русское слово в именительном падеже и не кончается в
 # косвенном: «механика» → «механику». Прибавляемое окончание добирает `\w*`, а
@@ -272,6 +276,9 @@ def detect_brand(text: str, category: Category | None = None) -> str | None:
     found = _BRAND_RE.search(text)
     if found is not None:
         return found.group(0).lower()
+    for brand, pattern in _BRAND_ALIASES:
+        if pattern.search(text):
+            return brand
     return model_brand(detect_model(text, category))
 
 

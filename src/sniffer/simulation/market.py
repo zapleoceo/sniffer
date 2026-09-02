@@ -36,9 +36,35 @@ def offered(passport: Passport, catalog: tuple[Lot, ...] = CATALOG) -> list[Lot]
     """Что источник отдал бы по этому паспорту — вместе с шумом."""
     if passport.category is None:
         return list(catalog)
-    matched = [lot for lot in catalog if lot.category is passport.category]
+    matched = [
+        lot
+        for lot in catalog
+        if lot.category is passport.category and _source_accepts(lot, passport)
+    ]
     noise = [lot for lot in catalog if lot.item.external_id in _NOISE_KEYS and lot not in matched]
     return matched + noise
+
+
+def _source_accepts(lot: Lot, passport: Passport) -> bool:
+    """Имитировать структурные поля доски и текстовый запрос к чату.
+
+    Это не ранжирование: источник до общего контура уже применяет явно
+    переданные марку, коробку и объём. Раньше подделка игнорировала params и
+    приписывала боту ошибки, которых реальный адаптер не возвращает.
+    """
+    attrs = passport.attributes
+    if attrs.get("brand") and lot.brand.casefold() != str(attrs["brand"]).casefold():
+        return False
+    if attrs.get("model") and lot.model.casefold() != str(attrs["model"]).casefold():
+        return False
+    if attrs.get("transmission") and lot.transmission != attrs["transmission"]:
+        return False
+    wanted_cc = attrs.get("engine_cc")
+    if wanted_cc is not None and lot.engine_cc is not None:
+        target = float(str(wanted_cc))
+        if abs(lot.engine_cc - target) > target * 0.25:
+            return False
+    return True
 
 
 async def market_finder(passport: Passport) -> Found:

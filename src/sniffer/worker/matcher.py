@@ -16,7 +16,8 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import structlog
 
@@ -33,6 +34,8 @@ log = structlog.get_logger(__name__)
 # одной транзакцией.
 LISTINGS_PER_SUBSCRIPTION = 100
 SUBSCRIPTIONS_PER_TICK = 50
+DIGEST_HOUR = 18
+LOCAL_ZONE = ZoneInfo("Asia/Ho_Chi_Minh")
 
 
 class Matcher:
@@ -75,7 +78,7 @@ class Matcher:
         # Сутки считаем от полуночи UTC, а не от полуночи базы: пояс сервера
         # не должен решать, когда у клиента обнуляется лимит.
         midnight = moment.replace(hour=0, minute=0, second=0, microsecond=0)
-        left = subscription.max_per_day - await delivery.sent_since(subscription.id, since=midnight)
+        left = subscription.max_per_day - await delivery.used_since(subscription.id, since=midnight)
         if left <= 0:
             return 0
 
@@ -84,29 +87,42 @@ class Matcher:
         # весь двухнедельный запас разом — включая ровно те объявления, которые
         # он посмотрел и не выбрал перед тем, как заплатить. Подписка обещает
         # НОВЫЕ посты, и обещание держится этим аргументом.
-        for listing in await listings.match(
-            spec, after_id=subscription.since_listing_id, limit=LISTINGS_PER_SUBSCRIPTION
-        ):
+        batch = await listings.match(
+            spec,
+            after_id=max(subscription.since_listing_id, subscription.scan_listing_id),
+            limit=LISTINGS_PER_SUBSCRIPTION,
+        )
+        last_examined = 0
+        for listing in batch:
             if queued >= left:
                 break
+            if listing.id is not None:
+                last_examined = listing.id
             if listing.id is None or not worth_sending(listing, passport, now=moment):
                 continue
+            relevance = score(listing, passport, now=moment)
+            # Режим выбирает клиент. Нельзя молча превращать instant в digest
+            # из-за внутреннего score: тогда подходящая карточка «пропадает»
+            # до вечера, хотя подписка обещала немедленную доставку.
+            delivery_mode = "digest" if subscription.mode == "digest" else "instant"
             added = await delivery.enqueue(
                 subscription_id=subscription.id,
                 user_id=subscription.user_id,
                 listing_id=listing.id,
-                score=score(listing, passport, now=moment),
-                payload=_payload(listing),
-                scheduled_at=moment,
+                score=relevance,
+                payload=_payload(listing, delivery_mode=delivery_mode),
+                scheduled_at=_scheduled(subscription, moment, relevance),
             )
             if added:
                 queued += 1
+        if last_examined:
+            await delivery.advance_scan(subscription.id, last_examined)
         if queued:
             log.info("matcher.queued", subscription=subscription.id, queued=queued)
         return queued
 
 
-def _payload(listing: Listing) -> dict[str, object]:
+def _payload(listing: Listing, *, delivery_mode: str = "instant") -> dict[str, object]:
     """Что нотифаер покажет клиенту. Карточка собирается при отправке.
 
     В очередь кладём данные, а не готовый текст: разметка меняется чаще, чем
@@ -121,4 +137,33 @@ def _payload(listing: Listing) -> dict[str, object]:
         "price_amount": str(listing.price_amount) if listing.price_amount is not None else "",
         "price_currency": listing.price_currency or "",
         "posted_at": listing.posted_at.isoformat(),
+        "delivery_mode": delivery_mode,
     }
+
+
+def _scheduled(subscription: SubscriptionState, moment: datetime, _relevance: float) -> datetime:
+    """Instant, digest и тихие часы в одном детерминированном расчёте."""
+    local = moment.astimezone(LOCAL_ZONE)
+    if subscription.mode == "digest":
+        candidate = local.replace(hour=DIGEST_HOUR, minute=0, second=0, microsecond=0)
+        if candidate <= local:
+            candidate += timedelta(days=1)
+    else:
+        candidate = local
+    candidate = _after_quiet(candidate, subscription)
+    return candidate.astimezone(UTC)
+
+
+def _after_quiet(moment: datetime, subscription: SubscriptionState) -> datetime:
+    start, end = subscription.quiet_from, subscription.quiet_to
+    if start is None or end is None or start == end:
+        return moment
+    current = moment.timetz().replace(tzinfo=None)
+    overnight = start > end
+    inside = current >= start or current < end if overnight else start <= current < end
+    if not inside:
+        return moment
+    target = moment.replace(hour=end.hour, minute=end.minute, second=end.second, microsecond=0)
+    if overnight and current >= start:
+        target += timedelta(days=1)
+    return target

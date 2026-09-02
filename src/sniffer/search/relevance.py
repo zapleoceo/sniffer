@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from math import exp
 
@@ -46,9 +47,8 @@ def rank_items(
 ) -> list[RawItem]:
     """Порядок и отсев перед показом.
 
-    Порядок: свежесть, бюджет, совпадение атрибутов, продавец. Вариант дороже
-    бюджета не исчезает бесследно: когда точных вариантов нет, близкий лот
-    полезнее пустого ответа, но всегда идёт после подходящих.
+    Порядок: свежесть, бюджет, совпадение атрибутов, продавец. Явное превышение
+    потолка — противоречие запросу и отсекается; неизвестная цена остаётся.
 
     Отсев появился после жалобы 02.09.2026: на «нужен скутер honda lead» бот
     отдал три Airblade и лот 59-дневной давности. Сортировка одна такую выдачу
@@ -78,12 +78,57 @@ def rank_items(
     """
     moment = now or datetime.now(UTC)
     ranked = sorted(items, key=lambda item: _score(item, passport, usd_vnd, moment), reverse=True)
-    asked_for = [
-        item
-        for item in ranked
-        if not _other_category(item, passport) and not _other_model(item, passport)
-    ]
+    asked_for = [item for item in ranked if not _contradicts(item, passport, usd_vnd)]
     return [item for item in asked_for if not _too_old(item, moment)] or asked_for
+
+
+def _contradicts(item: RawItem, passport: Passport, usd_vnd: float | None) -> bool:
+    """Жёсткие факты запроса — не пожелания для сортировки.
+
+    Неизвестное свойство пропускаем, явно противоположное — никогда. Для
+    конкретной модели требуем её имя: показать CB200X вместо названного Lead
+    хуже честной пустой выдачи.
+    """
+    if _other_category(item, passport) or _other_model(item, passport):
+        return True
+    text = f"{item.title} {item.text}"
+    wanted_model = str(passport.attributes.get("model") or "")
+    if wanted_model and wanted_model not in models_named_in(passport.category, text):
+        return True
+    if _contrary_attribute(passport, "brand", text):
+        return True
+    if _contrary_attribute(passport, "transmission", text):
+        return True
+    if _wrong_engine(text, passport.attributes.get("engine_cc")):
+        return True
+    ceiling = _budget_ceiling_vnd(passport.budget, usd_vnd)
+    return ceiling is not None and item.price_vnd is not None and item.price_vnd > ceiling
+
+
+def _contrary_attribute(passport: Passport, field: str, text: str) -> bool:
+    wanted = passport.attributes.get(field)
+    if not wanted or _mentions(passport, field, wanted, text):
+        return False
+    # Противоречие доказано, только если текст явно называет другое известное
+    # значение. Отсутствие свойства остаётся неизвестностью.
+    alternatives = {
+        "brand": ("honda", "yamaha", "vespa", "suzuki", "sym"),
+        "transmission": ("automatic", "manual", "semi"),
+    }[field]
+    return any(_mentions(passport, field, value, text) for value in alternatives if value != wanted)
+
+
+_CC_RE = re.compile(r"(?<!\d)(\d{2,4})\s*(?:cc|куб(?:ов|ик(?:ов|а)?)?)\b", re.IGNORECASE)
+
+
+def _wrong_engine(text: str, wanted: object) -> bool:
+    if wanted is None:
+        return False
+    found = [int(value) for value in _CC_RE.findall(text)]
+    if not found:
+        return False
+    target = float(str(wanted))
+    return all(abs(value - target) > target * 0.25 for value in found)
 
 
 def _other_category(item: RawItem, passport: Passport) -> bool:
@@ -125,9 +170,9 @@ def _other_model(item: RawItem, passport: Passport) -> bool:
     и Wave. Именем модели в `q` доски это тоже не решается — `q` складывается с
     фильтрами через И и гасит их в ноль.
 
-    Лот, не назвавший модель вовсе, чужим не считается — по тому же правилу, что
-    и у прочих атрибутов: отсутствующее слово это неизвестность, а не
-    несовпадение.
+    Эта функция различает известную чужую модель и неизвестность. Вызывающий
+    применяет более строгий контракт к конкретно названной модели: без её имени
+    карточка не доказывает соответствие и не показывается.
     """
     wanted = str(passport.attributes.get("model") or "")
     if not wanted:

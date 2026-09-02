@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
 
 from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
-from sniffer.domain.records import Listing
+from sniffer.domain.records import Listing, StoredPassport, SubscriptionState
 from sniffer.matching import MATCH_MIN_SCORE, filter_for, score, worth_sending
+from sniffer.worker.matcher import _scheduled
 
 NOW = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
 
@@ -44,6 +45,51 @@ def test_a_passport_without_a_city_is_not_a_subscription() -> None:
     """Подписка на всё подряд — это спам, за который бота отключают."""
     assert filter_for(passport(city=None), now=NOW) is None
     assert filter_for(passport(category=None), now=NOW) is None
+
+
+def test_a_buyer_is_matched_with_a_seller_not_another_buyer() -> None:
+    spec = filter_for(passport(intent=Intent.BUY), now=NOW)
+    assert spec is not None and spec.deal_type == "sell"
+
+    renter = filter_for(passport(intent=Intent.RENT), now=NOW)
+    assert renter is not None and renter.deal_type == "rent_out"
+
+
+def subscription(**overrides: object) -> SubscriptionState:
+    fields: dict[str, object] = {
+        "id": 1,
+        "user_id": 2,
+        "passport_root": 3,
+        "passport": StoredPassport(id=3, user_id=2, version=1, passport=passport()),
+    }
+    fields.update(overrides)
+    return SubscriptionState(**fields)  # type: ignore[arg-type]
+
+
+def test_digest_waits_for_local_evening() -> None:
+    noon_vietnam = datetime(2026, 9, 2, 5, 0, tzinfo=UTC)
+    assert _scheduled(subscription(mode="digest"), noon_vietnam, 1.0) == datetime(
+        2026, 9, 2, 11, 0, tzinfo=UTC
+    )
+
+
+def test_low_score_does_not_silently_change_instant_to_digest() -> None:
+    noon_vietnam = datetime(2026, 9, 2, 5, 0, tzinfo=UTC)
+    assert _scheduled(subscription(mode="instant"), noon_vietnam, 0.55) == noon_vietnam
+
+
+def test_quiet_hours_move_an_instant_message_to_the_morning() -> None:
+    late_vietnam = datetime(2026, 9, 2, 16, 0, tzinfo=UTC)
+    scheduled = _scheduled(subscription(quiet_from=time(22), quiet_to=time(8)), late_vietnam, 1.0)
+    assert scheduled == datetime(2026, 9, 3, 1, 0, tzinfo=UTC)
+
+
+def test_known_attribute_conflict_is_never_sent() -> None:
+    assert not worth_sending(
+        listing(attributes={"brand": "yamaha"}),
+        passport(attributes={"brand": "honda"}),
+        now=NOW,
+    )
 
 
 def test_a_dollar_budget_becomes_a_dong_ceiling() -> None:

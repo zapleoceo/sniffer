@@ -36,6 +36,7 @@ class Listing(BigIdMixin, Base):
     __tablename__ = "listings"
     __table_args__ = (
         UniqueConstraint("raw_message_id"),
+        UniqueConstraint("source", "external_id"),
         # Порядок колонок не декоративный: в этом же порядке ходит и разовый
         # подбор, и проверка подписок.
         Index(
@@ -57,9 +58,13 @@ class Listing(BigIdMixin, Base):
         Index("listings_attrs_idx", "attributes", postgresql_using="gin"),
     )
 
-    raw_message_id: Mapped[int] = mapped_column(
-        ForeignKey("raw_messages.id", ondelete="CASCADE"), nullable=False
+    raw_message_id: Mapped[int | None] = mapped_column(
+        ForeignKey("raw_messages.id", ondelete="CASCADE")
     )
+    source: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=sa_text("'telegram_archive'")
+    )
+    external_id: Mapped[str | None] = mapped_column(Text)
     seller_id: Mapped[int | None] = mapped_column(ForeignKey("sellers.id", ondelete="SET NULL"))
     deal_type: Mapped[str] = mapped_column(Text, nullable=False)
     category: Mapped[str] = mapped_column(Text, nullable=False)

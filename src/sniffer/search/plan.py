@@ -131,6 +131,8 @@ def context_params(passport: Passport) -> dict[str, Any]:
         params["city"] = passport.city
     if passport.category:
         params["category"] = passport.category.value
+    if passport.intent:
+        params["intent"] = passport.intent.value
     attributes = {
         key: value for key, value in passport.attributes.items() if value not in (None, "", [], {})
     }

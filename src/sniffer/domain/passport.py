@@ -20,6 +20,19 @@ class Intent(StrEnum):
     RENT_OUT = "rent_out"
 
 
+_COUNTERPART_INTENT: dict[Intent, str] = {
+    Intent.BUY: "sell",
+    Intent.RENT: "rent_out",
+    Intent.SELL: "wanted",
+    Intent.RENT_OUT: "wanted",
+}
+
+
+def counterpart_deal_type(intent: Intent | None) -> str | None:
+    """Тип объявления на противоположной стороне сделки клиента."""
+    return _COUNTERPART_INTENT.get(intent) if intent is not None else None
+
+
 class Category(StrEnum):
     MOTORBIKE = "motorbike"
     BICYCLE = "bicycle"

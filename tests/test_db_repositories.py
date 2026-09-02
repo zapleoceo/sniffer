@@ -34,6 +34,7 @@ from sniffer.db.repositories import (
 from sniffer.db.repositories.delivery import DeliveryRepository
 from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
 from sniffer.domain.records import Chat, DiscoveryCandidate, Listing, Payment, RawMessage
+from sniffer.pipeline.gate import GateResult
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("TEST_DATABASE_URL"),
@@ -830,7 +831,7 @@ async def test_the_same_listing_is_never_queued_twice(db_session: AsyncSession) 
     card = await ListingRepository(db_session).add(
         Listing(
             raw_message_id=raw_id,
-            deal_type="buy",
+            deal_type="sell",
             category="motorbike",
             city="nha_trang",
             title="Honda Vision",
@@ -853,6 +854,11 @@ async def test_the_same_listing_is_never_queued_twice(db_session: AsyncSession) 
 
     assert (first, second) == (True, False)
     assert len(await repo.take_pending()) == 1, "в очереди обязана быть одна строка"
+    assert await repo.sent_since(sub_id, since=NOW) == 0
+    assert await repo.used_since(sub_id, since=NOW) == 1
+    (pending,) = await repo.take_pending()
+    await repo.mark_sent(pending.id, now=NOW + timedelta(minutes=1))
+    await db_session.commit()
     assert await repo.sent_since(sub_id, since=NOW) == 1
 
 
@@ -894,7 +900,7 @@ async def test_a_new_listing_reaches_the_subscriber_queue(
     await ListingRepository(db_session).add(
         Listing(
             raw_message_id=raw_id,
-            deal_type="buy",
+            deal_type="sell",
             category="motorbike",
             city="nha_trang",
             title="Honda Vision 2021",
@@ -913,7 +919,8 @@ async def test_a_new_listing_reaches_the_subscriber_queue(
     (message,) = await repo.take_pending(now=NOW)
     assert message.user_id == user_id
     assert message.payload["title"] == "Honda Vision 2021"
-    assert await repo.sent_since(sub_id, since=NOW.replace(hour=0)) == 1
+    assert await repo.sent_since(sub_id, since=NOW.replace(hour=0)) == 0
+    assert await repo.used_since(sub_id, since=NOW.replace(hour=0)) == 1
 
     # Второй проход не шлёт то же самое второй раз.
     assert await module.Matcher().tick(now=NOW) == 0
@@ -931,7 +938,7 @@ async def test_a_listing_from_another_city_is_not_sent(
     await ListingRepository(db_session).add(
         Listing(
             raw_message_id=raw_id,
-            deal_type="buy",
+            deal_type="sell",
             category="motorbike",
             city="da_nang",
             title="Honda Vision",
@@ -945,6 +952,77 @@ async def test_a_listing_from_another_city_is_not_sent(
     monkeypatch.setattr(module, "session_scope", lambda: _borrowed(db_session))
 
     assert await module.Matcher().tick(now=NOW) == 0
+
+
+async def test_matcher_advances_past_a_rejected_page(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Неподходящая первая страница не должна навсегда закрывать следующую."""
+    from sniffer.worker import matcher as module
+
+    passport = Passport(
+        intent=Intent.BUY,
+        category=Category.MOTORBIKE,
+        city="nha_trang",
+        attributes={"brand": "honda"},
+    )
+    _user_id, sub_id = await _subscriber(db_session, passport)
+    await db_session.execute(
+        update(models.Subscription).where(models.Subscription.id == sub_id).values(max_per_day=100)
+    )
+    raw_ids = await RawMessageRepository(db_session).add_many([_raw(1), _raw(2)])
+    for raw_id, brand in zip(raw_ids, ("yamaha", "honda"), strict=True):
+        await ListingRepository(db_session).add(
+            Listing(
+                raw_message_id=raw_id,
+                deal_type="sell",
+                category="motorbike",
+                city="nha_trang",
+                title=f"{brand} bike",
+                summary="fresh",
+                tg_link=f"https://t.me/c/1/{raw_id}",
+                attributes={"brand": brand},
+                posted_at=NOW,
+            )
+        )
+    await db_session.commit()
+
+    monkeypatch.setattr(module, "session_scope", lambda: _borrowed(db_session))
+    monkeypatch.setattr(module, "LISTINGS_PER_SUBSCRIPTION", 1)
+
+    assert await module.Matcher().tick(now=NOW) == 0
+    state = (await DeliveryRepository(db_session).active_subscriptions(now=NOW))[0]
+    assert state.scan_listing_id > state.since_listing_id
+    await db_session.commit()
+    assert await module.Matcher().tick(now=NOW) == 1
+
+
+async def test_live_listing_is_idempotent_and_searchable_from_the_catalog(
+    db_session: AsyncSession,
+) -> None:
+    listing = Listing(
+        raw_message_id=None,
+        source="chotot",
+        external_id="external-42",
+        deal_type="sell",
+        category="motorbike",
+        city="nha_trang",
+        title="Honda Lead",
+        summary="verified live result",
+        tg_link="https://example.test/42",
+        posted_at=NOW,
+    )
+    repo = ListingRepository(db_session)
+    assert await repo.upsert_external(listing)
+    assert not await repo.upsert_external(listing)
+    await db_session.commit()
+
+    from sniffer.domain.records import MatchFilter
+
+    rows = await repo.search_catalog(
+        MatchFilter(city="nha_trang", category="motorbike", deal_type="sell")
+    )
+    assert [(row.source, row.external_id) for row in rows] == [("chotot", "external-42")]
 
 
 @asynccontextmanager
@@ -990,10 +1068,15 @@ async def test_one_broken_message_does_not_stop_the_whole_batch(
     # Ломаем ровно одно сообщение — так, как это сделала неправдоподобная цена.
     real_listing = pipeline.listing_from
 
-    def explode(raw: RawMessage, chat_row: Chat, result: object) -> object:
+    def explode(
+        raw: RawMessage,
+        chat_row: Chat,
+        result: GateResult,
+        **options: object,
+    ) -> Listing:
         if raw.id == bad:
             raise ValueError("цена не влезла в колонку")
-        return real_listing(raw, chat_row, result)  # type: ignore[arg-type]
+        return real_listing(raw, chat_row, result, **options)  # type: ignore[arg-type]
 
     monkeypatch.setattr(module, "listing_from", explode)
     monkeypatch.setattr(module, "session_scope", lambda: _borrowed(db_session))
@@ -1168,7 +1251,7 @@ async def test_a_subscription_only_gets_listings_newer_than_itself(
 def _card(raw_message_id: int, title: str) -> Listing:
     return Listing(
         raw_message_id=raw_message_id,
-        deal_type="buy",
+        deal_type="sell",
         category="motorbike",
         city="nha_trang",
         title=title,

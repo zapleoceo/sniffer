@@ -63,10 +63,7 @@ def test_budget_beats_recency_in_card_order() -> None:
 
     ordered = rank_items(passport(), [expensive, suitable], usd_vnd=RATE, now=NOW)
 
-    assert [candidate.external_id for candidate in ordered] == [
-        "older but suitable",
-        "new but too expensive",
-    ]
+    assert [candidate.external_id for candidate in ordered] == ["older but suitable"]
 
 
 def test_known_automatic_text_beats_unconfirmed_variant() -> None:
