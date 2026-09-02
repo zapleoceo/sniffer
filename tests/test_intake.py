@@ -17,7 +17,8 @@ from sniffer.config import Settings
 from sniffer.domain.passport import Category, Currency, Intent, PassportStatus, PricePeriod
 from sniffer.search import intake as intake_module
 from sniffer.search.intake import QueryIntake, intake_schema, merge
-from sniffer.search.intake_rules import parse_query
+from sniffer.search.intake_rules import detect_transmission, parse_query
+from sniffer.search.market_terms import ATTRIBUTE_TERMS
 
 CITY = "nha_trang"
 
@@ -190,6 +191,80 @@ def test_unclear_query_still_gives_passport() -> None:
     assert passport.status is PassportStatus.DRAFT
     assert "category" in passport.missing_fields
     assert passport.raw_query == "ищу холодильник"
+
+
+# ── коробка передач: сказана в запросе, а не спрошена кнопкой ───────────────
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("скутер автомат до 500 долларов", "automatic"),
+        ("байк на автомате", "automatic"),
+        ("хочу скутер с вариатором", "automatic"),
+        ("нужен байк, механику", "manual"),
+        ("мотоцикл на механике", "manual"),
+        ("скутер полуавтомат", "semi"),
+        ("xe máy tay ga", "automatic"),
+        ("xe côn tay nha trang", "manual"),
+        ("cần xe số", "semi"),
+        ("looking for an automatic scooter", "automatic"),
+        ("manual motorbike", "manual"),
+    ],
+    ids=[
+        "ru_auto",
+        "ru_auto_case",
+        "ru_variator",
+        "ru_manual_case",
+        "ru_manual_prepositional",
+        "ru_semi",
+        "vi_auto",
+        "vi_manual",
+        "vi_semi",
+        "en_auto",
+        "en_manual",
+    ],
+)
+def test_the_gearbox_is_read_from_the_query_itself(text: str, expected: str) -> None:
+    """Клиент сказал «автомат» — переспрашивать это кнопкой значит не слушать.
+
+    Три языка рынка и падежи: «на автомате», «механику». Слова берутся из
+    словаря рынка, поэтому список здесь — формулировки клиента, а не копия
+    словаря; саму копию сторожит тест ниже.
+    """
+    assert parse_query(text, default_city=CITY).attributes["transmission"] == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "term"),
+    [
+        (value, term)
+        for value, langs in ATTRIBUTE_TERMS[Category.MOTORBIKE]["transmission"].items()
+        for terms in langs.values()
+        for term in terms
+    ],
+)
+def test_every_gearbox_word_of_the_market_dictionary_is_understood(value: str, term: str) -> None:
+    """Второго списка слов о коробке в проекте нет — и этот тест не даёт ему завестись.
+
+    Список в `parametrize` собран из самой таблицы: допишут слово — оно попадёт
+    сюда само. Разбор, скопировавший слова к себе, разошёлся бы со словарём
+    молча: ровно так «xe số» успело значить механику в одном месте и
+    полуавтомат в другом.
+    """
+    assert detect_transmission(term) == value
+
+
+def test_a_gearbox_is_not_read_where_the_category_has_no_gearbox() -> None:
+    """«Стиральная машина автомат» — не коробка передач.
+
+    Категорию спрашивает таблица атрибутов, а не ветка в коде: у жилья поля
+    `transmission` нет вовсе, поэтому слово остаётся словом.
+    """
+    passport = parse_query("квартира со стиральной машиной автомат", default_city=CITY)
+
+    assert passport.category is Category.APARTMENT
+    assert "transmission" not in passport.attributes
 
 
 async def test_without_broker_key_model_is_not_called(offline: None) -> None:

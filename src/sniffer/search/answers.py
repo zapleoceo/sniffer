@@ -17,7 +17,7 @@ import re
 
 from sniffer.domain.dialogue import AnswerValue
 from sniffer.search.budget_rules import parse_budget
-from sniffer.search.intake_rules import detect_brand, detect_category
+from sniffer.search.intake_rules import detect_brand, detect_category, detect_transmission
 
 # «Не важно» в любом виде. Кнопка есть, но нажимают не всегда: половина людей
 # отвечает словами, и «да пофиг» обязано означать то же, что нажатие.
@@ -28,16 +28,14 @@ _SKIP_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Порядок значим: «полуавтомат» содержит «автомат», и проверять его надо первым.
-_TRANSMISSION_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("semi", re.compile(r"\b(?:полуавтомат\w*|semi\w*)\b", re.IGNORECASE)),
-    (
-        "automatic",
-        re.compile(r"\b(?:автомат\w*|вариатор\w*|auto\w*|xe\s?ga)\b", re.IGNORECASE),
-    ),
-    ("manual", re.compile(r"\b(?:механик\w*|механ|ручк\w*|manual|xe\s?số)\b", re.IGNORECASE)),
-)
+# Коробки здесь нет: её слова живут в словаре рынка и читаются оттуда
+# (`intake_rules.detect_transmission`). Свой список стоял тут и успел разъехаться
+# со словарём — «xe số» значило в нём механику, а в словаре полуавтомат, — и
+# заметить это по тексту было нельзя: оба списка выглядели правдой.
 
+# Состояние и число комнат остаются здесь: у клиента для них свои слова
+# («убитый пойдёт», «двушка»), которых в словаре ПРОДАВЦА нет и быть не должно.
+# Это не то же дублирование — знание разное, а не текст.
 _CONDITION_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("new", re.compile(r"\b(?:нов\w*|new)\b", re.IGNORECASE)),
     ("good", re.compile(r"\b(?:хорош\w*|отличн\w*|good|ухожен\w*)\b", re.IGNORECASE)),
@@ -84,7 +82,7 @@ def interpret(field: str, text: str) -> AnswerValue | None:
     if field == "attributes.brand":
         return detect_brand(text)
     if field == "attributes.transmission":
-        return _match(_TRANSMISSION_RULES, text)
+        return detect_transmission(text)
     if field == "attributes.condition":
         return _match(_CONDITION_RULES, text)
     if field == "attributes.rooms":

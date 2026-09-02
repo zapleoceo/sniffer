@@ -36,9 +36,9 @@ from sniffer.domain.dialogue import (
     Question,
     apply_answer,
     apply_feedback,
+    blocking_question,
     feedback_buttons,
     feedback_question,
-    next_question,
     parse_option,
     question_by_code,
     question_for,
@@ -438,7 +438,7 @@ class Conversation:
             # тратить вопросы клиента впустую.
             await send(Reply(_unserved(passport.city)))
             return
-        question = next_question(passport, dialogue.state.asked)
+        question = blocking_question(passport, dialogue.state.asked)
         if question is None:
             await self._search(dialogue, send)
             return

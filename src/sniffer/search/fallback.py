@@ -131,7 +131,16 @@ def _prose_nouns(passport: Passport, lang: str) -> list[str]:
     nouns += generic
 
     brand = str(passport.attributes.get("brand", "")).strip()
-    if brand:
+    model = str(passport.attributes.get("model", "")).strip().replace("_", " ")
+    if model:
+        # Модель — самый узкий запрос, какой у нас есть, и в чате он работает:
+        # объявление пишут прозой, и продавец называет байк именно так («Продам
+        # Honda Lead 2019»). Марка при этом не дописывается отдельным запросом:
+        # «honda» отдаёт всех Хонд, то есть ровно ту выдачу, из-за которой
+        # клиент и увидел Airblade вместо Lead. Структурной доске модель словом
+        # не уходит — там `q` гасит фильтры (см. `_board_nouns`).
+        nouns.insert(0, f"{brand} {model}".strip())
+    elif brand:
         # Бренд пишется одинаково на всех трёх языках рынка, поэтому он идёт
         # первым запросом в любом из них.
         nouns.insert(0, brand)

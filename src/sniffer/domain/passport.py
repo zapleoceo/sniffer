@@ -91,7 +91,11 @@ CATEGORY_ATTRIBUTES: dict[Category, tuple[str, ...]] = {
         "transmission",
         "engine_cc",
         "year_min",
+        # Марка и модель — разные атрибуты: у «honda lead» первое honda, второе
+        # lead. Пока модели не было, она приезжала в `brand`, и запрос уходил по
+        # всем Хондам сразу (docs/passport.md, «Марка и модель»).
         "brand",
+        "model",
         "condition",
         "papers",
         "delivery",
