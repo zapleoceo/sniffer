@@ -430,3 +430,18 @@ def test_a_malformed_number_does_not_crash_the_parse() -> None:
     # Контроль: настоящий разделитель тысяч и дробь не сломаны.
     assert parse_query("скутер 5.000.000 VND", default_city=CITY).budget.max == 5_000_000
     assert parse_query("до 1,5 млн", default_city=CITY).budget.max == 1_500_000
+
+
+def test_a_model_code_number_is_not_a_budget() -> None:
+    """«Kawasaki z300» — это модель, а не «до 300». Живой отказ 02.09.2026.
+
+    Клиент искал 300-кубовый мотоцикл Z300, а бот прочёл «300» бюджетом («до 300
+    USD») и выдал 50cc «до 300 долларов». Число, склеенное с буквой, — код
+    модели; из «cbr250» не должно вылезти и «50» (хвост за цифрой).
+    """
+    assert parse_query("Kawasaki z300", default_city=CITY).budget.max is None
+    assert parse_query("honda cbr250 механика", default_city=CITY).budget.max is None
+    assert parse_query("mt15", default_city=CITY).budget.max is None
+    # Контроль: настоящий бюджет с пробелом по-прежнему читается.
+    assert parse_query("нужен скутер до 300", default_city=CITY).budget.max == 300
+    assert parse_query("байк 2019 года до 400", default_city=CITY).budget.max == 400
