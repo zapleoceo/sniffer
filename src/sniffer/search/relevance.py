@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from math import exp
 
 from sniffer.domain.passport import Budget, Currency, Passport
-from sniffer.search.intake_rules import detect_brand, detect_category, detect_transmission
+from sniffer.search.intake_rules import category_of, detect_brand, detect_transmission
 from sniffer.search.plan import SearchPlan, SearchTask
 from sniffer.search.vocabulary import attribute_phrases, models_named_in
 from sniffer.sources.base import RawItem
@@ -158,8 +158,11 @@ def _other_category(item: RawItem, passport: Passport) -> bool:
     и почти все из-за этого).
 
     Категория лота читается ТЕМ ЖЕ разбором, которым читается запрос клиента
-    (`intake_rules.detect_category`): знание «какими словами называют предмет»
-    одно, и второй парсер здесь однажды разошёлся бы с первым.
+    (`intake_rules.category_of`): знание «какими словами называют предмет» одно,
+    и второй парсер здесь однажды разошёлся бы с первым. И читается она с тем же
+    выводом из модели: «Honda Lead 110 2008» слова «скутер» не содержит, но Lead
+    бывает только у мотобайка, и без этого вывода такой лот проходил в выдачу
+    студий как «неизвестная категория» (realcheck 03.09.2026).
 
     Ступень не отменяется при пустом результате, и это не симметрично возрасту.
     Возраст — догадка о живости, чужая категория — факт о предмете, прочитанный
@@ -172,7 +175,7 @@ def _other_category(item: RawItem, passport: Passport) -> bool:
     """
     if passport.category is None:
         return False
-    named = detect_category(f"{item.title} {item.text}")
+    named = category_of(f"{item.title} {item.text}")
     return named is not None and named is not passport.category
 
 

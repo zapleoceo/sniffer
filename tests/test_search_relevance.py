@@ -104,11 +104,30 @@ def test_a_lot_whose_category_is_unreadable_is_not_thrown_away() -> None:
     """«Не смогли прочитать» — это не «не подходит».
 
     То же правило, что у модели: продавец не обязан называть предмет словом из
-    нашего словаря, и выбрасывать за это значит терять половину чата.
+    нашего словаря, и выбрасывать за это значит терять половину чата. Лот назван
+    так, что категорию не выдаёт НИ слово, НИ модель — иначе `category_of`
+    прочитал бы её из имени модели, и «неизвестности» бы не осталось.
     """
-    silent = item("Honda Vision 2019, автомат, один хозяин", price=9_800_000)
+    silent = item("Продам срочно, недорого, один хозяин, торг. Звоните", price=9_800_000)
 
     assert rank_items(passport(), [silent], usd_vnd=RATE, now=NOW) == [silent]
+
+
+def test_a_bike_named_only_by_its_model_is_kept_out_of_a_flat_search() -> None:
+    """«Honda Lead 110 2008» без слова «скутер» — всё равно мотобайк.
+
+    Категория лота читается с тем же выводом из модели, что и запрос: иначе
+    байк, назвавший лишь модель, для запроса о жилье выглядел «неизвестной
+    категорией» и проходил фильтр (realcheck 03.09.2026 — Honda Lead в выдаче
+    студий). Модель Lead бывает только у мотобайка, и на запрос квартиры лот
+    отсеивается, хоть слова «скутер» в нём и нет.
+    """
+    bike = item("Honda Lead 110 2008, пробег 20к, вариатор", price=10_000_000)
+    flat = item("Сдам студию у моря, мебель, длительно", price=9_000_000, age_hours=72)
+
+    ordered = rank_items(passport(category=Category.APARTMENT), [bike, flat], usd_vnd=RATE, now=NOW)
+
+    assert [candidate.external_id for candidate in ordered] == [flat.external_id]
 
 
 def test_an_empty_result_does_not_bring_the_foreign_category_back() -> None:

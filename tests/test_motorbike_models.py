@@ -427,3 +427,19 @@ def test_pcx_is_read_in_cyrillic() -> None:
     assert passport.category is Category.MOTORBIKE
     assert passport.attributes["model"] == "pcx"
     assert passport.attributes["brand"] == "honda"
+
+
+def test_a_listing_named_only_by_its_model_still_has_a_category() -> None:
+    """«Honda Lead 110 2008» не говорит «скутер», но Lead бывает лишь у мотобайка.
+
+    Сторона лота обязана выводить категорию из модели так же, как сторона
+    запроса. Без этого лот, назвавший только модель, для запроса о жилье —
+    «неизвестная категория», и проходит фильтр (realcheck 03.09.2026: Honda Lead
+    в выдаче студий). Имя дома исключение не ломает: категорию там называет слово
+    («квартира»), и до модели дело не доходит.
+    """
+    from sniffer.search.intake_rules import category_of
+
+    assert category_of("Продам Honda Lead 110 2008 вариатор инжектор") is Category.MOTORBIKE
+    assert category_of("Сдам студию у моря, есть мебель") is Category.APARTMENT
+    assert category_of("Квартира Vision Tower, 2 спальни") is Category.APARTMENT

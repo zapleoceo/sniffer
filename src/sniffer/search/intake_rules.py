@@ -303,6 +303,25 @@ def detect_model(text: str, category: Category | None = None) -> str | None:
     return model_named_in(category, text)
 
 
+def category_of(text: str) -> Category | None:
+    """Категория текста — по слову, а если слова нет, по названной модели.
+
+    «Honda Lead 110 2008» не содержит слова «скутер» — только имя модели, — но
+    Lead бывает лишь у мотобайка. Сторона запроса и сторона лота ОБЯЗАНЫ читать
+    категорию одинаково: `parse_query` выводит её из модели («хочу вижн» →
+    motorbike), а отбор выдачи раньше этого не делал, и лот, назвавший только
+    модель, для запроса о жилье выглядел «неизвестной категорией» и проходил
+    фильтр (realcheck 03.09.2026 — Honda Lead в выдаче студий).
+
+    Модель ищется уже с учётом слова: у листинга «студия Vision Tower» категория
+    названа словом (apartment), и до модели дело не доходит — «Vision» там имя
+    дома, а не Honda. Та же защита, что у `parse_query`: вывод категории из
+    модели не даёт таблице читать саму себя.
+    """
+    said = detect_category(text)
+    return said or model_category(detect_model(text, said))
+
+
 def detect_transmission(text: str, category: Category | None = None) -> str | None:
     """Коробка, названная словом: «скутер автомат», «на механике», «tay ga», «xe số».
 
