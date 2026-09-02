@@ -17,7 +17,7 @@ import pytest
 from aiogram.types import Message
 
 from sniffer.bot import app as bot_app
-from sniffer.bot import journal, query_menu
+from sniffer.bot import journal, query_menu, subscription
 from sniffer.bot.conversation import (
     NO_REQUEST_YET,
     NOTHING_FOUND,
@@ -1030,8 +1030,8 @@ async def test_subscription_button_bills_its_own_request_not_the_newest_one(
         return None
 
     monkeypatch.setattr(handler, "Message", FakeMessage)
-    monkeypatch.setattr(handler.subscription, "owns", owns)
-    monkeypatch.setattr(handler.subscription, "active_for", inactive)
+    monkeypatch.setattr(subscription, "owns", owns)
+    monkeypatch.setattr(subscription, "active_for", inactive)
     message = FakeMessage("", from_user=FakeUser(user_id=42))
     callback = cast(Any, FakeCallback(message))
 
