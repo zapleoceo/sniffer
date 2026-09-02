@@ -18,6 +18,7 @@ import re
 from sniffer.domain.dialogue import AnswerValue
 from sniffer.search.budget_rules import parse_budget
 from sniffer.search.intake_rules import detect_brand, detect_category, detect_transmission
+from sniffer.search.rooms import read_rooms
 
 # «Не важно» в любом виде. Кнопка есть, но нажимают не всегда: половина людей
 # отвечает словами, и «да пофиг» обязано означать то же, что нажатие.
@@ -33,9 +34,9 @@ _SKIP_RE = re.compile(
 # со словарём — «xe số» значило в нём механику, а в словаре полуавтомат, — и
 # заметить это по тексту было нельзя: оба списка выглядели правдой.
 
-# Состояние и число комнат остаются здесь: у клиента для них свои слова
-# («убитый пойдёт», «двушка»), которых в словаре ПРОДАВЦА нет и быть не должно.
-# Это не то же дублирование — знание разное, а не текст.
+# Состояние остаётся здесь: у клиента для него свои слова («убитый пойдёт»),
+# которых в словаре ПРОДАВЦА нет и быть не должно. Это не то же дублирование —
+# знание разное, а не текст.
 _CONDITION_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("new", re.compile(r"\b(?:нов\w*|new)\b", re.IGNORECASE)),
     ("good", re.compile(r"\b(?:хорош\w*|отличн\w*|good|ухожен\w*)\b", re.IGNORECASE)),
@@ -53,11 +54,15 @@ _CONDITION_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
 )
 
-# Разговорные названия квартир по числу комнат. «Студия» — одна комната.
-_ROOMS_RULES: tuple[tuple[int, re.Pattern[str]], ...] = (
-    (1, re.compile(r"\b(?:студи\w*|однушк\w*|одна|одну|1)\b", re.IGNORECASE)),
-    (2, re.compile(r"\b(?:двушк\w*|две|двух\w*|2)\b", re.IGNORECASE)),
-    (3, re.compile(r"\b(?:тр[её]шк\w*|три|тр[её]х\w*|3)\b", re.IGNORECASE)),
+# Число комнат читает общее знание `search.rooms` — оно же на стороне запроса и
+# лота. Здесь остаётся ТОЛЬКО голое и словесное число («2», «две», «три»),
+# безопасное лишь потому, что вопрос «сколько комнат?» уже задан: в запросе и
+# тексте лота такое число это что угодно (год, цена), а в ОТВЕТЕ — комнаты.
+# Разговорные «студия», «двушка» и «2 спальни» читает `read_rooms`, их тут нет.
+_FEEDBACK_ROOMS: tuple[tuple[int, re.Pattern[str]], ...] = (
+    (1, re.compile(r"\b(?:одна|одну|1)\b", re.IGNORECASE)),
+    (2, re.compile(r"\b(?:две|двух\w*|2)\b", re.IGNORECASE)),
+    (3, re.compile(r"\b(?:три|тр[её]х\w*|3)\b", re.IGNORECASE)),
 )
 
 
@@ -98,7 +103,15 @@ def _match(rules: tuple[tuple[str, re.Pattern[str]], ...], text: str) -> str | N
 
 
 def _rooms(text: str) -> int | None:
-    for value, pattern in _ROOMS_RULES:
+    """Число комнат из ответа: общее знание плюс голое/словесное число.
+
+    `read_rooms` покрывает «студию», «двушку», «2 спальни»; голое «2» и «две»
+    добираются здесь — они комната только потому, что уже спрошено, сколько их.
+    """
+    explicit = read_rooms(text)
+    if explicit is not None:
+        return explicit
+    for value, pattern in _FEEDBACK_ROOMS:
         if pattern.search(text):
             return value
     return None

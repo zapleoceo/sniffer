@@ -12,6 +12,7 @@ from sniffer.search.engine_size import listing_cc_values
 from sniffer.search.intake_rules import category_of, detect_brand, detect_transmission
 from sniffer.search.market_terms import RENTAL_PRICE_MARKERS, RENTAL_STEMS
 from sniffer.search.plan import SearchPlan, SearchTask
+from sniffer.search.rooms import room_counts
 from sniffer.search.vocabulary import attribute_phrases, model_engine_cc, models_named_in
 from sniffer.sources.base import RawItem
 
@@ -127,6 +128,8 @@ def _contradicts(item: RawItem, passport: Passport, usd_vnd: float | None) -> bo
         passport.category,
     ):
         return True
+    if _wrong_rooms(text, passport.attributes.get("rooms")):
+        return True
     ceiling = _budget_ceiling_vnd(passport.budget, usd_vnd)
     return ceiling is not None and item.price_vnd is not None and item.price_vnd > ceiling
 
@@ -209,6 +212,23 @@ def _model_cc_values(category: Category | None, text: str) -> list[int]:
     """
     named = models_named_in(category, text)
     return [cc for cc in (model_engine_cc(slug) for slug in named) if cc is not None]
+
+
+def _wrong_rooms(text: str, wanted: object) -> bool:
+    """Число комнат лота противоречит запрошенному.
+
+    Жёсткий факт, как модель и объём: «2 спальни» против студии — разное жильё,
+    и показать одно вместо другого хуже честной пустоты. Дисциплина та же, что у
+    объёма: лот, не назвавший число комнат, НЕ противоречит (неизвестное ≠
+    несовпадение) — на рынке половина объявлений число комнат не пишет, и
+    выбрасывать их за молчание значит опустошить выдачу. Точное совпадение, а не
+    «хотя бы»: 3 спальни на запрос «2 спальни» — другой сегмент, дороже и больше.
+    Читает число комнат `rooms.room_counts` тем же знанием, что и запрос клиента.
+    """
+    if wanted is None:
+        return False
+    found = room_counts(text)
+    return bool(found) and int(str(wanted)) not in found
 
 
 # ── Прокат: оффер аренды в тексте лота ───────────────────────────────────────
@@ -454,6 +474,13 @@ def _mentions(passport: Passport, field: str, value: object, haystack: str) -> b
     """
     if field == "model":
         return str(value) in models_named_in(passport.category, haystack)
+    # Число комнат — тоже не слово-значение, а число: у него нет фраз в
+    # `ATTRIBUTE_TERMS`. Ищется тем же знанием, что и в запросе (`rooms`), иначе
+    # «rooms» попадала бы в знаменатель доли атрибутов, никогда не попадая в
+    # числитель, и роняла бы балл каждого лота. Отсев уже отбросил лоты с ЧУЖИМ
+    # числом комнат (`_wrong_rooms`), здесь совпадение лишь поднимает балл.
+    if field == "rooms":
+        return int(str(value)) in room_counts(haystack)
     # Марка, как и модель, — имя, а не свойство рынка: слов в `ATTRIBUTE_TERMS`
     # у неё нет, ищется тем же детектором. Иначе «brand» попадала бы в
     # знаменатель доли атрибутов, никогда не попадая в числитель, и роняла бы

@@ -62,15 +62,26 @@ _CURRENCIES: tuple[tuple[Currency, re.Pattern[str]], ...] = (
     (Currency.RUB, re.compile(r"₽|\brub\b|руб|рубл", re.IGNORECASE)),
 )
 
+# Срок аренды в паспорт кладётся сюда, как период цены: «посуточно» — day,
+# «длительный срок»/«надолго» — month (норма аренды, оно же по умолчанию для
+# RENT). Отдельного атрибута `term` заводить не стали: период уже есть в схеме
+# (`Budget.period`), и «посуточно» это ровно «цена за сутки».
 _PERIODS: tuple[tuple[PricePeriod, re.Pattern[str]], ...] = (
     (
         PricePeriod.DAY,
-        re.compile(r"в\s?(?:сутки|день)|/\s?(?:сут|день)|per\s+day|посуточн", re.IGNORECASE),
+        re.compile(
+            r"в\s?(?:сутки|день)|на\s?сутки|/\s?(?:сут|день)|per\s+day|посуточн|\bdaily\b",
+            re.IGNORECASE,
+        ),
     ),
     (PricePeriod.WEEK, re.compile(r"в\s?неделю|/\s?нед|per\s+week|недельн", re.IGNORECASE)),
     (
         PricePeriod.MONTH,
-        re.compile(r"в\s?месяц|/\s?мес|per\s+month|месячн|ежемесяч", re.IGNORECASE),
+        re.compile(
+            r"в\s?месяц|/\s?мес|per\s+month|месячн|ежемесяч"
+            r"|длительн|надолго|долгосроч|long[\s-]?term",
+            re.IGNORECASE,
+        ),
     ),
 )
 
@@ -78,6 +89,23 @@ _PERIODS: tuple[tuple[PricePeriod, re.Pattern[str]], ...] = (
 # слово рядом, поэтому «2019 года» суммой не считаем.
 _YEAR_RE = re.compile(r"^\s*(?:год|г\.|г\b|year|гв)", re.IGNORECASE)
 _YEAR_RANGE = range(1990, 2036)
+
+# Число, за которым идёт СЧЁТНАЯ единица (комнаты, срок аренды), а не денежная,
+# — не сумма. «квартиру 2 спальни» → это две спальни, не «до 2 USD»; «на 3 дня»,
+# «на 3 месяца» → это срок, не «до 3». Тот же приём, что у года («2019 года»):
+# цену и не-цену различает слово ПОСЛЕ числа. Проверяется только у множителя 1 —
+# у «15 млн» множитель не 1, поэтому «2 спальни до 15 млн» оставляет 15 млн
+# бюджетом, а «2» отбрасывает. Денежных слов (доллар, донг, млн, $) в списке нет
+# намеренно: за ними число — как раз сумма.
+_NON_MONEY_AFTER_RE = re.compile(
+    r"[\s-]*(?:"
+    r"спал(?:ьн|ен)\w*|комнат\w*|бедрум\w*|спален"  # комнаты (ru)
+    r"|дн\w*|день|сут\w*|недел\w*|мес\b|месяц\w*|лет|год\w*"  # срок (ru)
+    r"|bedroom\w*|bed\b|br\b|room\w*"  # комнаты (en)
+    r"|day\w*|week\w*|month\w*|year\w*"  # срок (en)
+    r")",
+    re.IGNORECASE,
+)
 
 # Ниже этого порога сумма в местной валюте бессмысленна: 400 донгов не бывает,
 # а 400 долларов бывает каждый день. Порог заодно решает «до 10 млн» без
@@ -140,6 +168,8 @@ def _amounts(text: str) -> list[tuple[float, str | None]]:
         if value <= 0:
             continue
         if multiplier == 1 and int(value) in _YEAR_RANGE and _YEAR_RE.match(text[match.end() :]):
+            continue
+        if multiplier == 1 and _NON_MONEY_AFTER_RE.match(text[match.end() :]):
             continue
         found.append((value, _marker(text[: match.start()])))
     return found

@@ -140,6 +140,33 @@ PAPERS_WORDS: LangTerms = {
 # Вьетнамские слова про коробку — замер по Нячангу: «tay ga» 41, «xe số» 5,
 # «côn tay» 0 локально и 264 по стране. «bán tự động» дало 0 запросом, но
 # встречается в тексте объявлений («Daelim Sirius 50cc 2019 Bán tự động»).
+#
+# Мебель и вид на море — знание, общее для ВСЕГО жилья: квартира, комната и дом
+# зовут их одними словами. Держим один раз и раздаём тремя категориями ССЫЛКОЙ
+# (как PAPERS_WORDS раздаётся жаргону и атрибуту), а не тремя копиями: правку
+# внесут в один словарь, разъехаться нечему.
+_FURNISHED: dict[str, LangTerms] = {
+    # «меблирован» — ОСНОВА, а не «меблированная»: на рынке пишут и «меблирована»,
+    # и «меблирован», и «меблированная», а основа + `\w*` (сторона запроса) и
+    # подстрока (сторона лота) добирают окончание. «с мебелью» ловит «мебелью»;
+    # «furniture» — «full furniture». «без мебели» намеренно НЕ содержит основы:
+    # иначе furnished=true срабатывал бы на «без мебели».
+    "true": {
+        "ru": ("с мебелью", "меблирован"),
+        "vi": ("full nội thất", "đầy đủ nội thất"),
+        "en": ("furnished", "furniture"),
+    },
+    "false": {"ru": ("без мебели",), "vi": ("nhà trống",), "en": ("unfurnished",)},
+}
+_SEA_VIEW: dict[str, LangTerms] = {
+    # «у моря» и «на море» — самые частые на снимке (у моря 12, «видом на море» 9
+    # ловится «на море»); «вид на море» оставлено как отдельное написание.
+    "true": {
+        "ru": ("вид на море", "у моря", "на море"),
+        "vi": ("view biển",),
+        "en": ("sea view", "ocean view"),
+    },
+}
 ATTRIBUTE_TERMS: dict[Category, dict[str, dict[str, LangTerms]]] = {
     Category.MOTORBIKE: {
         "transmission": {
@@ -174,23 +201,13 @@ ATTRIBUTE_TERMS: dict[Category, dict[str, dict[str, LangTerms]]] = {
             "worn": {"ru": ("требует вложений",), "vi": ("xe cũ",), "en": ("needs work",)},
         },
     },
-    Category.APARTMENT: {
-        "furnished": {
-            "true": {
-                "ru": ("с мебелью", "меблированная"),
-                "vi": ("full nội thất", "đầy đủ nội thất"),
-                "en": ("furnished",),
-            },
-            "false": {"ru": ("без мебели",), "vi": ("nhà trống",), "en": ("unfurnished",)},
-        },
-        "sea_view": {
-            "true": {
-                "ru": ("вид на море",),
-                "vi": ("view biển",),
-                "en": ("sea view", "ocean view"),
-            },
-        },
-    },
+    # Три жилые категории делят один набор слов ссылкой: комната и дом не
+    # переписывают мебель и вид на море вторым списком. Число комнат словом не
+    # задаётся (это ЧИСЛО, а не слово-значение), поэтому его здесь нет — оно
+    # живёт в `search.rooms`.
+    Category.APARTMENT: {"furnished": _FURNISHED, "sea_view": _SEA_VIEW},
+    Category.ROOM: {"furnished": _FURNISHED, "sea_view": _SEA_VIEW},
+    Category.HOUSE: {"furnished": _FURNISHED, "sea_view": _SEA_VIEW},
 }
 
 # Полная выдача структурной доски на момент замера — знаменатель для
