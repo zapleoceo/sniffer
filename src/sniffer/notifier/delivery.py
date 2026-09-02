@@ -48,42 +48,58 @@ class Delivery:
         sent = 0
         async with session_scope() as session:
             repo = DeliveryRepository(session)
-            for index, message in enumerate(await repo.take_pending(limit=BATCH, now=moment)):
+            groups = _groups(await repo.take_pending(limit=BATCH, now=moment))
+            for index, messages in enumerate(groups):
                 if index:
                     await asyncio.sleep(self._pause_s)
-                if await self._deliver(repo, message, moment=moment):
-                    sent += 1
+                sent += await self._deliver_many(repo, messages, moment=moment)
             await session.commit()
         return sent
 
     async def _deliver(
         self, repo: DeliveryRepository, message: OutboxMessage, *, moment: datetime
     ) -> bool:
+        return bool(await self._deliver_many(repo, [message], moment=moment))
+
+    async def _deliver_many(
+        self,
+        repo: DeliveryRepository,
+        messages: list[OutboxMessage],
+        *,
+        moment: datetime,
+    ) -> int:
+        if not messages:
+            return 0
+        text = render(messages[0].payload)
+        if len(messages) > 1:
+            text = render_digest([message.payload for message in messages])
         try:
-            await self._send(message.user_id, render(message.payload))
+            await self._send(messages[0].user_id, text)
         except Exception as exc:
             # Широкий except намеренно: причин не доставить сообщение столько
             # же, сколько состояний у чужого сервиса, и перечислять их значит
             # однажды уронить весь проход на неназванной. Решает не тип ошибки,
             # а счётчик попыток.
-            if message.attempts + 1 >= MAX_ATTEMPTS:
-                await repo.give_up(message.id)
-                log.warning(
-                    "notifier.gave_up",
-                    message=message.id,
-                    attempts=message.attempts + 1,
-                    error=f"{type(exc).__name__}: {exc}",
-                )
-                return False
-            await repo.mark_failed(message.id, retry_at=moment + RETRY_AFTER)
+            for message in messages:
+                if message.attempts + 1 >= MAX_ATTEMPTS:
+                    await repo.give_up(message.id)
+                    log.warning(
+                        "notifier.gave_up",
+                        message=message.id,
+                        attempts=message.attempts + 1,
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+                    continue
+                await repo.mark_failed(message.id, retry_at=moment + RETRY_AFTER)
             log.info(
                 "notifier.retry_later",
-                message=message.id,
+                messages=[message.id for message in messages],
                 error=f"{type(exc).__name__}: {exc}",
             )
-            return False
-        await repo.mark_sent(message.id, now=moment)
-        return True
+            return 0
+        for message in messages:
+            await repo.mark_sent(message.id, now=moment)
+        return len(messages)
 
 
 def render(payload: dict[str, Any]) -> str:
@@ -102,6 +118,24 @@ def render(payload: dict[str, Any]) -> str:
     if url:
         lines.append(f'<a href="{url}">открыть оригинал</a>')
     return "\n".join(line for line in lines if line)
+
+
+def render_digest(payloads: list[dict[str, Any]]) -> str:
+    """Одна подборка вместо серии сообщений в одну секунду."""
+    cards = [render(payload) for payload in payloads]
+    return "<b>Новые находки по вашему запросу</b>\n\n" + "\n\n".join(cards)
+
+
+def _groups(messages: list[OutboxMessage]) -> list[list[OutboxMessage]]:
+    grouped: list[list[OutboxMessage]] = []
+    digest_by_user: dict[int, list[OutboxMessage]] = {}
+    for message in messages:
+        if message.payload.get("delivery_mode") == "digest":
+            digest_by_user.setdefault(message.user_id, []).append(message)
+        else:
+            grouped.append([message])
+    grouped.extend(digest_by_user.values())
+    return grouped
 
 
 def _price(payload: dict[str, Any]) -> str:

@@ -92,7 +92,7 @@ class RawMessage:
 class Listing:
     """Нормализованная карточка предложения — то, что ищет клиент."""
 
-    raw_message_id: int
+    raw_message_id: int | None
     deal_type: str
     category: str
     city: str
@@ -111,6 +111,8 @@ class Listing:
     confidence: float = 0.0
     extracted_at: datetime | None = None
     is_active: bool = True
+    source: str = "telegram_archive"
+    external_id: str | None = None
     id: int | None = None
 
 
@@ -336,6 +338,9 @@ class SubscriptionState:
     # С какой карточки начинается слежение. Подписка обещает НОВЫЕ посты, а не
     # пересказ той выдачи, из которой клиент ничего не выбрал.
     since_listing_id: int = 0
+    # Докуда матчер уже ПРОСМОТРЕЛ ленту. В отличие от notifications движется
+    # и по неподходящим карточкам, иначе первая страница вечна.
+    scan_listing_id: int = 0
     expires_at: datetime | None = None
 
 
@@ -348,6 +353,8 @@ class OutboxMessage:
     payload: dict[str, Any]
     attempts: int = 0
     scheduled_at: datetime | None = None
+    subscription_id: int | None = None
+    notification_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

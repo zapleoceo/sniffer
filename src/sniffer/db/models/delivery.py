@@ -40,6 +40,7 @@ class Subscription(BigIdMixin, Base):
     # клиенту весь двухнедельный запас разом — включая ровно те объявления,
     # которые он только что посмотрел и не выбрал. Подписка обещает НОВЫЕ посты.
     since_listing_id: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=ZERO)
+    scan_listing_id: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=ZERO)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Ключ платежа Telegram: он же ключ отмены через `editUserStarSubscription`.
     charge_id: Mapped[str | None] = mapped_column(Text)
@@ -92,9 +93,10 @@ class Notification(BigIdMixin, Base):
         ForeignKey("listings.id", ondelete="CASCADE"), nullable=False
     )
     score: Mapped[float] = mapped_column(REAL, nullable=False)
-    sent_at: Mapped[datetime] = mapped_column(
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=NOW
     )
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Outbox(BigIdMixin, Base):
@@ -102,6 +104,12 @@ class Outbox(BigIdMixin, Base):
     __table_args__ = (Index("outbox_due_idx", "status", "scheduled_at"),)
 
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    subscription_id: Mapped[int | None] = mapped_column(
+        ForeignKey("subscriptions.id", ondelete="CASCADE")
+    )
+    notification_id: Mapped[int | None] = mapped_column(
+        ForeignKey("notifications.id", ondelete="CASCADE"), unique=True
+    )
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=sa_text("'pending'"))
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=ZERO)

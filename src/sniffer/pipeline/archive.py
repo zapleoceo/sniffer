@@ -28,7 +28,14 @@ def classify(raw: RawMessage) -> GateResult:
     return gate(raw.text)
 
 
-def listing_from(raw: RawMessage, chat: Chat, result: GateResult) -> Listing:
+def listing_from(
+    raw: RawMessage,
+    chat: Chat,
+    result: GateResult,
+    *,
+    deal_type: str = "sell",
+    attributes: dict[str, object] | None = None,
+) -> Listing:
     """Минимальная честная карточка из прошедшего гейт сообщения."""
     if raw.id is None:
         raise ValueError("raw message without database id")
@@ -37,7 +44,9 @@ def listing_from(raw: RawMessage, chat: Chat, result: GateResult) -> Listing:
     price_raw, price_vnd = price_hint(raw.text)
     return Listing(
         raw_message_id=raw.id,
-        deal_type="sell",
+        source="telegram_archive",
+        external_id=f"{raw.chat_tg_id}:{raw.msg_id}",
+        deal_type=deal_type,
         category=result.categories[0].value,
         city=chat.city,
         title=_title(raw.text),
@@ -48,7 +57,7 @@ def listing_from(raw: RawMessage, chat: Chat, result: GateResult) -> Listing:
         price_amount=Decimal(price_vnd) if price_vnd is not None else None,
         price_currency="VND" if price_vnd is not None else None,
         price_period="once" if price_vnd is not None else None,
-        attributes={},
+        attributes=dict(attributes or {}),
         confidence=0.55 if price_raw else 0.4,
         lang=None,
     )

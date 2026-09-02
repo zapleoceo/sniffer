@@ -133,6 +133,26 @@ async def test_one_broken_message_does_not_stop_the_rest(
     assert repo.sent == [2]
 
 
+async def test_digest_cards_are_sent_as_one_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[str] = []
+
+    async def send(_user_id: int, text: str) -> None:
+        seen.append(text)
+
+    first = OutboxMessage(
+        id=1, user_id=42, payload={**PAYLOAD, "delivery_mode": "digest", "title": "First"}
+    )
+    second = OutboxMessage(
+        id=2, user_id=42, payload={**PAYLOAD, "delivery_mode": "digest", "title": "Second"}
+    )
+    repo = FakeRepo(pending=[first, second])
+
+    assert await deliver(repo, send, monkeypatch) == 2
+    assert len(seen) == 1
+    assert "First" in seen[0] and "Second" in seen[0]
+    assert repo.sent == [1, 2]
+
+
 # ── разметка ────────────────────────────────────────────────────────────────
 
 

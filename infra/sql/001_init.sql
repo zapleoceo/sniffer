@@ -177,7 +177,9 @@ CREATE INDEX IF NOT EXISTS raw_messages_posted_idx   ON raw_messages (posted_at)
 
 CREATE TABLE IF NOT EXISTS listings (
     id              BIGSERIAL PRIMARY KEY,
-    raw_message_id  BIGINT      NOT NULL REFERENCES raw_messages(id) ON DELETE CASCADE,
+    raw_message_id  BIGINT      REFERENCES raw_messages(id) ON DELETE CASCADE,
+    source          TEXT        NOT NULL DEFAULT 'telegram_archive',
+    external_id     TEXT,
     seller_id       BIGINT      REFERENCES sellers(id) ON DELETE SET NULL,
 
     deal_type       TEXT        NOT NULL,          -- sell | rent_out | wanted
@@ -208,6 +210,12 @@ CREATE TABLE IF NOT EXISTS listings (
 
     UNIQUE (raw_message_id)
 );
+
+ALTER TABLE listings ALTER COLUMN raw_message_id DROP NOT NULL;
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'telegram_archive';
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS external_id TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS listings_source_external_idx
+    ON listings (source, external_id);
 
 -- Составной индекс под жёсткие фильтры матчинга — именно в этом порядке
 -- ходит и разовый подбор, и проверка подписок.
@@ -315,6 +323,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     -- отдельными ALTER — для живой базы, где CREATE TABLE IF NOT EXISTS не
     -- сработает (deploy.md 7.1).
     since_listing_id BIGINT    NOT NULL DEFAULT 0,
+    scan_listing_id  BIGINT    NOT NULL DEFAULT 0,
     expires_at     TIMESTAMPTZ,
     charge_id      TEXT,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -335,6 +344,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
 -- `charge_id` — идентификатор платежа Telegram. Он же ключ отмены через
 -- `editUserStarSubscription`, поэтому хранится, а не выбрасывается.
 ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS since_listing_id BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS scan_listing_id BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
 ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS charge_id TEXT;
 
@@ -368,13 +378,16 @@ CREATE TABLE IF NOT EXISTS notifications (
     subscription_id BIGINT      NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
     listing_id      BIGINT      NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
     score           REAL        NOT NULL,
-    sent_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    sent_at         TIMESTAMPTZ,
     UNIQUE (subscription_id, listing_id)
 );
 
 CREATE TABLE IF NOT EXISTS outbox (
     id           BIGSERIAL PRIMARY KEY,
     user_id      BIGINT      NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    subscription_id BIGINT   REFERENCES subscriptions(id) ON DELETE CASCADE,
+    notification_id BIGINT   UNIQUE REFERENCES notifications(id) ON DELETE CASCADE,
     payload      JSONB       NOT NULL,
     status       TEXT        NOT NULL DEFAULT 'pending',  -- pending|sent|failed
     attempts     INT         NOT NULL DEFAULT 0,
@@ -383,6 +396,18 @@ CREATE TABLE IF NOT EXISTS outbox (
 );
 
 CREATE INDEX IF NOT EXISTS outbox_due_idx ON outbox (status, scheduled_at);
+
+-- Старые базы создавали notification как уже отправленную при постановке в
+-- очередь и не связывали outbox с причиной. Новые колонки доезжают повторным
+-- прогоном этого же файла; старые строки остаются историческим фактом.
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ;
+UPDATE notifications SET created_at = COALESCE(sent_at, now()) WHERE created_at IS NULL;
+ALTER TABLE notifications ALTER COLUMN created_at SET DEFAULT now();
+ALTER TABLE notifications ALTER COLUMN created_at SET NOT NULL;
+ALTER TABLE notifications ALTER COLUMN sent_at DROP NOT NULL;
+ALTER TABLE notifications ALTER COLUMN sent_at DROP DEFAULT;
+ALTER TABLE outbox ADD COLUMN IF NOT EXISTS subscription_id BIGINT REFERENCES subscriptions(id) ON DELETE CASCADE;
+ALTER TABLE outbox ADD COLUMN IF NOT EXISTS notification_id BIGINT UNIQUE REFERENCES notifications(id) ON DELETE CASCADE;
 
 -- ── внутренняя очередь ──────────────────────────────────────────────────────
 

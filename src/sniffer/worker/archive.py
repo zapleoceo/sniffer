@@ -21,6 +21,7 @@ from sniffer.db.repositories.chats import ChatRepository
 from sniffer.db.repositories.listings import ListingRepository
 from sniffer.db.repositories.raw_messages import RawMessageRepository
 from sniffer.domain.fingerprint import fingerprint
+from sniffer.domain.passport import Intent
 from sniffer.domain.records import RawMessage
 from sniffer.pipeline.archive import (
     STAGE_DUPLICATE,
@@ -29,6 +30,7 @@ from sniffer.pipeline.archive import (
     classify,
     listing_from,
 )
+from sniffer.search.intake_rules import parse_query
 
 log = structlog.get_logger(__name__)
 
@@ -40,9 +42,10 @@ class ArchivePipeline:
         async with session_scope() as session:
             repo = RawMessageRepository(session)
             handled = 0
-            for raw in await repo.list_by_stage(limit=BATCH_SIZE):
-                if raw.id is None:  # pragma: no cover — репозиторий всегда возвращает id
-                    continue
+            for _ in range(BATCH_SIZE):
+                raw = await repo.take_by_stage()
+                if raw is None:
+                    break
                 handled += await self._safely(raw, session)
             return handled
 
@@ -93,6 +96,7 @@ class ArchivePipeline:
         # коллектора несут побайтовый хеш, и кросспост по ним не сходится.
         # Заодно освежаем его в базе.
         digest = fingerprint(raw.text)
+        await repo.lock_fingerprint(digest)
         if await repo.has_listing_for(digest, besides=raw.id):
             # Кросспост: то же объявление уже стало карточкой из другой группы.
             await repo.set_stage(
@@ -100,7 +104,21 @@ class ArchivePipeline:
             )
             return 1
 
-        await ListingRepository(session).add(listing_from(raw, chat, result))
+        parsed = parse_query(raw.text, default_city=chat.city)
+        deal_type = (
+            parsed.intent.value
+            if parsed.intent in {Intent.SELL, Intent.RENT_OUT}
+            else Intent.SELL.value
+        )
+        await ListingRepository(session).add(
+            listing_from(
+                raw,
+                chat,
+                result,
+                deal_type=deal_type,
+                attributes=dict(parsed.attributes),
+            )
+        )
         await repo.set_stage(
             [raw.id], STAGE_EXTRACTED, gate_signals=result.as_signals(), text_hash=digest
         )

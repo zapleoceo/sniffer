@@ -18,7 +18,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from math import exp
 
-from sniffer.domain.passport import Currency, Passport
+from sniffer.domain.passport import Currency, Passport, counterpart_deal_type
 from sniffer.domain.records import Listing, MatchFilter
 
 # Насколько старая карточка ещё годится в подписку. Тот же порог, что у
@@ -43,7 +43,9 @@ def filter_for(
     return MatchFilter(
         city=passport.city,
         category=passport.category.value,
-        deal_type=passport.intent.value if passport.intent else None,
+        # Паспорт описывает сторону клиента, карточка — сторону автора
+        # объявления. Покупателю нужен продавец, арендатору — арендодатель.
+        deal_type=counterpart_deal_type(passport.intent),
         max_price_vnd=_ceiling(passport, usd_vnd),
         since=moment - timedelta(days=MATCH_MAX_AGE_DAYS),
     )
@@ -65,7 +67,18 @@ def score(listing: Listing, passport: Passport, *, now: datetime | None = None) 
 
 
 def worth_sending(listing: Listing, passport: Passport, *, now: datetime | None = None) -> bool:
+    if _known_attribute_conflicts(listing, passport):
+        return False
     return score(listing, passport, now=now) >= MATCH_MIN_SCORE
+
+
+def _known_attribute_conflicts(listing: Listing, passport: Passport) -> bool:
+    """Автоуведомление не шлёт известное противоречие явному требованию."""
+    for field, wanted in passport.attributes.items():
+        actual = listing.attributes.get(field)
+        if actual not in (None, "") and str(actual).casefold() != str(wanted).casefold():
+            return True
+    return False
 
 
 def _freshness(listing: Listing, now: datetime) -> float:

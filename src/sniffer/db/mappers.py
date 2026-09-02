@@ -79,6 +79,8 @@ def to_listing(row: models.Listing) -> Listing:
     return Listing(
         id=row.id,
         raw_message_id=row.raw_message_id,
+        source=row.source,
+        external_id=row.external_id,
         deal_type=row.deal_type,
         category=row.category,
         city=row.city,

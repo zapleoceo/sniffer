@@ -53,9 +53,18 @@ class DeliveryRepository(Repository):
                 ),
             )
             .order_by(models.Subscription.id)
+            .with_for_update(of=models.Subscription, skip_locked=True)
             .limit(limit)
         )
         return [_subscription(row, passport) for row, passport in rows]
+
+    async def advance_scan(self, subscription_id: int, listing_id: int) -> None:
+        """Монотонно запомнить последнюю рассмотренную карточку."""
+        await self._session.execute(
+            update(models.Subscription)
+            .where(models.Subscription.id == subscription_id)
+            .values(scan_listing_id=func.greatest(models.Subscription.scan_listing_id, listing_id))
+        )
 
     async def enqueue(
         self,
@@ -87,11 +96,14 @@ class DeliveryRepository(Repository):
             .on_conflict_do_nothing(index_elements=["subscription_id", "listing_id"])
             .returning(table.c.id)
         )
-        if noted.scalar_one_or_none() is None:
+        notification_id = noted.scalar_one_or_none()
+        if notification_id is None:
             return False
         self._session.add(
             models.Outbox(
                 user_id=user_id,
+                subscription_id=subscription_id,
+                notification_id=notification_id,
                 payload=payload,
                 scheduled_at=scheduled_at or datetime.now(UTC),
             )
@@ -116,11 +128,21 @@ class DeliveryRepository(Repository):
         return [_outbox(row) for row in rows]
 
     async def mark_sent(self, message_id: int, *, now: datetime | None = None) -> None:
+        moment = now or datetime.now(UTC)
+        notification_id = await self._session.scalar(
+            select(models.Outbox.notification_id).where(models.Outbox.id == message_id)
+        )
         await self._session.execute(
             update(models.Outbox)
             .where(models.Outbox.id == message_id)
-            .values(status=OUTBOX_SENT, sent_at=now or datetime.now(UTC))
+            .values(status=OUTBOX_SENT, sent_at=moment)
         )
+        if notification_id is not None:
+            await self._session.execute(
+                update(models.Notification)
+                .where(models.Notification.id == notification_id)
+                .values(sent_at=moment)
+            )
 
     async def mark_failed(self, message_id: int, *, retry_at: datetime) -> None:
         """Не ушло — вернуть в очередь позже, счётчик попыток вверх.
@@ -158,6 +180,18 @@ class DeliveryRepository(Repository):
                 select(func.count(models.Notification.id)).where(
                     models.Notification.subscription_id == subscription_id,
                     models.Notification.sent_at >= since,
+                )
+            )
+            or 0
+        )
+
+    async def used_since(self, subscription_id: int, *, since: datetime) -> int:
+        """Сколько суточных слотов уже занято, включая ожидающие доставки."""
+        return int(
+            await self._session.scalar(
+                select(func.count(models.Notification.id)).where(
+                    models.Notification.subscription_id == subscription_id,
+                    models.Notification.created_at >= since,
                 )
             )
             or 0
@@ -272,6 +306,7 @@ def _subscription(row: models.Subscription, passport: models.Passport) -> Subscr
         quiet_from=row.quiet_from,
         quiet_to=row.quiet_to,
         since_listing_id=row.since_listing_id,
+        scan_listing_id=row.scan_listing_id,
         expires_at=row.expires_at,
         passport=to_stored_passport(passport),
     )
@@ -284,4 +319,6 @@ def _outbox(row: models.Outbox) -> OutboxMessage:
         payload=dict(row.payload),
         attempts=row.attempts,
         scheduled_at=row.scheduled_at,
+        subscription_id=row.subscription_id,
+        notification_id=row.notification_id,
     )

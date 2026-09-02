@@ -87,6 +87,9 @@ class SourceProfile:
 DEFAULT_PROFILE = SourceProfile(langs=MARKET_LANGS, free_text=True, city_in_query=True)
 
 SOURCE_PROFILES: dict[str, SourceProfile] = {
+    # Собственный архив уже нормализован полями; текст нужен ранжированию
+    # после выборки, а не SQL-фильтру до неё.
+    "archive": SourceProfile(langs=("ru",), free_text=False, city_in_query=False),
     "telegram_groups": SourceProfile(langs=("ru", "en"), free_text=True, city_in_query=False),
     "telegram_discover": SourceProfile(langs=("ru", "en"), free_text=True, city_in_query=False),
     # Chotot — структурная доска: тип, объём и бренд там отдельные поля, а `q`

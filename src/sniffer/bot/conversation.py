@@ -53,6 +53,7 @@ from sniffer.search.planner import SearchPlanner
 from sniffer.search.relevance import rank_items, with_vnd_budget
 from sniffer.search.vocabulary import city_name, is_served, served_cities
 from sniffer.sources.base import RawItem, registered_sources
+from sniffer.sources.catalog_sink import remember
 from sniffer.verifier import screen
 
 log = structlog.get_logger(__name__)
@@ -163,6 +164,7 @@ async def find_live(passport: Passport) -> Found:
     # чего детерминированные правила не видят: цену без метки «Цена» и предмет
     # не из того запроса (verifier/guard.py).
     items = await screen(passport, items, usd_vnd=rate)
+    await remember(items, passport)
     watch.lap("guard_ms")
     return Found(
         items=items,
