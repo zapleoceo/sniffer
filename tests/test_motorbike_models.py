@@ -443,3 +443,101 @@ def test_a_listing_named_only_by_its_model_still_has_a_category() -> None:
     assert category_of("Продам Honda Lead 110 2008 вариатор инжектор") is Category.MOTORBIKE
     assert category_of("Сдам студию у моря, есть мебель") is Category.APARTMENT
     assert category_of("Квартира Vision Tower, 2 спальни") is Category.APARTMENT
+
+
+# ── 8. Замер частоты по базе: новые модели ──────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("query", "model", "brand", "transmission"),
+    [
+        ("продам yamaha r15 2019", "r15", "yamaha", "manual"),
+        ("нужен sym attila", "attila", "sym", "automatic"),
+        ("kymco hermosa до 500", "hermosa", "kymco", "automatic"),
+        ("honda click 2021", "click", "honda", "automatic"),
+    ],
+)
+def test_a_measured_model_names_its_brand_and_gearbox(
+    query: str, model: str, brand: str, transmission: str
+) -> None:
+    """Имя измерено по базе Нячанга (realcheck 03.09.2026), кузов — справочный.
+
+    R15 — côn tay, значит МЕХАНИКА: спортбайк, а не скутер. Attila, Hermosa, Click
+    — вариаторы, значит автомат. Марка и коробка следуют из модели той же
+    таблицей, как у Lead и Exciter, — отдельного разбора им не нужно.
+    """
+    passport = parse_query(query, default_city=CITY)
+
+    assert passport.attributes["model"] == model
+    assert passport.attributes["brand"] == brand
+    assert passport.attributes["transmission"] == transmission
+    assert passport.category is Category.MOTORBIKE
+
+
+def test_attila_is_read_in_cyrillic() -> None:
+    """«аттила» русскоязычный Нячанг пишет кириллицей, и оно однозначно.
+
+    Гунн Аттила в запросе о байке или жилье не встретится — в отличие от «клары»
+    (женское имя), у которой кириллицу как раз убрали. Поэтому у Attila она есть,
+    а у Hermosa/R15/Click — нет: за них кириллицей не поручиться.
+    """
+    passport = parse_query("хочу аттила", default_city=CITY)
+
+    assert passport.attributes["model"] == "attila"
+    assert passport.attributes["brand"] == "sym"
+
+
+def test_an_r15_lot_named_only_by_its_model_has_a_category() -> None:
+    """«Продам Yamaha R15 2019» слова «мотоцикл» не говорит, но R15 бывает лишь у байка.
+
+    До внесения имени такой лот для запроса о жилье был «неизвестной категорией»
+    и проходил фильтр чужой категории — тот же класс дефекта, что Honda Lead в
+    выдаче студий (realcheck 03.09.2026). Имя дома исключение не ломает: категорию
+    там называет слово, и до модели дело не доходит.
+    """
+    from sniffer.search.intake_rules import category_of
+
+    assert category_of("Продам Yamaha R15 2019, механика, идеал") is Category.MOTORBIKE
+    assert category_of("Сдам студию у моря, длительный срок") is Category.APARTMENT
+
+
+def test_a_bare_r15_lot_is_dropped_on_a_housing_query() -> None:
+    """Тот же вывод, но на всю цепочку выдачи: на запрос квартиры R15-лот не всплывает.
+
+    Утечка была именно выдачей: лот, назвавший одну модель без слова категории,
+    для запроса о жилье «неизвестная категория» и проходил в карточки по свежести.
+    Теперь категория следует из модели и на стороне лота — байк уходит отсевом.
+    """
+    wants_flat = Passport(
+        intent=Intent.RENT,
+        category=Category.APARTMENT,
+        city=CITY,
+        raw_query="сниму студию у моря",
+    )
+    bare_bike = lot("Yamaha R15 2019, механика, идеал")
+    flat = lot("Студия с мебелью, длительный срок")
+
+    assert shown(wants_flat, [bare_bike, flat]) == [flat.title]
+
+
+def test_candy_is_deliberately_not_a_model() -> None:
+    """Kymco Candy измерен (103), но «candy» — английское слово, бренд стиралок и
+    название краски на самих байках («màu candy»). Ложная модель режет верную
+    выдачу — тот же довод, что у «SH», — поэтому его нет. Тест сторожит РЕШЕНИЕ.
+
+    Вторая проверка показывает ровно тот промах, которого избегаем: «candy» как
+    цвет на честном лоте Lead не поднимает чужую модель и не рушит его выдачу.
+    """
+    assert "candy" not in {model.slug for model in MOTORBIKE_MODELS}
+    assert detect_model("Honda Lead màu candy đỏ", Category.MOTORBIKE) == "lead"
+    assert model_category("candy") is None
+
+
+def test_excel_stays_out_until_its_body_is_known() -> None:
+    """SYM Excel измерен (41), марка ясна (SYM), а кузов — нет.
+
+    Коробка следует из кузова, поэтому внести модель значит записать коробку;
+    записать её, не проверив, — выдать догадку за замер, что файл и запрещает.
+    Строка появится, когда кузов будет проверен, а не угадан.
+    """
+    assert "excel" not in {model.slug for model in MOTORBIKE_MODELS}
