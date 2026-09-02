@@ -32,6 +32,7 @@ from sniffer.bot.keyboards import (
     AnswerCallback,
     FeedbackCallback,
     RequestsCallback,
+    SubscribeCallback,
     markup,
     request_actions,
     requests_markup,
@@ -1014,6 +1015,30 @@ async def test_empty_and_stale_request_menus_answer_plainly(
 
     assert "Запросов пока нет" in message.answers[0][0]
     assert "не найден" in message.answers[1][0]
+
+
+async def test_subscription_button_bills_its_own_request_not_the_newest_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checked: list[tuple[int, int]] = []
+
+    async def owns(user_id: int, root: int) -> bool:
+        checked.append((user_id, root))
+        return True
+
+    async def inactive(_user_id: int, _root: int) -> None:
+        return None
+
+    monkeypatch.setattr(handler, "Message", FakeMessage)
+    monkeypatch.setattr(handler.subscription, "owns", owns)
+    monkeypatch.setattr(handler.subscription, "active_for", inactive)
+    message = FakeMessage("", from_user=FakeUser(user_id=42))
+    callback = cast(Any, FakeCallback(message))
+
+    await handler.subscribe(callback, SubscribeCallback(root=7))
+
+    assert checked == [(42, 7)]
+    assert message.invoices[0]["payload"].endswith(":7")
 
 
 def test_answer_and_feedback_fit_the_callback_limit() -> None:
