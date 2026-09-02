@@ -101,9 +101,10 @@ class Matcher:
             if listing.id is None or not worth_sending(listing, passport, now=moment):
                 continue
             relevance = score(listing, passport, now=moment)
-            delivery_mode = (
-                "digest" if subscription.mode == "digest" or relevance < 0.80 else "instant"
-            )
+            # Режим выбирает клиент. Нельзя молча превращать instant в digest
+            # из-за внутреннего score: тогда подходящая карточка «пропадает»
+            # до вечера, хотя подписка обещала немедленную доставку.
+            delivery_mode = "digest" if subscription.mode == "digest" else "instant"
             added = await delivery.enqueue(
                 subscription_id=subscription.id,
                 user_id=subscription.user_id,
@@ -140,10 +141,10 @@ def _payload(listing: Listing, *, delivery_mode: str = "instant") -> dict[str, o
     }
 
 
-def _scheduled(subscription: SubscriptionState, moment: datetime, relevance: float) -> datetime:
+def _scheduled(subscription: SubscriptionState, moment: datetime, _relevance: float) -> datetime:
     """Instant, digest и тихие часы в одном детерминированном расчёте."""
     local = moment.astimezone(LOCAL_ZONE)
-    if subscription.mode == "digest" or relevance < 0.80:
+    if subscription.mode == "digest":
         candidate = local.replace(hour=DIGEST_HOUR, minute=0, second=0, microsecond=0)
         if candidate <= local:
             candidate += timedelta(days=1)

@@ -1068,10 +1068,15 @@ async def test_one_broken_message_does_not_stop_the_whole_batch(
     # Ломаем ровно одно сообщение — так, как это сделала неправдоподобная цена.
     real_listing = pipeline.listing_from
 
-    def explode(raw: RawMessage, chat_row: Chat, result: GateResult) -> Listing:
+    def explode(
+        raw: RawMessage,
+        chat_row: Chat,
+        result: GateResult,
+        **options: object,
+    ) -> Listing:
         if raw.id == bad:
             raise ValueError("цена не влезла в колонку")
-        return real_listing(raw, chat_row, result)
+        return real_listing(raw, chat_row, result, **options)  # type: ignore[arg-type]
 
     monkeypatch.setattr(module, "listing_from", explode)
     monkeypatch.setattr(module, "session_scope", lambda: _borrowed(db_session))

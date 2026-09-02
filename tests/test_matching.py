@@ -73,6 +73,11 @@ def test_digest_waits_for_local_evening() -> None:
     )
 
 
+def test_low_score_does_not_silently_change_instant_to_digest() -> None:
+    noon_vietnam = datetime(2026, 9, 2, 5, 0, tzinfo=UTC)
+    assert _scheduled(subscription(mode="instant"), noon_vietnam, 0.55) == noon_vietnam
+
+
 def test_quiet_hours_move_an_instant_message_to_the_morning() -> None:
     late_vietnam = datetime(2026, 9, 2, 16, 0, tzinfo=UTC)
     scheduled = _scheduled(subscription(quiet_from=time(22), quiet_to=time(8)), late_vietnam, 1.0)
