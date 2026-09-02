@@ -299,11 +299,16 @@ def test_a_sale_that_only_mentions_rent_is_not_a_rental() -> None:
 # ── объём как диапазон доходит до отсева ─────────────────────────────────────
 
 
-def test_a_minimum_displacement_drops_a_smaller_bike_but_keeps_the_unknown() -> None:
-    """«250 кубиков минимум» больше не показывает 125cc (живой отказ 02.09.2026).
+def test_a_minimum_requires_positive_evidence_of_displacement() -> None:
+    """«250 кубиков минимум» — это пол, и Нячанг рынок малокубатурный.
 
-    Голое «125» читается как объём, «250 минимум» его отсекает; лот без объёма
-    остаётся — неизвестность не несовпадение.
+    Раньше (02.09.2026) «250 минимум» показывал 125cc; голое «125» теперь читается
+    и отсекается. Но этого мало: лот, чей объём подтвердить нечем, почти наверняка
+    НИЖЕ пола, и показывать его как «250+» — обман (46 таких лотов в жалобе
+    владельца 03.09.2026: реальные VT400/CB1000/XMAX тонули среди безобъёмных).
+    Поэтому нижняя граница требует ДОКАЗАННОГО объёма: неизвестный отсекается,
+    подтверждённый большой (Z400=400) остаётся. Потолок и точка терпимы —
+    `test_an_unknown_displacement_survives_a_ceiling`.
     """
     small = item("Yamaha NVX 125 2017 год, пробег 20к", price=12_000_000)
     unknown = item("Продам байк, один хозяин, торг", price=12_000_000)
@@ -318,8 +323,126 @@ def test_a_minimum_displacement_drops_a_smaller_bike_but_keeps_the_unknown() -> 
     kept = {candidate.external_id for candidate in ordered}
 
     assert small.external_id not in kept
-    assert unknown.external_id in kept
+    assert unknown.external_id not in kept
     assert big.external_id in kept
+
+
+def test_an_unknown_displacement_survives_a_ceiling() -> None:
+    """Потолок терпим к неизвестности — в отличие от пола.
+
+    «До 150» и точка оставляют лот без объёма: рынок малокубатурный, и
+    неподтверждённый лот чаще ПОД потолком, чем над ним, — «неизвестное ≠
+    несовпадение» здесь вернее. Положительное доказательство требует только
+    нижняя граница (`min`), где неизвестность почти всегда означает «мимо».
+    """
+    unknown = item("Продам байк, один хозяин, торг", price=12_000_000)
+
+    ordered = rank_items(
+        passport(attributes={"engine_cc": 150, "engine_cc_dir": "max"}),
+        [unknown],
+        usd_vnd=RATE,
+        now=NOW,
+    )
+
+    assert [candidate.external_id for candidate in ordered] == [unknown.external_id]
+
+
+# ── объём берётся у модели, когда в тексте лота числа нет ────────────────────
+
+
+def test_a_model_displacement_drops_a_smaller_bike_on_a_minimum() -> None:
+    """«от 250» отсекает R15 (155) и Air Blade (110), хоть своё число они не пишут.
+
+    Жалоба владельца: 142 карточки там, где честных 0–2, потому что в Нячанге
+    мотоциклов 250cc+ почти нет, а R15/Air Blade объём в тексте не называют — зато
+    его знает модель. Лот без знакомой модели И без числа на нижней границе тоже
+    отсекается (положительное доказательство, см. выше): неподтверждённый объём на
+    полу «250+» честнее не показывать.
+    """
+    r15 = item("r15", price=12_000_000, text="Продам Yamaha R15, механика, идеал")
+    air_blade = item("ab", price=12_000_000, text="Honda Air Blade 2012, инжектор, документы")
+    unknown = item("unknown", price=12_000_000, text="Продам байк, один хозяин, торг")
+
+    ordered = rank_items(
+        passport(attributes={"engine_cc": 250, "engine_cc_dir": "min"}),
+        [r15, air_blade, unknown],
+        usd_vnd=RATE,
+        now=NOW,
+    )
+    kept = {candidate.external_id for candidate in ordered}
+
+    assert "r15" not in kept
+    assert "ab" not in kept
+    assert "unknown" not in kept
+
+
+def test_the_same_bike_stays_when_no_displacement_is_asked() -> None:
+    """Контроль: тот же R15 без запроса объёма остаётся.
+
+    Без этой половины тест доказывал бы, что R15 выбросило что-то ещё, а не
+    именно фильтр объёма. Объём не назван — сравнивать не с чем, лот проходит.
+    """
+    r15 = item("r15", price=12_000_000, text="Продам Yamaha R15, механика, идеал")
+
+    ordered = rank_items(passport(attributes={}), [r15], usd_vnd=RATE, now=NOW)
+
+    assert [candidate.external_id for candidate in ordered] == ["r15"]
+
+
+def test_an_explicit_cc_in_text_outranks_the_model_displacement() -> None:
+    """Текст лота главнее справочной модели: объём этого экземпляра, а не ряда.
+
+    Air Blade в таблице 110 — модель отсекла бы его при «от 150». Но лот пишет
+    160 (реальный объём нового поколения), и явное число оставляет карточку:
+    модель подставляется только на пустое место.
+    """
+    ab = item("ab160", price=12_000_000, text="Honda Air Blade 160 2023, автомат")
+
+    ordered = rank_items(
+        passport(attributes={"engine_cc": 150, "engine_cc_dir": "min"}),
+        [ab],
+        usd_vnd=RATE,
+        now=NOW,
+    )
+
+    assert [candidate.external_id for candidate in ordered] == ["ab160"]
+
+
+def test_an_electric_model_lends_no_displacement() -> None:
+    """Klara — электро, объёма нет: приписать ей число нельзя, `None` это держит.
+
+    На точке/потолке её неизвестный объём оставил бы карточку (терпимость к
+    неизвестности). На нижней границе «от 250» она отсекается — и это верно:
+    электроскутер не мотоцикл 250cc+, а положительного доказательства объёма у
+    него нет. `None` у модели важен именно тем, что не подставляет выдуманное
+    число: иначе на «до 250» Klara спорила бы сама с собой.
+    """
+    klara = item("klara", price=12_000_000, text="Продам VinFast Klara, электро, как новый")
+
+    at_least = passport(attributes={"engine_cc": 250, "engine_cc_dir": "min"})
+    assert rank_items(at_least, [klara], usd_vnd=RATE, now=NOW) == []
+
+    at_most = passport(attributes={"engine_cc": 250, "engine_cc_dir": "max"})
+    assert rank_items(at_most, [klara], usd_vnd=RATE, now=NOW) == [klara]
+
+
+def test_a_ceiling_query_keeps_a_model_at_the_ceiling() -> None:
+    """«до 125» не режет 125cc-модели: Janus (125) остаётся, NVX (155) — уходит.
+
+    Граница включительна (`>`, не `>=`): 125 не больше 125. А модель на 155,
+    назвавшая себя, но не объём, честно превышает потолок и отсекается.
+    """
+    janus = item("janus", price=12_000_000, text="Yamaha Janus, автомат, один хозяин")
+    nvx = item("nvx", price=12_000_000, text="Yamaha NVX, ABS, отличное состояние")
+
+    ordered = rank_items(
+        passport(attributes={"engine_cc": 125, "engine_cc_dir": "max"}),
+        [janus, nvx],
+        usd_vnd=RATE,
+        now=NOW,
+    )
+
+    assert [candidate.external_id for candidate in ordered] == ["janus"]
 
 
 # ── кросспосты схлопываются, разные лоты — нет ──────────────────────────────
@@ -361,6 +484,56 @@ def test_different_lots_of_one_model_are_not_collapsed() -> None:
     """Разные годы — разные лоты: набор слов различается, и оба остаются."""
     a = _repost("a", "Продам Honda Air Blade 2012, инжектор, документы", age_hours=1)
     b = _repost("b", "Продам Honda Air Blade 2015, инжектор, документы", age_hours=2)
+
+    ordered = rank_items(passport(attributes={}), [a, b], usd_vnd=RATE, now=NOW)
+
+    assert {candidate.external_id for candidate in ordered} == {"a", "b"}
+
+
+# ── ближние дубли: отличие лишь в служебном слове схлопывается ───────────────
+
+
+def test_a_near_duplicate_differing_by_a_prefix_word_collapses() -> None:
+    """«Скутер SYM ATTILAVTS 124» и «SYM ATTILAVTS 124» — один лот с приставкой.
+
+    Отличие в одно служебное слово («Скутер») владелец видел двумя дублями
+    (spec-v2, 2.7): точный набор слов различался. Отпечаток по СОДЕРЖАТЕЛЬНЫМ
+    словам (минус приставки) их схлопывает и оставляет свежайший.
+    """
+    plain = _repost("plain", "SYM ATTILAVTS 124, фары работают, документы, багажник", age_hours=1)
+    prefixed = _repost(
+        "prefixed", "Скутер SYM ATTILAVTS 124, фары работают, документы, багажник", age_hours=48
+    )
+
+    ordered = rank_items(passport(attributes={}), [prefixed, plain], usd_vnd=RATE, now=NOW)
+
+    assert [candidate.external_id for candidate in ordered] == ["plain"]
+
+
+def test_two_different_leads_survive_the_looser_rule() -> None:
+    """Контроль к ближнему дедупу: разные Lead остаются двумя карточками.
+
+    Отличаются годом и пробегом — это содержательные токены, они в отпечатке, и
+    терпимость к приставкам их не склеивает. Без этого контроля «починка», что
+    схлопывает всё похожее, прошла бы зелёной, а владелец терял бы половину лотов.
+    """
+    a = _repost("a", "Honda Lead 2015, пробег 20000, автомат, документы", age_hours=1)
+    b = _repost("b", "Honda Lead 2019, пробег 8000, автомат, документы", age_hours=2)
+
+    ordered = rank_items(passport(attributes={}), [a, b], usd_vnd=RATE, now=NOW)
+
+    assert {candidate.external_id for candidate in ordered} == {"a", "b"}
+
+
+def test_two_all_filler_lots_are_not_merged() -> None:
+    """Пустой содержательный отпечаток (одни приставки) не дубликат такого же.
+
+    «Скутер, продам, срочно» и «Байк, продам, срочно» после снятия приставок
+    пусты, а пустое множество не схлопывает: у лота нет ничего, чем доказать
+    тождество, и осторожность оставляет оба.
+    """
+    a = _repost("a", "Скутер, продам, срочно", age_hours=1)
+    b = _repost("b", "Байк, продам, срочно", age_hours=2)
 
     ordered = rank_items(passport(attributes={}), [a, b], usd_vnd=RATE, now=NOW)
 

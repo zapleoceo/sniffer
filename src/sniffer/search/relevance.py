@@ -7,12 +7,12 @@ from datetime import UTC, datetime
 from math import exp
 
 from sniffer.domain.fingerprint import normalized
-from sniffer.domain.passport import Budget, Currency, Intent, Passport
+from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
 from sniffer.search.engine_size import listing_cc_values
 from sniffer.search.intake_rules import category_of, detect_brand, detect_transmission
 from sniffer.search.market_terms import RENTAL_PRICE_MARKERS, RENTAL_STEMS
 from sniffer.search.plan import SearchPlan, SearchTask
-from sniffer.search.vocabulary import attribute_phrases, models_named_in
+from sniffer.search.vocabulary import attribute_phrases, model_engine_cc, models_named_in
 from sniffer.sources.base import RawItem
 
 PRICE_OVER_BUDGET = 1.30
@@ -121,7 +121,10 @@ def _contradicts(item: RawItem, passport: Passport, usd_vnd: float | None) -> bo
     if _contrary_attribute(passport, "transmission", text):
         return True
     if _wrong_engine(
-        text, passport.attributes.get("engine_cc"), passport.attributes.get("engine_cc_dir")
+        text,
+        passport.attributes.get("engine_cc"),
+        passport.attributes.get("engine_cc_dir"),
+        passport.category,
     ):
         return True
     ceiling = _budget_ceiling_vnd(passport.budget, usd_vnd)
@@ -156,7 +159,7 @@ def _contrary_attribute(passport: Passport, field: str, text: str) -> bool:
     return found is not None and str(found) != str(wanted)
 
 
-def _wrong_engine(text: str, wanted: object, direction: object = None) -> bool:
+def _wrong_engine(text: str, wanted: object, direction: object, category: Category | None) -> bool:
     """Объём лота противоречит запрошенному — с учётом направления.
 
     Направление несёт паспорт (`engine_cc_dir`): «от 250» отсекает лот с cc<250,
@@ -164,20 +167,48 @@ def _wrong_engine(text: str, wanted: object, direction: object = None) -> bool:
     читает `listing_cc_values`, в т.ч. голым числом («nvx 125»): раньше читалось
     только «125cc», и «250 минимум» показывал 124–125cc (живой отказ 02.09.2026).
 
+    Когда в тексте объёма нет вовсе, но назван известный модельный ряд, объём
+    берётся у модели (`_model_cc_values`): R15 (155) и Air Blade (110) на «250
+    минимум» отсеиваются, хотя своё число не пишут (жалоба владельца — 142
+    карточки там, где честных 0–2). Текст ГЛАВНЕЕ модели: явный объём — это объём
+    этого экземпляра, а модельный — догадка о ряде, и её подставляют лишь на
+    пустое место (`... or ...`), иначе «Air Blade 125» спорил бы со своим же 125.
+
     `all(...)`, а не `any(...)`: если ХОТЬ ОДИН прочитанный объём в запросе, лот
-    остаётся. Неизвестный объём (ни одного числа) противоречием не считается.
+    остаётся. Ни числа в тексте, ни объёма у модели — противоречием НЕ считается
+    (неизвестное ≠ несовпадение): лот без объёма и без знакомой модели уцелеет.
     """
     if wanted is None:
         return False
-    found = listing_cc_values(text)
+    found = listing_cc_values(text) or _model_cc_values(category, text)
     if not found:
-        return False
+        # Нижняя граница требует ПОЛОЖИТЕЛЬНОГО доказательства, как имя модели.
+        # «От 250» — это пол, а Нячанг рынок малокубатурный: лот, чей объём
+        # подтвердить нечем, почти наверняка ниже пола, и показать его как «250+»
+        # — обман (жалоба владельца 03.09.2026: на «250 минимум» шли 46 лотов с
+        # неизвестным объёмом). Верхняя граница и точка ±band остаются терпимы:
+        # там неизвестный объём чаще подходит, и прежнее «неизвестное ≠
+        # несовпадение» вернее. Это единственное место, где направление меняет
+        # само правило, а не только сравнение.
+        return direction == "min"
     target = float(str(wanted))
     if direction == "min":
         return all(value < target for value in found)
     if direction == "max":
         return all(value > target for value in found)
     return all(abs(value - target) > target * ENGINE_BAND for value in found)
+
+
+def _model_cc_values(category: Category | None, text: str) -> list[int]:
+    """Объёмы моделей, названных в тексте лота, — фолбэк, когда числа в тексте нет.
+
+    Знание берётся через `vocabulary`, а не импортом таблицы моделей в этот слой:
+    тот же путь, что у марки и коробки лота (`model_*`). Электро и незнакомые
+    модели объёма не дают — `None` отбрасывается, и «неизвестное ≠ несовпадение»
+    держится само собой: пустой список объёмом не считается.
+    """
+    named = models_named_in(category, text)
+    return [cc for cc in (model_engine_cc(slug) for slug in named) if cc is not None]
 
 
 # ── Прокат: оффер аренды в тексте лота ───────────────────────────────────────
@@ -215,25 +246,50 @@ def _is_rental_offer(title: str, text: str) -> bool:
     return not _NEG_RE.search(head[: match.start()])
 
 
+# Слова-приставки, которые кросспост дописывает, не меняя сам лот: категория
+# предмета и глагол продажи. Их (и эмодзи — их убирает `normalized`) при
+# переопубликовании переставляют и добавляют чаще всего, а отличить один лот от
+# другого они не помогают. Список НАРОЧНО крошечный и берёт только заведомо
+# декоративное: год, цена, пробег, модель, комплектация сюда не входят — поэтому
+# два РАЗНЫХ лота, чем бы они по существу ни различались, в один отпечаток не
+# схлопнутся. Это не копия CATEGORY_TERMS: там знание «какими словами зовут
+# категорию», здесь — «какие слова не различают два лота», и в нём есть
+# продам/срочно, которых там нет.
+_SERVICE_WORDS: frozenset[str] = frozenset(
+    {"скутер", "байк", "мотобайк", "мотоцикл", "мопед", "продам", "продаю", "срочно"}
+)
+
+
 def _dedup(items: list[RawItem]) -> list[RawItem]:
     """Схлопнуть кросспосты, оставив первый — после сортировки это свежайший.
 
     Один лот приходит в несколько чатов и переопубликуется с новыми эмодзи,
     пробелами, переставленными или задублированными фразами (замер 02.09.2026:
     «Honda Air Blade 2012» и «SYM ATTILAVTS 124» по два раза). Точный хэш такое не
-    ловит — эмодзи и повтор фразы дают разный текст. Поэтому отпечаток — МНОЖЕСТВО
-    слов заголовка и текста: у переоформленного кросспоста набор слов тот же, а у
-    другого лота (иная цена, год, лишняя фраза) — другой, и разные лоты одной
-    модели не схлопываются. Плюс дедуп по `(source, external_id)` — тот же лот,
-    вынутый источником дважды. Пустой отпечаток не схлопывает: лот без текста не
-    дубликат такого же безмолвного.
+    ловит — эмодзи и повтор фразы дают разный текст. Поэтому отпечаток — множество
+    СОДЕРЖАТЕЛЬНЫХ слов текста: полный набор минус служебные приставки
+    (`_SERVICE_WORDS`). Так кросспост, отличающийся лишь приставкой («Скутер SYM
+    ATTILAVTS 124» против «SYM ATTILAVTS 124»), схлопывается, а два разных лота —
+    нет: год, цена в тексте, пробег, разная модель остаются в отпечатке и держат
+    их порознь (spec-v2, 2.7). Схлопнуться могут только тексты, различающиеся ЛИШЬ
+    декоративными словами, — любой различающий токен спасает лот. Точное совпадение
+    — частный случай.
+
+    Отпечаток по ТЕКСТУ, а не «заголовок + текст»: кросспостят в группах Telegram,
+    а там у поста заголовка нет вовсе (`telegram_mapping`: «Заголовка у поста в
+    группе не бывает») — для источника дедупа это ровно прежнее поведение.
+    Заголовок же, где он есть, у объявления эхо текста, и обрезком слова он лишь
+    раздробил бы один лот на два (ровно так его рвёт срез `title[:70]` в
+    диагностике). Плюс дедуп по `(source, external_id)` — тот же лот, вынутый
+    источником дважды. Пустой содержательный отпечаток не схлопывает: лот из одних
+    приставок не дубликат такого же безмолвного.
     """
     seen_ids: set[tuple[str, str]] = set()
     seen_words: set[frozenset[str]] = set()
     kept: list[RawItem] = []
     for item in items:
         ident = (item.source, item.external_id)
-        words = frozenset(normalized(f"{item.title} {item.text}").split())
+        words = frozenset(normalized(item.text).split()) - _SERVICE_WORDS
         if ident in seen_ids or (words and words in seen_words):
             continue
         seen_ids.add(ident)

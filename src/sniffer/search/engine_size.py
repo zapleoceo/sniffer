@@ -126,6 +126,11 @@ def without_engine_cc(text: str) -> str:
 # ── Объём, названный в тексте ЛОТА ───────────────────────────────────────────
 _TEXT_CC_RE = re.compile(r"(?<!\d)(\d{2,4})\s*" + _CC_WORDS + r"\b", re.IGNORECASE)
 _BARE_RE = re.compile(r"(?<![\d.,])(\d{2,4})(?![\d])")
+# Число в хвосте ника — не объём. Живой отказ 03.09.2026: `@molniya777` давал 777,
+# и так как `_wrong_engine` держит лот, если ХОТЬ ОДНО значение подходит, этот 777
+# «спасал» настоящий 155cc NVX от отсева при «250+». Код модели вроде `CBR150R`
+# ником не считается — там перед числом буквы, но нет `@`.
+_HANDLE_TAIL_RE = re.compile(r"@\w*$")
 # Число — НЕ объём, если за ним единица цены (млн, тыс, к, тр, ₫, đ, $, vnd…),
 # группа разрядов (.000 / ,000 / пробел-000) или единица расстояния (км/km),
 # либо перед ним знак валюты. «10 млн» и «125.000» — деньги, «1000 км» — пробег
@@ -163,8 +168,12 @@ def _bare_cc_values(text: str) -> set[int]:
         if not (BARE_MIN_CC <= value <= BARE_MAX_CC) or _is_year(value):
             continue
         after = text[match.end() : match.end() + 12]
-        before = text[max(0, match.start() - 2) : match.start()]
-        if _PRICE_AFTER_RE.match(after) or _PRICE_BEFORE_RE.search(before):
+        before = text[max(0, match.start() - 20) : match.start()]
+        if (
+            _PRICE_AFTER_RE.match(after)
+            or _PRICE_BEFORE_RE.search(before)
+            or _HANDLE_TAIL_RE.search(before)
+        ):
             continue
         found.add(value)
     return found

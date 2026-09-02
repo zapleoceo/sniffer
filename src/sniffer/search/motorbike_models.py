@@ -31,6 +31,17 @@
   модели у Chotot нет, и что Attila — вариатор, а R15 — механика (côn tay),
   живым запросом доски не проверено. Смешивать две силы нельзя: «встретилось 188
   раз» доказано, «вариатор» — нет.
+- **представительный объём (`engine_cc`)**: справочное знание, и вдобавок
+  ОГРУБЛЁННОЕ — этим оно слабее даже кузова. У модели не одно значение, а ряд
+  (Air Blade — 110 и 125, NVX — 125 и 155), и в таблице стоит ОДНО частое число, а
+  не диапазон. Живым замером Chotot не проверено: поля объёма у модели там нет,
+  есть `motorbikecapacity` корзиной. Поэтому число годится расставить модель по
+  КЛАССУ («R15 — это 155, а не 250»), а не спорить о ±10 см³, и работает оно только
+  на пустое место: явный объём в тексте лота (`engine_size.listing_cc_values`)
+  главнее — там объём этого экземпляра, а тут догадка о ряде. Честный ответ на «от
+  250» — что ни Lead (110), ни R15 (155) под него не подходят, и точности класса
+  для этого хватает. Электро (`klara`) объёма не имеет вовсе — `None`, как и
+  коробки: у `xe điện` его физически нет.
 
 Чего здесь намеренно нет. Полный модельный ряд рынка не выписывается: каждое
 лишнее имя — риск поймать модель там, где её нет, а ложная модель означает, что
@@ -84,18 +95,24 @@ TRANSMISSION_BY_BODY: dict[str, str] = {
 
 @dataclass(frozen=True, slots=True)
 class MotorbikeModel:
-    """Модель: чья она, что это за предмет и как её пишут.
+    """Модель: чья она, что это за предмет, как её пишут и какого она объёма.
 
     `spellings` — написания, по которым модель узнают в тексте. Пробел в
     написании означает «пробел здесь может быть, а может не быть»: «air blade» и
     «airblade» — одно имя, и хранить оба строками значило бы однажды забыть
     третье.
+
+    `engine_cc` — представительный объём двигателя в см³. Справочно и огрублённо:
+    у модели ряд вариантов, а здесь одно частое число (провенанс — в шапке файла).
+    `None` — объёма нет (электро) либо он неизвестен. Пятая колонка таблицы ниже
+    — это оно.
     """
 
     slug: str
     brand: str
     body: str
     spellings: tuple[str, ...]
+    engine_cc: int | None
 
 
 # Кириллические написания добавлены только там, где транслитерация не совпадает
@@ -104,33 +121,37 @@ class MotorbikeModel:
 # имя модели дороже пропущенного: пропущенное оставляет выдачу как была, ложное
 # её режет.
 MOTORBIKE_MODELS: tuple[MotorbikeModel, ...] = (
-    MotorbikeModel("lead", "honda", BODY_SCOOTER, ("lead", "лид")),
-    MotorbikeModel("air_blade", "honda", BODY_SCOOTER, ("air blade", "эйрблейд", "аирблейд")),
-    MotorbikeModel("vision", "honda", BODY_SCOOTER, ("vision", "вижн")),
-    MotorbikeModel("vario", "honda", BODY_SCOOTER, ("vario", "варио")),
-    MotorbikeModel("pcx", "honda", BODY_SCOOTER, ("pcx", "пцх")),
+    MotorbikeModel("lead", "honda", BODY_SCOOTER, ("lead", "лид"), 110),
+    MotorbikeModel("air_blade", "honda", BODY_SCOOTER, ("air blade", "эйрблейд", "аирблейд"), 110),
+    MotorbikeModel("vision", "honda", BODY_SCOOTER, ("vision", "вижн"), 110),
+    MotorbikeModel("vario", "honda", BODY_SCOOTER, ("vario", "варио"), 110),
+    MotorbikeModel("pcx", "honda", BODY_SCOOTER, ("pcx", "пцх"), 150),
     # Honda Click — очень частый скутер во Вьетнаме. Латиница без «клик»: «клик» —
     # обычное русское слово (клик мышью), а ложная модель режет верную выдачу.
-    MotorbikeModel("click", "honda", BODY_SCOOTER, ("click",)),
-    MotorbikeModel("wave", "honda", BODY_UNDERBONE, ("wave", "вейв")),
-    MotorbikeModel("winner", "honda", BODY_MANUAL, ("winner", "winner x", "виннер")),
-    MotorbikeModel("nouvo", "yamaha", BODY_SCOOTER, ("nouvo", "нуво")),
-    MotorbikeModel("janus", "yamaha", BODY_SCOOTER, ("janus", "янус")),
-    MotorbikeModel("nvx", "yamaha", BODY_SCOOTER, ("nvx",)),
-    MotorbikeModel("sirius", "yamaha", BODY_UNDERBONE, ("sirius", "сириус")),
-    MotorbikeModel("exciter", "yamaha", BODY_MANUAL, ("exciter", "эксайтер")),
+    MotorbikeModel("click", "honda", BODY_SCOOTER, ("click",), 110),
+    MotorbikeModel("wave", "honda", BODY_UNDERBONE, ("wave", "вейв"), 110),
+    MotorbikeModel("winner", "honda", BODY_MANUAL, ("winner", "winner x", "виннер"), 150),
+    MotorbikeModel("nouvo", "yamaha", BODY_SCOOTER, ("nouvo", "нуво"), 135),
+    MotorbikeModel("janus", "yamaha", BODY_SCOOTER, ("janus", "янус"), 125),
+    MotorbikeModel("nvx", "yamaha", BODY_SCOOTER, ("nvx",), 155),
+    MotorbikeModel("sirius", "yamaha", BODY_UNDERBONE, ("sirius", "сириус"), 110),
+    MotorbikeModel("exciter", "yamaha", BODY_MANUAL, ("exciter", "эксайтер"), 150),
     # Yamaha R15 — спортбайк с ручным сцеплением (côn tay), поэтому МЕХАНИКА, а не
     # скутер (chotot_reference: R15 в MOTORBIKE_TYPE_MANUAL). Написание — код, как
-    # у NVX/PCX: латиница, «р15» кириллицей не пишут.
-    MotorbikeModel("r15", "yamaha", BODY_MANUAL, ("r15",)),
-    MotorbikeModel("vespa", "piaggio", BODY_SCOOTER, ("vespa", "веспа")),
-    MotorbikeModel("klara", "vinfast", BODY_ELECTRIC, ("klara",)),
+    # у NVX/PCX: латиница, «р15» кириллицей не пишут. 155 см³ — но всё ещё далеко
+    # от 250: спортбайк по кузову, а не по классу объёма.
+    MotorbikeModel("r15", "yamaha", BODY_MANUAL, ("r15",), 155),
+    MotorbikeModel("vespa", "piaggio", BODY_SCOOTER, ("vespa", "веспа"), 125),
+    # Электро: объёма нет вовсе (`None`), как и коробки — у `xe điện` его физически
+    # не существует, приписать число значило бы соврать классом.
+    MotorbikeModel("klara", "vinfast", BODY_ELECTRIC, ("klara",), None),
     # SYM и Kymco: их марки уже в MOTORBIKE_BRANDS, а моделей до сих пор не было.
     # Attila и Hermosa — скутеры (вариатор → автомат). «аттила» кириллицей реально
     # пишут, и оно однозначно (гунн Аттила в запросе о байке не встретится); за
-    # «хермоса» кириллицей поручиться нельзя — только латиница.
-    MotorbikeModel("attila", "sym", BODY_SCOOTER, ("attila", "аттила")),
-    MotorbikeModel("hermosa", "kymco", BODY_SCOOTER, ("hermosa",)),
+    # «хермоса» кириллицей поручиться нельзя — только латиница. Hermosa — 50 см³
+    # (мопедный класс), Attila — 110.
+    MotorbikeModel("attila", "sym", BODY_SCOOTER, ("attila", "аттила"), 110),
+    MotorbikeModel("hermosa", "kymco", BODY_SCOOTER, ("hermosa",), 50),
 )
 
 # Модельный ряд по категориям — таблица, а не проверка «а мотобайк ли это».

@@ -30,9 +30,14 @@ from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
 from sniffer.search.fallback import fallback_plan
 from sniffer.search.intake import merge
 from sniffer.search.intake_rules import detect_brand, detect_model, parse_query, with_model_facts
-from sniffer.search.motorbike_models import MOTORBIKE_MODELS
+from sniffer.search.motorbike_models import BODY_ELECTRIC, MOTORBIKE_MODELS
 from sniffer.search.relevance import LIVE_MAX_AGE_DAYS, rank_items
-from sniffer.search.vocabulary import model_category, model_transmission, models_named_in
+from sniffer.search.vocabulary import (
+    model_category,
+    model_engine_cc,
+    model_transmission,
+    models_named_in,
+)
 from sniffer.sources.base import RawItem
 from sniffer.sources.chotot import build_params
 
@@ -548,3 +553,54 @@ def test_excel_stays_out_until_its_body_is_known() -> None:
     Строка появится, когда кузов будет проверен, а не угадан.
     """
     assert "excel" not in {model.slug for model in MOTORBIKE_MODELS}
+
+
+# ── 9. Представительный объём модели ────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("model", "engine_cc"),
+    [("lead", 110), ("pcx", 150), ("nvx", 155), ("r15", 155), ("hermosa", 50), ("vespa", 125)],
+)
+def test_a_model_carries_its_representative_displacement(model: str, engine_cc: int) -> None:
+    """Объём справочный и огрублённый: одно частое число на ряд вариантов.
+
+    Годится расставить лот по КЛАССУ, когда сам лот объём не назвал (R15 — 155, а
+    значит не 250), а спорить о ±10 см³ не берётся: вариантов у модели больше
+    одного, и это записано в провенансе таблицы честно.
+    """
+    assert model_engine_cc(model) == engine_cc
+
+
+def test_an_electric_model_has_no_displacement() -> None:
+    """Klara — электро: объёма нет вовсе (`None`), как и коробки.
+
+    Приписать электробайку число значило бы отсечь его на «от 250» выдуманным
+    объёмом — у `xe điện` объёма физически не существует.
+    """
+    assert model_engine_cc("klara") is None
+
+
+def test_an_unknown_name_has_no_displacement() -> None:
+    """Незнакомое имя объёма не выдумывает — прежнее поведение, а не догадка."""
+    assert model_engine_cc("sh") is None
+    assert model_engine_cc("") is None
+    assert model_engine_cc(None) is None
+
+
+@pytest.mark.parametrize("model", [model.slug for model in MOTORBIKE_MODELS])
+def test_every_model_declares_a_displacement_or_an_honest_none(model: str) -> None:
+    """Каждая модель ряда явно объявляет объём или явный `None` — молчком не пропущена.
+
+    Список связан с таблицей механически: допишут модель — она попадёт сюда сама,
+    и «а этой объём забыли» не станет тихим пробелом. `None` допустим только у
+    электро; у остальных число в правдоподобных границах мотобайка (49..2000 см³,
+    как `engine_size.MIN_CC`..`MAX_CC`).
+    """
+    body = {entry.slug: entry.body for entry in MOTORBIKE_MODELS}[model]
+    cc = model_engine_cc(model)
+
+    if body == BODY_ELECTRIC:
+        assert cc is None
+    else:
+        assert cc is not None and 49 <= cc <= 2000

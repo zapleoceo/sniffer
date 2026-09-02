@@ -436,6 +436,19 @@ def model_transmission(model: str | None) -> str | None:
     return TRANSMISSION_BY_BODY.get(known.body) if known else None
 
 
+def model_engine_cc(model: str | None) -> int | None:
+    """Представительный объём модели в см³. `None` — электро либо модель незнакома.
+
+    Тем же путём, что `model_brand`/`model_transmission`: знание живёт в таблице
+    `motorbike_models`, а слои читают его отсюда. Число справочное и огрублённое
+    (у модели ряд вариантов, здесь одно частое) — годится расставить лот по классу
+    объёма, когда сам лот объёма не назвал, но текст лота всегда главнее (см.
+    `relevance._wrong_engine`).
+    """
+    known = _MODELS.get(str(model or ""))
+    return known.engine_cc if known else None
+
+
 # ── Какими словами названа категория: слово рынка, марка или модель ──────────
 # Одно знание на обе стороны воронки. Бесплатный гейт продавца
 # (`pipeline/gate.py`) держал СВОЙ список марок и моделей — honda, vision, nouvo,
