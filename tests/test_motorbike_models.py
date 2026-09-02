@@ -30,8 +30,9 @@ from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
 from sniffer.search.fallback import fallback_plan
 from sniffer.search.intake import merge
 from sniffer.search.intake_rules import detect_brand, detect_model, parse_query, with_model_facts
+from sniffer.search.motorbike_models import MOTORBIKE_MODELS
 from sniffer.search.relevance import LIVE_MAX_AGE_DAYS, rank_items
-from sniffer.search.vocabulary import model_transmission, models_named_in
+from sniffer.search.vocabulary import model_category, model_transmission, models_named_in
 from sniffer.sources.base import RawItem
 from sniffer.sources.chotot import build_params
 
@@ -120,6 +121,10 @@ def test_a_building_named_vision_is_not_a_honda() -> None:
 
     Без неё «квартира Vision» уводила бы и план поиска (первым запросом чата
     стало бы «honda vision»), и отбор выдачи — он по модели отсекает.
+
+    С выводом категории из модели у этого теста появилась вторая работа: он
+    сторожит направление вывода. Категория названа словом, значит имя модели в
+    этом тексте — название дома, и обратный ход по таблице обязан молчать.
     """
     flat = parse_query("сниму квартиру Vision в Нячанге", default_city=CITY)
 
@@ -130,11 +135,16 @@ def test_a_building_named_vision_is_not_a_honda() -> None:
 
 
 def test_a_model_without_a_category_is_still_read() -> None:
-    """«honda lead» без слова «скутер» — обычная формулировка, и модель в ней настоящая."""
+    """«honda lead» без слова «скутер» — обычная формулировка, и модель в ней настоящая.
+
+    Категория при этом не остаётся пустой: имя модели называет предмет, и с
+    02.09.2026 она из него следует (см. соседний тест). Раньше здесь стояло
+    `category is None` — это было описанием пробела, а не требованием.
+    """
     passport = parse_query("honda lead 2019", default_city=CITY)
 
-    assert passport.category is None
     assert passport.attributes["model"] == "lead"
+    assert passport.category is Category.MOTORBIKE
 
 
 def test_an_unknown_model_leaves_the_search_as_it_was() -> None:
@@ -181,6 +191,36 @@ def test_the_gearbox_follows_the_body_not_a_second_column(
     assert model_transmission(model) is transmission
 
 
+def test_the_category_follows_from_the_model() -> None:
+    """Жалоба владельца дословно: «ищу хонду вижн до 400» — и бот спрашивал «Что ищем?».
+
+    Vision не бывает ничем, кроме мотобайка, — предмет назван, и вопрос о нём и
+    есть та «тупизна». Категория берётся обратным ходом по `MODELS_BY_CATEGORY`,
+    а не второй таблицей: две таблицы об одном однажды разъедутся.
+    """
+    passport = parse_query("ищу хонду вижн до 400", default_city=CITY)
+
+    assert passport.category is Category.MOTORBIKE
+    assert passport.attributes["model"] == "vision"
+    assert "category" not in passport.missing_fields
+
+
+@pytest.mark.parametrize("model", [model.slug for model in MOTORBIKE_MODELS])
+def test_every_model_of_the_table_names_its_own_category(model: str) -> None:
+    """Обратный ход отвечает на КАЖДОЕ имя ряда, а не на те, что вспомнили.
+
+    Список в тесте связан с таблицей механически: допишут модель — она попадёт
+    сюда сама, и «а эту забыли» не станет молчаливым пробелом.
+    """
+    assert model_category(model) is Category.MOTORBIKE
+
+
+def test_an_unknown_name_derives_no_category() -> None:
+    """«Honda SH» остаётся неузнанной — и не приносит с собой выдуманной категории."""
+    assert model_category("sh") is None
+    assert parse_query("куплю honda sh до 500", default_city=CITY).category is None
+
+
 def test_the_client_outranks_the_table() -> None:
     """«Lead на механике» не бывает, но спорить с клиентом здесь не наше дело.
 
@@ -191,6 +231,19 @@ def test_the_client_outranks_the_table() -> None:
 
     assert kept["transmission"] == "manual"
     assert kept["brand"] == "yamaha"
+
+
+def test_a_gearbox_named_in_words_outranks_the_one_derived_from_the_model() -> None:
+    """«lead механика»: у Lead в таблице автомат, но клиент сказал иначе — вслух.
+
+    Проверяется весь путь от слов, а не одна `with_model_facts`: коробку теперь
+    читает и первичный запрос, и порядок этих двух знаний решает, чей ответ
+    окажется в паспорте.
+    """
+    passport = parse_query("lead механика", default_city=CITY)
+
+    assert passport.attributes["model"] == "lead"
+    assert passport.attributes["transmission"] == "manual"
 
 
 def test_an_electric_model_gets_no_invented_gearbox() -> None:

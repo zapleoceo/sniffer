@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from math import exp
 
 from sniffer.domain.passport import Budget, Currency, Passport
+from sniffer.search.intake_rules import detect_category
 from sniffer.search.plan import SearchPlan, SearchTask
 from sniffer.search.vocabulary import attribute_phrases, models_named_in
 from sniffer.sources.base import RawItem
@@ -54,8 +55,10 @@ def rank_items(
     не лечит — она ставит мусор ниже, а показываем мы первые пять, и когда
     лучшего нет, первыми пятью оказывается мусор.
 
-    Отсев двухступенчатый, и ступени отменяются по-разному:
+    Отсев трёхступенчатый, и ступени отменяются по-разному:
 
+    * **чужая категория** — не тот предмет вообще: комната и велосипед в выдаче
+      скутеров. Ступень не отменяется, обоснование — у `_other_category`;
     * **чужая модель** — не низкий балл, а брак выдачи (spec-v2, 3.2): клиент
       назвал Lead, значит Airblade это не «похуже», а не тот предмет. Ступень не
       отменяется: если Lead на рынке нет, честнее пустой ответ, который прямо
@@ -75,8 +78,41 @@ def rank_items(
     """
     moment = now or datetime.now(UTC)
     ranked = sorted(items, key=lambda item: _score(item, passport, usd_vnd, moment), reverse=True)
-    asked_for = [item for item in ranked if not _other_model(item, passport)]
+    asked_for = [
+        item
+        for item in ranked
+        if not _other_category(item, passport) and not _other_model(item, passport)
+    ]
     return [item for item in asked_for if not _too_old(item, moment)] or asked_for
+
+
+def _other_category(item: RawItem, passport: Passport) -> bool:
+    """Лот НЕ того рода, о котором просил клиент: комната в выдаче скутеров.
+
+    Фильтр клиентский по той же причине, что и модельный, только причина здесь
+    сильнее: у телеграм-чата структурного поля категории нет вовсе, а ищет он
+    словами — «продам», «Нячанг», «срочно» стоят в объявлении о чём угодно.
+    Модельный фильтр такой лот не видит: комната модели не называет, и в пятёрку
+    она проходит по свежести (замер 02.09.2026 — 38 карточек мимо запроса из 92,
+    и почти все из-за этого).
+
+    Категория лота читается ТЕМ ЖЕ разбором, которым читается запрос клиента
+    (`intake_rules.detect_category`): знание «какими словами называют предмет»
+    одно, и второй парсер здесь однажды разошёлся бы с первым.
+
+    Ступень не отменяется при пустом результате, и это не симметрично возрасту.
+    Возраст — догадка о живости, чужая категория — факт о предмете, прочитанный
+    из его собственных слов. Показать комнату вместо скутера, когда скутеров не
+    нашлось, значит вернуть ровно ту жалобу, ради которой отсев и появился:
+    пустой ответ прямо советует переформулировать, а комната говорит «бот меня
+    не услышал». Подстраховка у ступени своя и внутренняя: лот, чью категорию
+    прочитать не удалось, чужим НЕ считается — неизвестность это не
+    несовпадение, то же правило, что у модели и прочих атрибутов.
+    """
+    if passport.category is None:
+        return False
+    named = detect_category(f"{item.title} {item.text}")
+    return named is not None and named is not passport.category
 
 
 def _other_model(item: RawItem, passport: Passport) -> bool:

@@ -2,7 +2,11 @@
 
 Работает всегда: когда брокер лежит, когда исчерпан дневной cap и когда ключа
 просто нет. Разбирает три вещи, которые определяют выдачу, — намерение,
-категорию и город, — плюс бюджет, марку и модель.
+категорию и город, — плюс бюджет, марку, модель и коробку передач.
+
+Часть фактов не сказана словом, а следует из другого: категория и коробка
+следуют из модели, марка — тоже. Выведенное ложится ТОЛЬКО на пустое место:
+сказанное клиентом главнее любой таблицы.
 
 Почему это не дублирует `pipeline.gate` и `search.vocabulary`. Гейт читает
 объявление продавца и обязан ловить бренды и модели; словарь рынка отвечает на
@@ -15,16 +19,18 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from sniffer.domain.passport import Category, Intent, Passport, PassportStatus
 from sniffer.search.budget_rules import parse_budget
 from sniffer.search.engine_size import read_engine_cc, without_engine_cc
-from sniffer.search.market_terms import ALL_CITY_NAMES
+from sniffer.search.market_terms import ALL_CITY_NAMES, ATTRIBUTE_TERMS, LangTerms
 from sniffer.search.motorbike_models import MOTORBIKE_BRANDS
 from sniffer.search.vocabulary import (
     city_variants,
     model_brand,
+    model_category,
     model_named_in,
     model_transmission,
 )
@@ -95,6 +101,72 @@ _CATEGORY_RULES: tuple[tuple[Category, re.Pattern[str]], ...] = (
 # получал Airblade (жалоба владельца 02.09.2026).
 _BRAND_RE = re.compile(r"\b(?:" + "|".join(MOTORBIKE_BRANDS) + r")\b", re.IGNORECASE)
 
+# Буквы, которыми кончается русское слово в именительном падеже и не кончается в
+# косвенном: «механика» → «механику». Прибавляемое окончание добирает `\w*`, а
+# ЗАМЕНЯЕМОЕ — нет, поэтому у кириллического слова хвост отбрасывается. Тот же
+# приём, что у «й» в названии города; здесь список шире, потому что слова
+# словаря рынка — существительные и прилагательные, а не одни топонимы.
+_CYRILLIC_ENDING = "аяоёеиыуюэьй"
+_MIN_STEM = 4
+
+
+@dataclass(frozen=True, slots=True)
+class _AttributeRule:
+    """Одно написание одного значения атрибута: чей он, что значит и как пишется."""
+
+    category: Category
+    attribute: str
+    value: str
+    term: str
+    pattern: re.Pattern[str]
+
+
+def _term_pattern(term: str) -> re.Pattern[str]:
+    """Слово рынка → как его пишет клиент: «автомат» ловит и «на автомате»."""
+    head, _, tail = term.rpartition(" ")
+    if _cyrillic(tail) and len(tail) > _MIN_STEM and tail[-1] in _CYRILLIC_ENDING:
+        tail = tail[:-1]
+    # Пробел в термине значит «пробел здесь может быть, а может не быть» — та же
+    # дисциплина, что у написаний модели («air blade» и «airblade» — одно имя).
+    escaped = re.escape(f"{head} {tail}" if head else tail).replace(r"\ ", r"\s*")
+    return re.compile(rf"\b{escaped}\w*", re.IGNORECASE)
+
+
+def _cyrillic(word: str) -> bool:
+    return any("а" <= letter.lower() <= "я" or letter.lower() == "ё" for letter in word)
+
+
+def _rules(
+    category: Category, attribute: str, values: dict[str, LangTerms]
+) -> list[_AttributeRule]:
+    return [
+        _AttributeRule(category, attribute, value, term, _term_pattern(term))
+        for value, langs in values.items()
+        for terms in langs.values()
+        for term in terms
+    ]
+
+
+# Слова значений атрибутов НЕ переписаны здесь вторым списком: «автомат»,
+# «вариатор», «tay ga», «côn tay» — то же знание, которым коробка ищется в тексте
+# объявления, и разъехаться двум копиям негде. Разница только в окончаниях, и её
+# добирает `_term_pattern`.
+#
+# Плоский кортеж, отсортированный по ДЛИНЕ написания: «полуавтомат» содержит
+# «автомат», «semi-automatic» содержит «automatic», и решать, что назвал клиент,
+# обязано написание, а не порядок строк в таблице (то же правило, что у моделей).
+_ATTRIBUTE_RULES: tuple[_AttributeRule, ...] = tuple(
+    sorted(
+        (
+            rule
+            for category, attributes in ATTRIBUTE_TERMS.items()
+            for attribute, values in attributes.items()
+            for rule in _rules(category, attribute, values)
+        ),
+        key=lambda rule: (-len(rule.term), rule.term),
+    )
+)
+
 
 def _city_pattern(slug: str) -> re.Pattern[str]:
     """Город ищем написаниями из справочника, а не слагом: клиент пишет «в Нячанге»."""
@@ -132,8 +204,15 @@ def parse_query(text: str, *, default_city: str = "") -> Passport:
     """Разбор без ввода-вывода: те же слова дают тот же паспорт всегда."""
     query = " ".join(text.split())[:MAX_QUERY_CHARS]
     intent = detect_intent(query)
-    category = detect_category(query)
+    said = detect_category(query)
     city = detect_city(query)
+    # Модель ищется тем, что назвал КЛИЕНТ: у жилья моделей нет, и «сниму
+    # квартиру Vision» — это название дома. Выведи категорию раньше, и таблица
+    # начала бы читать сама себя.
+    model = detect_model(query, said)
+    # Категория следует из модели, но ложится только на пустое место — та же
+    # дисциплина, что у марки и коробки: сказанное клиентом главнее выведенного.
+    category = said or model_category(model)
     if intent is None:
         intent = Intent.RENT if category in _RENTED_CATEGORIES else Intent.BUY
 
@@ -146,12 +225,14 @@ def parse_query(text: str, *, default_city: str = "") -> Passport:
     if engine_cc is not None:
         attributes["engine_cc"] = engine_cc
     budget = parse_budget(without_engine_cc(query), intent=intent)
-    model = detect_model(query, category)
     if model:
         attributes["model"] = model
     brand = detect_brand(query, category)
     if brand:
         attributes["brand"] = brand
+    transmission = detect_transmission(query, category)
+    if transmission:
+        attributes["transmission"] = transmission
 
     known_city = city or default_city or None
     return Passport(
@@ -210,6 +291,34 @@ def detect_model(text: str, category: Category | None = None) -> str | None:
     поиск по марке.
     """
     return model_named_in(category, text)
+
+
+def detect_transmission(text: str, category: Category | None = None) -> str | None:
+    """Коробка, названная словом: «скутер автомат», «на механике», «tay ga», «xe số».
+
+    Слова берутся из словаря рынка (`ATTRIBUTE_TERMS`) — второго списка здесь
+    нет намеренно: это то же знание, которым коробка ищется в тексте объявления,
+    и две копии однажды разъедутся. Разъезд не гипотетический: пока разбор
+    ответов держал свой список, «xe số» значило в нём механику, а в словаре
+    рынка — полуавтомат, и заметить это по тексту было нельзя.
+
+    Категорию спрашивает таблица, а не ветка в коде: у жилья коробки нет,
+    поэтому «квартира со стиральной машиной автомат» ничего не заполняет.
+    Неизвестная категория читает все, какие есть, — та же дисциплина, что у
+    модели: на вопрос «автомат или механика?» клиент отвечает одним словом, и
+    категории в этом слове нет.
+    """
+    return _attribute_named_in(category, "transmission", text)
+
+
+def _attribute_named_in(category: Category | None, attribute: str, text: str) -> str | None:
+    """Значение атрибута, названное в тексте. Длинное написание побеждает."""
+    for rule in _ATTRIBUTE_RULES:
+        if rule.attribute != attribute or (category is not None and rule.category is not category):
+            continue
+        if rule.pattern.search(text):
+            return rule.value
+    return None
 
 
 def with_model_facts(attributes: dict[str, Any]) -> dict[str, Any]:

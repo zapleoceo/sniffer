@@ -12,13 +12,19 @@
 причиной. Тесты держат их врозь (`wish` идёт под `xfail`), иначе выбор был бы
 между зелёным прогоном и честным описанием качества.
 
+Сегодня `wish` нет ни у одного сценария, и это не значит, что механизм лишний:
+оба пожелания замера 02.09.2026 — коробка из первичного запроса и категория из
+модели — выполнены, и их поля переехали в `expect`, где регресс красит тест.
+Оставить их пожеланиями значило бы называть работой то, что уже сделано;
+сторожит этот переезд `test_a_fulfilled_wish_moves_to_the_expectations`.
+
 Устройство сценария — в `script.py`.
 """
 
 from __future__ import annotations
 
 from sniffer.domain.dialogue import SKIP, Feedback
-from sniffer.simulation.script import Reacts, Says, Scenario, Taps, Wish
+from sniffer.simulation.script import Reacts, Says, Scenario, Taps
 
 SCENARIOS: tuple[Scenario, ...] = (
     Scenario(
@@ -105,16 +111,15 @@ SCENARIOS: tuple[Scenario, ...] = (
         key="scooter_automatic_500",
         title="скутер автомат до 500 долларов",
         steps=(Says("скутер автомат до 500 долларов"),),
-        expect={"category": "motorbike", "budget.max": 500.0, "budget.currency": "USD"},
-        wish=Wish(
-            fields={"attributes.transmission": "automatic"},
-            why=(
-                "коробка в первичном запросе не разбирается: intake_rules читает "
-                "марку и объём, но не трансмиссию. Клиент сказал «автомат», а бот "
-                "предлагает под карточками кнопку «нужен автомат» — спрашивает то, "
-                "что уже услышал"
-            ),
-        ),
+        # Коробка названа словом, и разбор обязан её услышать. Пока не слышал,
+        # бот предлагал под карточками кнопку «нужен автомат» — то есть
+        # переспрашивал то, что клиент уже сказал.
+        expect={
+            "category": "motorbike",
+            "budget.max": 500.0,
+            "budget.currency": "USD",
+            "attributes.transmission": "automatic",
+        },
     ),
     Scenario(
         key="motorbike_manual_exciter",
@@ -198,23 +203,16 @@ SCENARIOS: tuple[Scenario, ...] = (
         key="cyrillic_brand",
         title="ищу хонду вижн до 400 (марка кириллицей)",
         steps=(Says("ищу хонду вижн до 400"),),
-        max_questions_before_results=1,
-        expect_results=None,
+        # Ни одного вопроса: предмет назван моделью. Пока категория из модели не
+        # выводилась, бот спрашивал «что ищем?» у клиента, который уже ответил, —
+        # это и есть та «тупизна», на которую жаловался владелец.
         expect={
+            "category": "motorbike",
             "budget.max": 400.0,
             # Русскоязычный Нячанг пишет марку кириллицей — «хонда», «вижн», —
             # и разбор это уже умеет.
             "attributes.brand": "honda",
             "attributes.model": "vision",
         },
-        wish=Wish(
-            fields={"category": "motorbike"},
-            why=(
-                "модель узнана (vision), а категория — нет, и бот спрашивает "
-                "«что ищем?». Vision — мотобайк по самому модельному ряду, категория "
-                "следует из него однозначно. Вопрос там, где предмет уже назван, — "
-                "это ровно та «тупизна», на которую жаловался владелец"
-            ),
-        ),
     ),
 )

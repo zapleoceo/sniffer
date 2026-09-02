@@ -339,6 +339,13 @@ def _patterns(models: tuple[MotorbikeModel, ...]) -> ModelPatterns:
 _MODELS: dict[str, MotorbikeModel] = {
     model.slug: model for models in MODELS_BY_CATEGORY.values() for model in models
 }
+# Категория модели — обратный ход по ТОЙ ЖЕ таблице, а не вторая рядом. Модельный
+# ряд принадлежит категории (`MODELS_BY_CATEGORY`), значит ответ на «чей это
+# предмет» в ней уже есть. Заведи вторую таблицу — она однажды разъедется с
+# первой, и строка «Vision — это жильё» будет выглядеть данными, а не опечаткой.
+_CATEGORY_BY_MODEL: dict[str, Category] = {
+    model.slug: category for category, models in MODELS_BY_CATEGORY.items() for model in models
+}
 _PATTERNS_BY_CATEGORY: dict[Category, ModelPatterns] = {
     category: _patterns(models) for category, models in MODELS_BY_CATEGORY.items()
 }
@@ -383,6 +390,17 @@ def model_brand(model: str | None) -> str | None:
     """Производитель модели: `lead` → `honda`. Незнакомая модель — `None`."""
     known = _MODELS.get(str(model or ""))
     return known.brand if known else None
+
+
+def model_category(model: str | None) -> Category | None:
+    """Что за предмет назван моделью: `vision` → `motorbike`. Незнакомая — `None`.
+
+    Имя модели называет предмет не менее однозначно, чем слово «скутер»:
+    Vision, Lead, Exciter не бывают ничем другим. Поэтому клиента, назвавшего
+    модель, спрашивать «что ищем?» незачем — вопрос там, где предмет уже назван,
+    и есть та «тупизна», на которую жаловался владелец.
+    """
+    return _CATEGORY_BY_MODEL.get(str(model or ""))
 
 
 def model_transmission(model: str | None) -> str | None:
