@@ -112,6 +112,13 @@ MODELS_BY_CATEGORY: dict[Category, tuple[MotorbikeModel, ...]] = {
 # оба списка были одним, из-за чего «honda lead» разбиралось как «honda».
 # Vespa в этом списке нет намеренно: это модельная линейка Piaggio, и марка у
 # неё выводится таблицей выше (у Chotot они и вовсе один код — 3).
+#
+# Список обязан покрывать марки, которые РЕАЛЬНО есть на рынке, иначе неполнота
+# читается как «неизвестная марка» и молча пропускает чужое: на «ямаха» приходил
+# Kymco, потому что его тут не было (realcheck 03.09.2026). Числа — замер по базе
+# Нячанга: honda 1382, yamaha 1353, sym 320, suzuki 189, kymco 147, kawasaki 29,
+# vinfast 26, piaggio 15, ducati 7, daelim 5. Порог включения — присутствие на
+# рынке, а не размер: пять Daelim это тоже пять чужих карточек на запрос о другом.
 MOTORBIKE_BRANDS: tuple[str, ...] = (
     "honda",
     "yamaha",
@@ -119,4 +126,8 @@ MOTORBIKE_BRANDS: tuple[str, ...] = (
     "piaggio",
     "sym",
     "vinfast",
+    "kymco",
+    "kawasaki",
+    "ducati",
+    "daelim",
 )

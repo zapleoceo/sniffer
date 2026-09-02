@@ -251,6 +251,30 @@ SCENARIOS: tuple[Scenario, ...] = (
         expect={"category": "motorbike", "attributes.transmission": "automatic"},
     ),
     Scenario(
+        key="yamaha_not_honda_kymco",
+        title="ямаха скутер (в чате висят Honda и Kymco)",
+        steps=(Says("ямаха скутер"),),
+        # realcheck 03.09.2026: на «ямаха» приходили Honda и Kymco — поля марки у
+        # чата нет, а живой отсев марку не читал (словарь фраз, где марок нет
+        # вовсе). Ямаха в выдаче остаться ОБЯЗАНА, иначе лечение хуже болезни;
+        # чужое — уйти. Мимо запроса судит `fit.py` правдой о лоте, не баллом.
+        expect={"category": "motorbike", "attributes.brand": "yamaha"},
+    ),
+    Scenario(
+        key="automatic_not_manual",
+        title="скутер автомат до 700 (в чате висит механика)",
+        steps=(Says("скутер автомат до 700"),),
+        # Та же болезнь по оси коробки: на «автомат» приходила механика (R15,
+        # Winner). Механика в чате дешёвая — проходит бюджет и обязана уйти
+        # отсевом по коробке, а не отсеяться ценой, оставив ось непроверенной.
+        expect={
+            "category": "motorbike",
+            "attributes.transmission": "automatic",
+            "budget.max": 700.0,
+            "budget.currency": "USD",
+        },
+    ),
+    Scenario(
         key="empty_politeness",
         title="мутно: помоги пожалуйста",
         steps=(Says("помоги пожалуйста"),),

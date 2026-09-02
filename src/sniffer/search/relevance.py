@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from math import exp
 
 from sniffer.domain.passport import Budget, Currency, Passport
-from sniffer.search.intake_rules import detect_category
+from sniffer.search.intake_rules import detect_brand, detect_category, detect_transmission
 from sniffer.search.plan import SearchPlan, SearchTask
 from sniffer.search.vocabulary import attribute_phrases, models_named_in
 from sniffer.sources.base import RawItem
@@ -55,19 +55,20 @@ def rank_items(
     не лечит — она ставит мусор ниже, а показываем мы первые пять, и когда
     лучшего нет, первыми пятью оказывается мусор.
 
-    Отсев трёхступенчатый, и ступени отменяются по-разному:
+    Отсев в две очереди, и они отменяются по-разному:
 
-    * **чужая категория** — не тот предмет вообще: комната и велосипед в выдаче
-      скутеров. Ступень не отменяется, обоснование — у `_other_category`;
-    * **чужая модель** — не низкий балл, а брак выдачи (spec-v2, 3.2): клиент
-      назвал Lead, значит Airblade это не «похуже», а не тот предмет. Ступень не
-      отменяется: если Lead на рынке нет, честнее пустой ответ, который прямо
-      советует «попробуйте без марки» (`bot/conversation.NOTHING_FOUND`), чем
-      пять Airblade — ровно то, на что жаловался владелец;
-    * **совсем старое** — догадка о живости, а не факт о предмете, и лот старше
-      порога всё-таки бывает жив. Поэтому ступень отменяется, когда после неё
-      пусто: пустая выдача хуже слабой, а карточка сама скажет «объявлению N
-      дней, могло быть продано» (`bot/cards.py`).
+    * **противоречие запросу** (`_contradicts`) — чужая категория, чужая модель,
+      чужая марка, чужая коробка, цена явно выше потолка. Всё это факты о
+      предмете, прочитанные из его собственных слов, а не догадки: клиент назвал
+      Lead — Airblade не «похуже», а не тот предмет (spec-v2, 3.2). Очередь НЕ
+      отменяется: если подходящего на рынке нет, честнее пустой ответ, который
+      прямо советует «попробуйте без марки» (`NOTHING_FOUND`), чем пять чужих
+      карточек — ровно то, на что жаловался владелец. Неизвестное свойство
+      противоречием не считается: лот, не назвавший марку/коробку, остаётся;
+    * **совсем старое** (`_too_old`) — догадка о живости, а не факт о предмете, и
+      лот старше порога всё-таки бывает жив. Поэтому очередь отменяется, когда
+      после неё пусто: пустая выдача хуже слабой, а карточка сама скажет
+      «объявлению N дней, могло быть продано» (`bot/cards.py`).
 
     Порога по итоговому баллу здесь нет намеренно, хотя в подписке он есть
     (`matching.MATCH_MIN_SCORE`). Там `posted_at` у карточки обязателен, а в
@@ -106,16 +107,31 @@ def _contradicts(item: RawItem, passport: Passport, usd_vnd: float | None) -> bo
 
 
 def _contrary_attribute(passport: Passport, field: str, text: str) -> bool:
+    """Текст лота ЯВНО называет другое известное значение свойства.
+
+    Марку и коробку лота читаем теми же детекторами, что читают запрос клиента
+    (`detect_brand` / `detect_transmission`), а не словарём фраз. Через словарь
+    это не работало и молча: слов марки в `ATTRIBUTE_TERMS` нет вовсе (там
+    свойства — коробка, документы, состояние), поэтому марка в тексте лота не
+    находилась НИКОГДА, и фильтр по марке был мёртв — Honda приходила на «ямаха»
+    (realcheck 03.09.2026). Детектор ещё и не зависит от категории: на мутном
+    «надёжное ямаха» без категории фразы не разрешались, и фильтр молчал вторично.
+
+    Неизвестность — не противоречие: лот, не назвавший марку/коробку, остаётся
+    (та же дисциплина, что у категории и модели). Марку `detect_brand` выводит и
+    из модели: «Exciter» — Yamaha, поэтому на запрос honda он отсеётся, даже не
+    написав «yamaha» словом.
+    """
     wanted = passport.attributes.get(field)
-    if not wanted or _mentions(passport, field, wanted, text):
+    if not wanted:
         return False
-    # Противоречие доказано, только если текст явно называет другое известное
-    # значение. Отсутствие свойства остаётся неизвестностью.
-    alternatives = {
-        "brand": ("honda", "yamaha", "vespa", "suzuki", "sym"),
-        "transmission": ("automatic", "manual", "semi"),
-    }[field]
-    return any(_mentions(passport, field, value, text) for value in alternatives if value != wanted)
+    if field == "brand":
+        found = detect_brand(text, passport.category)
+    elif field == "transmission":
+        found = detect_transmission(text, passport.category)
+    else:
+        return False
+    return found is not None and str(found) != str(wanted)
 
 
 _CC_RE = re.compile(r"(?<!\d)(\d{2,4})\s*(?:cc|куб(?:ов|ик(?:ов|а)?)?)\b", re.IGNORECASE)
@@ -283,6 +299,12 @@ def _mentions(passport: Passport, field: str, value: object, haystack: str) -> b
     """
     if field == "model":
         return str(value) in models_named_in(passport.category, haystack)
+    # Марка, как и модель, — имя, а не свойство рынка: слов в `ATTRIBUTE_TERMS`
+    # у неё нет, ищется тем же детектором. Иначе «brand» попадала бы в
+    # знаменатель доли атрибутов, никогда не попадая в числитель, и роняла бы
+    # балл каждого лота.
+    if field == "brand":
+        return detect_brand(haystack, passport.category) == str(value)
     phrases = [
         phrase
         for lang in ("ru", "vi", "en")

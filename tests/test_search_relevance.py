@@ -129,3 +129,109 @@ def test_a_request_without_a_category_filters_nothing() -> None:
     room = item("Комната с общей кухней", price=4_500_000)
 
     assert rank_items(passport(category=None), [room], usd_vnd=RATE, now=NOW) == [room]
+
+
+# ── чужая марка и коробка тоже не доходят ──────────────────────────────────
+
+
+def test_a_yamaha_request_drops_a_honda_lot() -> None:
+    """realcheck 03.09.2026: на «ямаха» приходили Honda и Kymco.
+
+    Марку лота фильтр читал словарём фраз, где марок нет ВОВСЕ (там свойства —
+    коробка, документы, состояние), поэтому фильтр по марке был мёртв: Honda
+    приходила на «ямаха». Симуляция это пропускала — состязательной смеси в её
+    рынке не было. Теперь марка лота читается тем же детектором, что и запрос.
+    """
+    honda = item("off_brand", price=12_000_000, text="Honda Vision 2019, автомат")
+    yamaha = item("on_brand", price=12_000_000, text="Yamaha Janus, автомат")
+
+    ordered = rank_items(
+        passport(attributes={"brand": "yamaha"}), [honda, yamaha], usd_vnd=RATE, now=NOW
+    )
+
+    assert [candidate.external_id for candidate in ordered] == ["on_brand"]
+
+
+def test_a_yamaha_request_drops_a_kymco_lot() -> None:
+    """Kymco — 147 объявлений в базе Нячанга (motorbike_models).
+
+    Пока его не было в словаре марок, он читался «неизвестной маркой» и молча
+    проходил на «ямаха»: неполнота словаря неотличима от «марка не названа».
+    """
+    kymco = item("off_brand", price=12_000_000, text="Kymco Like 125, автомат")
+    yamaha = item("on_brand", price=12_000_000, text="Yamaha Nouvo, автомат")
+
+    ordered = rank_items(
+        passport(attributes={"brand": "yamaha"}), [kymco, yamaha], usd_vnd=RATE, now=NOW
+    )
+
+    assert [candidate.external_id for candidate in ordered] == ["on_brand"]
+
+
+def test_a_lot_with_no_readable_brand_survives_a_brand_request() -> None:
+    """Неизвестное — не противоречие: лот, не назвавший марку, остаётся.
+
+    Та же дисциплина, что у категории и модели. Иначе фильтр по марке терял бы
+    половину чата, где продавец пишет «продам байк», а бренд не называет.
+    """
+    silent = item("silent", price=12_000_000, text="Продам байк, один хозяин, автомат")
+
+    assert rank_items(passport(attributes={"brand": "honda"}), [silent], usd_vnd=RATE, now=NOW) == [
+        silent
+    ]
+
+
+def test_a_honda_request_drops_a_yamaha_named_only_by_its_model() -> None:
+    """Марку `detect_brand` выводит и из модели: «Exciter» — это Yamaha.
+
+    Поэтому лот отсеётся на запрос honda, даже не написав «yamaha» словом, —
+    ровно как марка выводится из модели в разборе запроса клиента.
+    """
+    exciter = item("by_model", price=12_000_000, text="Продам Exciter 155, срочно")
+
+    assert (
+        rank_items(passport(attributes={"brand": "honda"}), [exciter], usd_vnd=RATE, now=NOW) == []
+    )
+
+
+def test_an_automatic_request_drops_manual_lots_in_either_language() -> None:
+    """realcheck: на «автомат» приходила механика (Winner, R15).
+
+    Коробку лота фильтр читал тем же несуществующим словарём фраз, что и марку.
+    Обе оси проверяем разом: «механика» и вьетнамское «côn tay» — одно знание.
+    """
+    ru_manual = item("ru_manual", price=12_000_000, text="Yamaha Exciter, механика")
+    vi_manual = item("vi_manual", price=12_000_000, text="Sirius côn tay, chính chủ")
+    automatic = item("kept", price=12_000_000, text="Honda Lead, автомат")
+
+    ordered = rank_items(passport(), [ru_manual, vi_manual, automatic], usd_vnd=RATE, now=NOW)
+
+    assert [candidate.external_id for candidate in ordered] == ["kept"]
+
+
+def test_an_automatic_request_keeps_a_lot_silent_on_the_gearbox() -> None:
+    """Отсутствие слова о коробке — не механика.
+
+    Chotot мог отобрать коробку структурным полем, а продавец не обязан
+    повторять её в заголовке. Молчание — не несовпадение (spec-v2, 3.3).
+    """
+    silent = item("silent", price=12_000_000, text="Honda Vision 2019, один хозяин")
+
+    assert rank_items(passport(), [silent], usd_vnd=RATE, now=NOW) == [silent]
+
+
+def test_a_yamaha_request_keeps_every_yamaha() -> None:
+    """Контроль: фильтр отсекает чужое, а не всё подряд.
+
+    Без этой проверки «починка», роняющая заодно и верные Ямахи, прошла бы
+    зелёной: лечение оказалось бы хуже болезни, и заметить это было бы нечем.
+    """
+    janus = item("janus", price=12_000_000, text="Yamaha Janus, автомат")
+    nouvo = item("nouvo", price=12_000_000, text="Yamaha Nouvo, автомат")
+    exciter = item("exciter", price=12_000_000, text="Yamaha Exciter, механика")
+
+    got = rank_items(
+        passport(attributes={"brand": "yamaha"}), [janus, nouvo, exciter], usd_vnd=RATE, now=NOW
+    )
+
+    assert {candidate.external_id for candidate in got} == {"janus", "nouvo", "exciter"}
