@@ -30,6 +30,7 @@ from sniffer.pipeline.archive import (
     classify,
     listing_from,
 )
+from sniffer.search import vocabulary
 from sniffer.search.intake_rules import parse_query
 
 log = structlog.get_logger(__name__)
@@ -77,7 +78,10 @@ class ArchivePipeline:
     async def _one(self, raw: RawMessage, session: AsyncSession) -> int:
         repo = RawMessageRepository(session)
         assert raw.id is not None
-        result = classify(raw)
+        # Знание «какими словами/марками/моделями зовётся категория» внедряем из
+        # поиска: воркер — процесс, композирующий слои, и он же берёт отсюда
+        # `parse_query`. Это не ребро pipeline→search, а его отсутствие.
+        result = classify(raw, category_hints=vocabulary.category_hints)
         if not result.passed:
             await repo.set_stage([raw.id], STAGE_REJECTED, gate_signals=result.as_signals())
             return 1

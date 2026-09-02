@@ -12,7 +12,7 @@ from decimal import Decimal
 
 from sniffer.domain.prices import price_hint
 from sniffer.domain.records import Chat, Listing, RawMessage
-from sniffer.pipeline.gate import GateResult, gate
+from sniffer.pipeline.gate import CategoryDetector, GateResult, gate
 
 STAGE_GATED = "gated"
 STAGE_EXTRACTED = "extracted"
@@ -23,9 +23,13 @@ STAGE_REJECTED = "rejected"
 STAGE_DUPLICATE = "duplicate"
 
 
-def classify(raw: RawMessage) -> GateResult:
-    """Один гейт на архив и на будущую обработку задач."""
-    return gate(raw.text)
+def classify(raw: RawMessage, *, category_hints: CategoryDetector | None = None) -> GateResult:
+    """Один гейт на архив и на будущую обработку задач.
+
+    Детектор категорий внедряется процессом (воркер даёт словарь поиска), а не
+    берётся здесь: воронка про поиск не знает — это обратная зависимость слоёв.
+    """
+    return gate(raw.text, category_hints=category_hints)
 
 
 def listing_from(
