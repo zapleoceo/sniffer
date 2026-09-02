@@ -389,3 +389,18 @@ def test_papers_are_read_from_the_query() -> None:
 def test_papers_are_a_soft_signal_not_a_gearbox() -> None:
     """Документы — не коробка: отсутствие слова не заполняет и не отсеивает."""
     assert "papers" not in parse_query("нужен скутер honda lead", default_city=CITY).attributes
+
+
+def test_a_malformed_number_does_not_crash_the_parse() -> None:
+    """Разбор запроса зовётся на КАЖДОМ сообщении рынка и не вправе падать.
+
+    Регексп суммы жадный и хватает почти-числа: живой отказ 02.09.2026 —
+    «13.000.0002» (лишняя цифра в группе разрядов) ронял float() и весь
+    parse_query, а с ним воркер на этом объявлении. Такая сумма просто не
+    считается названной. Валидные числа рядом по-прежнему читаются.
+    """
+    assert parse_query("Honda Lead 13.000.0002 донг", default_city=CITY).budget.max is None
+    assert parse_query("квартира 1.2.3 млн в нячанге", default_city=CITY).budget.max is None
+    # Контроль: настоящий разделитель тысяч и дробь не сломаны.
+    assert parse_query("скутер 5.000.000 VND", default_city=CITY).budget.max == 5_000_000
+    assert parse_query("до 1,5 млн", default_city=CITY).budget.max == 1_500_000
