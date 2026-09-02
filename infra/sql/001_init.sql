@@ -244,8 +244,13 @@ CREATE TABLE IF NOT EXISTS users (
     username    TEXT,
     lang        TEXT        NOT NULL DEFAULT 'ru',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    is_blocked  BOOLEAN     NOT NULL DEFAULT FALSE
+    is_blocked  BOOLEAN     NOT NULL DEFAULT FALSE,
+    active_passport_root  BIGINT,
+    editing_passport_root BIGINT
 );
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS active_passport_root BIGINT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS editing_passport_root BIGINT;
 
 -- Паспорт неизменяем: правка поля создаёт новую версию с тем же root_id.
 CREATE TABLE IF NOT EXISTS passports (

@@ -28,7 +28,14 @@ from sniffer.bot.conversation import (
     Reply,
 )
 from sniffer.bot.handlers import search as handler
-from sniffer.bot.keyboards import AnswerCallback, FeedbackCallback, markup
+from sniffer.bot.keyboards import (
+    AnswerCallback,
+    FeedbackCallback,
+    RequestsCallback,
+    markup,
+    request_actions,
+    requests_markup,
+)
 from sniffer.bot.store import Client, Dialogue
 from sniffer.broker import usage
 from sniffer.domain.dialogue import (
@@ -40,7 +47,7 @@ from sniffer.domain.dialogue import (
     replay,
 )
 from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
-from sniffer.domain.records import PassportEvent, StoredPassport
+from sniffer.domain.records import PassportEvent, QueryOverview, StoredPassport
 from sniffer.search.intake_rules import parse_query
 from sniffer.search.vocabulary import served_cities
 from sniffer.sources.base import RawItem
@@ -56,24 +63,41 @@ class MemoryStore:
         self.rows: list[StoredPassport] = []
         self.events: list[PassportEvent] = []
         self._users: dict[int, int] = {}
+        self._active: dict[int, int] = {}
+        self._editing: set[int] = set()
 
     async def load(self, client: Client) -> Dialogue:
         user_id = self._users.setdefault(client.tg_user_id, len(self._users) + 1)
+        active = self._active.get(user_id)
         current = next(
-            (row for row in reversed(self.rows) if row.user_id == user_id and row.is_current), None
+            (
+                row
+                for row in reversed(self.rows)
+                if row.user_id == user_id
+                and row.is_current
+                and (active is None or row.root == active)
+            ),
+            None,
         )
         if current is None:
             return Dialogue(user_id=user_id)
         root = current.root
         chain = {row.id for row in self.rows if row.id == root or row.root_id == root}
         events = [event for event in self.events if event.passport_id in chain]
-        return Dialogue(user_id=user_id, passport=current, state=replay(events))
+        return Dialogue(
+            user_id=user_id,
+            passport=current,
+            state=replay(events),
+            editing=current.root in self._editing,
+        )
 
     async def start(self, dialogue: Dialogue, passport: Passport) -> Dialogue:
         stored = StoredPassport(
             id=len(self.rows) + 1, user_id=dialogue.user_id, version=1, passport=passport
         )
         self.rows.append(stored)
+        self._active[dialogue.user_id] = stored.root
+        self._editing.discard(stored.root)
         self._event(stored.id, EVENT_USER_MESSAGE, {"text": passport.raw_query})
         return Dialogue(user_id=dialogue.user_id, passport=stored, state=DialogueState())
 
@@ -94,6 +118,8 @@ class MemoryStore:
             passport=passport,
         )
         self.rows.append(stored)
+        self._active[dialogue.user_id] = root
+        self._editing.discard(root)
         self._event(stored.id, kind, payload)
         return Dialogue(
             user_id=dialogue.user_id, passport=stored, state=advance(dialogue.state, kind, payload)
@@ -103,6 +129,17 @@ class MemoryStore:
         assert dialogue.passport is not None
         self._event(dialogue.passport.id, kind, payload)
         return replace(dialogue, state=advance(dialogue.state, kind, payload))
+
+    async def select(self, dialogue: Dialogue, root: int, *, editing: bool = False) -> Dialogue:
+        owned = any(row.user_id == dialogue.user_id and row.root == root for row in self.rows)
+        if not owned:
+            return dialogue
+        self._active[dialogue.user_id] = root
+        if editing:
+            self._editing.add(root)
+        else:
+            self._editing.discard(root)
+        return await self.load(CLIENT)
 
     def _event(self, passport_id: int, kind: str, payload: dict[str, Any]) -> None:
         self.events.append(PassportEvent(passport_id=passport_id, kind=kind, payload=payload))
@@ -247,6 +284,54 @@ async def test_full_passport_goes_straight_to_search() -> None:
     assert replies.sent[1].question is None
 
 
+async def test_selected_request_survives_a_newer_second_request() -> None:
+    store = MemoryStore()
+    first = await store.start(Dialogue(user_id=1), bike(raw_query="Honda Vision"))
+    second = await store.start(first, bike(raw_query="Yamaha NVX"))
+
+    selected = await store.select(second, first.passport.root if first.passport else 0)
+    loaded = await store.load(CLIENT)
+
+    assert selected.passport is not None and selected.passport.passport.raw_query == "Honda Vision"
+    assert loaded.passport is not None and loaded.passport.root == selected.passport.root
+
+
+async def test_edit_revises_the_selected_request_not_the_newest_one() -> None:
+    store = MemoryStore()
+    first = await store.start(Dialogue(user_id=1), bike(raw_query="Honda Vision"))
+    second = await store.start(first, bike(raw_query="Yamaha NVX"))
+    assert first.passport is not None
+    await store.select(second, first.passport.root, editing=True)
+    talker = talk(store, bike(raw_query="Honda Lead до 20 млн"), items=[])
+
+    await talker.on_text(CLIENT, "Honda Lead до 20 млн", Replies())
+
+    loaded = await store.load(CLIENT)
+    assert loaded.passport is not None
+    assert loaded.passport.root == first.passport.root
+    assert loaded.passport.version == 2
+    assert loaded.passport.passport.raw_query == "Honda Lead до 20 млн"
+    assert not loaded.editing
+
+
+async def test_repeat_searches_the_selected_request_without_a_new_version() -> None:
+    store = MemoryStore()
+    first = await store.start(Dialogue(user_id=1), bike(raw_query="Honda Vision"))
+    await store.start(first, bike(raw_query="Yamaha NVX"))
+    seen: list[str] = []
+
+    async def finder(passport: Passport) -> Found:
+        seen.append(passport.raw_query)
+        return Found(items=[])
+
+    talker = talk(store, bike(), finder=finder)
+    assert first.passport is not None
+    await talker.repeat(CLIENT, first.passport.root, Replies())
+
+    assert seen == ["Honda Vision"]
+    assert len(store.rows) == 2
+
+
 async def test_a_scooter_request_searches_without_a_form() -> None:
     """Жалоба владельца дословно: «нужен скутер» — это выдача, а не анкета.
 
@@ -281,6 +366,7 @@ async def test_cards_carry_the_feedback_buttons() -> None:
 
     kinds = {option.value for option in replies.sent[-1].feedback}
     assert {Feedback.PRICEY.value, Feedback.WRONG.value} <= kinds
+    assert replies.sent[-1].passport_root == 1
 
 
 async def test_nothing_found_is_said_out_loud() -> None:
@@ -855,12 +941,27 @@ async def test_handler_draws_the_buttons(monkeypatch: pytest.MonkeyPatch) -> Non
 
 def test_answer_and_feedback_fit_the_callback_limit() -> None:
     """В callback_data влезает 64 байта — потому по проводу едут короткие ключи."""
-    packed = AnswerCallback(code="trans", value="automatic").pack()
-    feedback = FeedbackCallback(kind=Feedback.PRICEY.value).pack()
+    packed = AnswerCallback(code="trans", value="automatic", root=7).pack()
+    feedback = FeedbackCallback(kind=Feedback.PRICEY.value, root=7).pack()
 
     assert len(packed.encode()) <= 64
     assert len(feedback.encode()) <= 64
     assert AnswerCallback.unpack(packed).value == "automatic"
+
+
+def test_request_menu_is_compact_and_exposes_only_relevant_monitor_action() -> None:
+    active = QueryOverview(root=7, passport=bike(raw_query="Honda Vision"), monitoring="active")
+    paused = QueryOverview(root=8, passport=bike(raw_query="Yamaha NVX"), monitoring="paused")
+
+    listing = requests_markup([active, paused])
+    actions = request_actions(active)
+    labels = [button.text for row in actions.inline_keyboard for button in row]
+
+    assert len(listing.inline_keyboard) == 2
+    assert "⏸ Выключить мониторинг" in labels
+    assert "▶️ Включить мониторинг" not in labels
+    packed = RequestsCallback(action="search", root=active.root).pack()
+    assert len(packed.encode()) <= 64
 
 
 def test_cyrillic_value_is_measured_in_bytes_not_characters() -> None:
@@ -870,13 +971,13 @@ def test_cyrillic_value_is_measured_in_bytes_not_characters() -> None:
     единственный вход, который отличит верный подсчёт от посимвольного: 27 букв
     ещё влезают (63 байта при 36 символах), 28-я уже нет (65 байт при 37).
     """
-    fits = AnswerCallback(code="cond", value="я" * 27).pack()
+    fits = AnswerCallback(code="cond", value="я" * 25, root=7).pack()
 
     assert len(fits) < len(fits.encode()), "символов меньше, чем байтов"
-    assert len(fits.encode()) == 63
+    assert len(fits.encode()) <= 64
 
     with pytest.raises(ValueError, match="too long"):
-        AnswerCallback(code="cond", value="я" * 28).pack()
+        AnswerCallback(code="cond", value="я" * 29, root=7).pack()
 
 
 def test_reply_without_buttons_has_no_keyboard() -> None:

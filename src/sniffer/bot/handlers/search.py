@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import structlog
 from aiogram import F, Router
-from aiogram.filters import CommandStart
+from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     CallbackQuery,
     LabeledPrice,
@@ -17,12 +17,21 @@ from aiogram.types import (
     PreCheckoutQuery,
 )
 
-from sniffer.bot import billing, subscription
+from sniffer.bot import billing, query_menu, subscription
 from sniffer.bot import voice as voice_input
 from sniffer.bot.conversation import NO_REQUEST_YET, Conversation, Reply, Send
-from sniffer.bot.keyboards import AnswerCallback, FeedbackCallback, SubscribeCallback, markup
+from sniffer.bot.keyboards import (
+    AnswerCallback,
+    FeedbackCallback,
+    RequestsCallback,
+    SubscribeCallback,
+    markup,
+    request_actions,
+    requests_markup,
+)
 from sniffer.bot.store import Client, PassportStore
 from sniffer.domain.dialogue import Feedback
+from sniffer.domain.records import QueryOverview
 
 log = structlog.get_logger(__name__)
 
@@ -34,7 +43,8 @@ GREETING = (
     "или <i>сниму квартиру в Нячанге до 10 млн донгов</i>.\n\n"
     "Если чего-то важного не хватает, уточню парой вопросов — отвечать можно кнопкой "
     "или словами. Объявление не перепечатываю: даю ссылку на источник и честно помечаю, "
-    "если лот старый и мог быть продан."
+    "если лот старый и мог быть продан.\n\n"
+    "Несколько поисков и их мониторинги: /requests"
 )
 
 _conversation: Conversation | None = None
@@ -51,6 +61,13 @@ def conversation() -> Conversation:
 @router.message(CommandStart())
 async def start(message: Message) -> None:
     await message.answer(GREETING)
+
+
+@router.message(Command("requests"))
+async def requests(message: Message) -> None:
+    client = _client(message)
+    if client is not None:
+        await _show_requests(message, client)
 
 
 @router.message(F.text)
@@ -100,8 +117,11 @@ async def answer(callback: CallbackQuery, callback_data: AnswerCallback) -> None
     if not isinstance(message, Message):
         # Сообщение старше 48 часов Telegram отдаёт недоступным — отвечать не в что.
         return
+    client = Client(callback.from_user.id, callback.from_user.username)
+    if not await query_menu.select(client, callback_data.root):
+        return
     await conversation().on_answer(
-        Client(callback.from_user.id, callback.from_user.username),
+        client,
         callback_data.code,
         callback_data.value,
         _sender(message),
@@ -121,9 +141,10 @@ async def feedback(callback: CallbackQuery, callback_data: FeedbackCallback) -> 
         # Кнопка из старой версии бота: молча игнорировать честнее, чем падать.
         log.warning("bot.unknown_feedback", kind=callback_data.kind)
         return
-    await conversation().on_feedback(
-        Client(callback.from_user.id, callback.from_user.username), kind, _sender(message)
-    )
+    client = Client(callback.from_user.id, callback.from_user.username)
+    if not await query_menu.select(client, callback_data.root):
+        return
+    await conversation().on_feedback(client, kind, _sender(message))
 
 
 def _client(message: Message) -> Client | None:
@@ -147,8 +168,8 @@ def _sender(message: Message) -> Send:
 async def subscribe(callback: CallbackQuery, callback_data: SubscribeCallback) -> None:
     """«Следить за новыми» → счёт на одну звезду в месяц.
 
-    Тема берётся из ТЕКУЩЕГО паспорта клиента, а не из `callback_data`: кнопка
-    живёт в чате неделями, и подписывать надо на то, что человек ищет сейчас.
+    Корень едет в кнопке: при нескольких запросах старая карточка обязана
+    включать слежение именно за собой, а не за выбранным позже запросом.
     """
     await callback.answer()
     message = callback.message
@@ -157,8 +178,8 @@ async def subscribe(callback: CallbackQuery, callback_data: SubscribeCallback) -
         return
 
     tg_user_id = callback.from_user.id
-    root = await subscription.current_root(tg_user_id)
-    if root is None:
+    root = callback_data.root
+    if root <= 0 or not await subscription.owns(tg_user_id, root):
         await message.answer(NO_REQUEST_YET)
         return
 
@@ -179,6 +200,66 @@ async def subscribe(callback: CallbackQuery, callback_data: SubscribeCallback) -
         # нет, и токена у него взять негде.
         provider_token="",
     )
+
+
+@router.callback_query(RequestsCallback.filter())
+async def manage_request(callback: CallbackQuery, callback_data: RequestsCallback) -> None:
+    await callback.answer()
+    message = callback.message
+    if not isinstance(message, Message):
+        return
+    client = Client(callback.from_user.id, callback.from_user.username)
+    action, root = callback_data.action, callback_data.root
+    if action == "list":
+        await _show_requests(message, client)
+        return
+    items = await query_menu.list_for(client)
+    item = next((row for row in items if row.root == root), None)
+    if item is None:
+        await message.answer("Этот запрос не найден. Откройте список заново.")
+        return
+    if action == "open":
+        await query_menu.select(client, root)
+    elif action == "search":
+        await conversation().repeat(client, root, _sender(message))
+        return
+    elif action == "edit":
+        await query_menu.select(client, root, editing=True)
+        await message.answer(
+            f"Изменяем: <b>{query_menu.title(item.passport)}</b>\n\n"
+            "Напишите новую формулировку запроса целиком."
+        )
+        return
+    elif action in {"pause", "resume"}:
+        enabled = action == "resume"
+        if not await query_menu.toggle(client, root, active=enabled):
+            await message.answer("Мониторинг уже закончился. Его можно подключить заново.")
+        items = await query_menu.list_for(client)
+        item = next(row for row in items if row.root == root)
+    else:
+        return
+    await message.answer(_request_text(item), reply_markup=request_actions(item))
+
+
+async def _show_requests(message: Message, client: Client) -> None:
+    items = await query_menu.list_for(client)
+    if not items:
+        await message.answer("Запросов пока нет. Напишите, что хотите найти.")
+        return
+    await message.answer(
+        "Ваши запросы\n\n🟢 мониторинг работает · ⏸ на паузе · ▫️ без мониторинга",
+        reply_markup=requests_markup(items),
+    )
+
+
+def _request_text(item: QueryOverview) -> str:
+    states = {
+        "active": "мониторинг работает",
+        "paused": "мониторинг на паузе",
+        "expired": "мониторинг закончился",
+        "off": "мониторинг не подключён",
+    }
+    return f"<b>{query_menu.title(item.passport)}</b>\n{states[item.monitoring]}"
 
 
 @router.pre_checkout_query()

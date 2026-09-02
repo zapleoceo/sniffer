@@ -84,6 +84,7 @@ class Reply:
     # Предложить слежение за новыми объявлениями. Признак, а не готовая кнопка:
     # домен решает «уместно ли», разметку рисует `keyboards`.
     offer_subscription: bool = False
+    passport_root: int | None = None
 
 
 class Parser(Protocol):
@@ -294,6 +295,17 @@ class Conversation:
     async def _turn(self, client: Client, message: str, send: Send) -> None:
         dialogue = await self._store.load(client)
         current = dialogue.passport
+        if dialogue.editing and current is not None:
+            passport = await self._intake().parse(message)
+            _lap("intake_ms")
+            dialogue = await self._store.revise(
+                dialogue,
+                passport,
+                kind=EVENT_MANUAL_EDIT,
+                payload={"field": "query", "value": message},
+            )
+            await self._ask_or_search(dialogue, send)
+            return
         if dialogue.state.pending and current is not None:
             answered = await self._answer_in_words(dialogue, dialogue.state.pending, message, send)
             if answered:
@@ -309,6 +321,23 @@ class Conversation:
             return
         dialogue = await self._store.start(dialogue, passport)
         await self._ask_or_search(dialogue, send)
+
+    async def repeat(self, client: Client, root: int, send: Send) -> None:
+        """Повторить выбранный запрос без нового разбора и новой версии."""
+        await self._journalled(
+            client,
+            f"повтор запроса {root}",
+            send,
+            lambda _client, _query, recorded: self._repeat(client, root, recorded),
+        )
+
+    async def _repeat(self, client: Client, root: int, send: Send) -> None:
+        dialogue = await self._store.load(client)
+        dialogue = await self._store.select(dialogue, root)
+        if dialogue.passport is None or dialogue.passport.root != root:
+            await send(Reply(NO_REQUEST_YET))
+            return
+        await self._search(dialogue, send)
 
     async def on_answer(self, client: Client, code: str, value: str, send: Send) -> None:
         """Клиент нажал кнопку под вопросом. Ход журналируется как текстовый.
@@ -459,7 +488,13 @@ class Conversation:
         await self._store.note(
             dialogue, kind=EVENT_QUESTION_ASKED, payload={"field": question.field}
         )
-        await send(Reply(question.text, question=question))
+        await send(
+            Reply(
+                question.text,
+                question=question,
+                passport_root=dialogue.passport.root if dialogue.passport else None,
+            )
+        )
 
     async def _search(self, dialogue: Dialogue, send: Send) -> None:
         if dialogue.passport is None:  # pragma: no cover — сюда приходят с паспортом
@@ -484,13 +519,20 @@ class Conversation:
         if not found.items:
             # Пустая выдача — самый честный повод предложить слежение: искать
             # больше негде, а новое появится.
-            await send(Reply(EMPTY_WITH_OFFER, offer_subscription=True))
+            await send(
+                Reply(
+                    EMPTY_WITH_OFFER,
+                    offer_subscription=True,
+                    passport_root=dialogue.passport.root,
+                )
+            )
             return
         await send(
             Reply(
                 render_cards(found.items),
                 feedback=feedback_buttons(passport),
                 offer_subscription=True,
+                passport_root=dialogue.passport.root,
             )
         )
 

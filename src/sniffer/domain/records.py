@@ -124,8 +124,21 @@ class User:
     username: str | None = None
     lang: str = "ru"
     is_blocked: bool = False
+    active_passport_root: int | None = None
+    editing_passport_root: int | None = None
     created_at: datetime | None = None
     id: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class QueryOverview:
+    """Одна цепочка запроса в клиентском меню."""
+
+    root: int
+    passport: Passport
+    is_active: bool = False
+    monitoring: str = "off"  # off | active | paused | expired
+    expires_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)

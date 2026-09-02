@@ -44,6 +44,7 @@ class Dialogue:
     user_id: int
     passport: StoredPassport | None = None
     state: DialogueState = field(default_factory=DialogueState)
+    editing: bool = False
 
 
 class DialogueStore(Protocol):
@@ -62,6 +63,8 @@ class DialogueStore(Protocol):
     ) -> Dialogue: ...
 
     async def note(self, dialogue: Dialogue, *, kind: str, payload: dict[str, Any]) -> Dialogue: ...
+
+    async def select(self, dialogue: Dialogue, root: int, *, editing: bool = False) -> Dialogue: ...
 
 
 class PassportStore:
@@ -84,7 +87,12 @@ class PassportStore:
             if current is None:
                 return Dialogue(user_id=user.id)
             events = await passports.list_events(current.root)
-            return Dialogue(user_id=user.id, passport=current, state=replay(events))
+            return Dialogue(
+                user_id=user.id,
+                passport=current,
+                state=replay(events),
+                editing=user.editing_passport_root == current.root,
+            )
 
     async def start(self, dialogue: Dialogue, passport: Passport) -> Dialogue:
         """Новая формулировка — новая цепочка версий и чистый счётчик вопросов."""
@@ -120,3 +128,19 @@ class PassportStore:
             await PassportRepository(session).add_event(dialogue.passport.id, kind, payload)
             await session.commit()
         return replace(dialogue, state=advance(dialogue.state, kind, payload))
+
+    async def select(self, dialogue: Dialogue, root: int, *, editing: bool = False) -> Dialogue:
+        """Переключить контекст только на принадлежащую клиенту цепочку."""
+        async with self._sessions() as session:
+            passports = PassportRepository(session)
+            if not await passports.select(dialogue.user_id, root, editing=editing):
+                return dialogue
+            current = await passports.get_current(dialogue.user_id)
+            events = [] if current is None else await passports.list_events(current.root)
+            await session.commit()
+        return Dialogue(
+            user_id=dialogue.user_id,
+            passport=current,
+            state=replay(events),
+            editing=editing,
+        )
