@@ -195,6 +195,39 @@ else
   info "образ актуален, пропускаю"
 fi
 
+# ── 4.5 Миграции схемы ──────────────────────────────────────────────────────
+# infra/sql/001_init.sql идемпотентен (CREATE TABLE IF NOT EXISTS + ALTER … IF
+# NOT EXISTS) и ОБЯЗАН применяться на КАЖДОМ деплое. Само по себе это не
+# происходило: файл смонтирован в docker-entrypoint-initdb.d, а Postgres
+# прогоняет initdb-скрипты ТОЛЬКО при первой инициализации пустого тома, не при
+# апгрейде. Живой отказ 02.09.2026: колонки source/external_id/scan_listing_id
+# доехали в репозиторий, но не в базу — matcher падал на «scan_listing_id does
+# not exist», а деплой рапортовал успех (проверял число таблиц, не колонок).
+#
+# Файл берём ХОСТОВЫЙ через stdin, а не смонтированный: bind-mount ФАЙЛА держит
+# инод с момента старта контейнера, а `git checkout` заменяет файл новым инодом,
+# и внутри контейнера остаётся старая версия без свежих ALTER. stdin это обходит.
+#
+# Postgres поднимаем первым и ждём healthy: миграция в неподнятую базу — гонка,
+# а app-контейнеры обязаны стартовать уже на новой схеме.
+log "миграции схемы"
+docker compose up -d postgres
+PG_MIG_CID="$(docker compose ps -q postgres 2>/dev/null | head -n1 || true)"
+if [ -z "$PG_MIG_CID" ]; then
+  die "postgres не поднялся — миграции применить негде" 40
+fi
+for _ in $(seq 1 30); do
+  H="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$PG_MIG_CID" 2>/dev/null || echo none)"
+  [ "$H" = "healthy" ] || [ "$H" = "none" ] && break
+  sleep 2
+done
+if docker compose exec -T postgres psql -U sniffer -d sniffer -v ON_ERROR_STOP=1 \
+     < infra/sql/001_init.sql >/dev/null; then
+  info "схема применена из infra/sql/001_init.sql"
+else
+  die "миграции схемы не применились — см. ошибку psql выше" 40
+fi
+
 # ── 5. Запуск ───────────────────────────────────────────────────────────────
 log "запуск"
 # --remove-orphans действует внутри compose-проекта sniffer и до контейнеров
@@ -269,6 +302,17 @@ if [ -n "${PG_CID:-}" ]; then
     FAIL=1
   else
     info "схема БД: ${TABLES} таблиц"
+  fi
+  # Число таблиц не ловит непринятую МИГРАЦИЮ: 02.09.2026 таблицы были, а
+  # колонок source/external_id/scan_listing_id не было, и matcher падал. Колонка
+  # из миграции единого каталога — часовой того, что ALTER'ы доехали, а не только
+  # CREATE TABLE. Появится новая миграция — сюда добавляется её колонка-часовой.
+  HAS_COL="$(docker exec "$PG_CID" psql -U sniffer -d sniffer -tAc "select count(*) from information_schema.columns where table_name='listings' and column_name='source'" 2>/dev/null || echo 0)"
+  if [ "${HAS_COL:-0}" -lt 1 ]; then
+    echo "   миграции не применились: listings.source отсутствует — см. раздел «миграции схемы»" >&2
+    FAIL=1
+  else
+    info "миграции: listings.source на месте"
   fi
 fi
 
