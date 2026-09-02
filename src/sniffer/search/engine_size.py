@@ -17,33 +17,94 @@
 Слова собраны из того, как это пишут на самом деле: «200 кубиков», «200 куб.
 см», «200 кубических сантиметров», «200cc», «200 cm3», «объём 200». Латиница и
 кириллица вперемешку — обычное дело в русскоязычном чате Нячанга.
+
+**Объём несёт направление, а не только число.** «250 кубиков минимум», «от 250»,
+«не меньше 250», «250+» — это НИЖНЯЯ граница: лот с cc<250 противоречит. «до 250»,
+«не больше 250» — верхняя. Без слова — точка с полосой допуска (`relevance`).
+Живой отказ 02.09.2026: «нужен мотоцикл 250 кубиков минимум» выдал 124–125cc
+скутеры, потому что направление терялось и разбор считал ±25% вокруг 250.
+
+`read_engine_cc` (сторона запроса) требует слово «cc/куб» рядом с числом — это и
+есть защита от цены. `listing_cc_values` (сторона ЛОТА) читает и голое число,
+потому что лоты пишут «nvx 125», «ATTILA 124», «155 abs» без слова, — но с
+защитой от года и цены, иначе чужое число отсекло бы верный лот.
 """
 
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 # Правдоподобные границы для мотобайка. Ниже 49 — это уже не двигатель, а
 # опечатка; выше 2000 — не тот транспорт, за которым сюда приходят.
 MIN_CC = 49
 MAX_CC = 2000
 
+# Голое число в тексте лота читается в более узких границах: тут оно НЕ
+# подтверждено словом «cc», и цена ошибки — отсечённый верный лот. Верх 1500 сам
+# исключает годы (19xx/20xx выше него), низ 50 отсекает мелкий шум цены/пробега.
+BARE_MIN_CC = 50
+BARE_MAX_CC = 1500
+
 _CC_WORDS = r"(?:кубик\w*|куб\.?\s*см|кубических\s+сантиметр\w*|куб\w*|cc|cm3|см3|сс)"
+
+# Направление запроса стоит и ПЕРЕД числом («от 250 куб»), и ПОСЛЕ единицы
+# («250 кубиков минимум»); «+» — знак вместо слова. Значения проверяются
+# равенством, а не вхождением: каждая ветка альтернации — ровно одно слово.
+_PRE = (
+    r"(?P<pre>от|до|не\s+мен\w+|не\s+бол\w+|не\s+выше|минимум|максимум"
+    r"|начиная|около|примерно|ровно)?"
+)
+_POST = r"(?P<post>\+|плюс|и\s+выше|и\s+больше|и\s+более|и\s+мен\w+|и\s+ниже|минимум|максимум)?"
 _ENGINE_RE = re.compile(
     r"(?:(?:объ[её]м\w*|мощност\w*)\s*(?:двигател\w*)?\s*)?"
-    r"(?:до|от|около|примерно)?\s*"
-    r"(?P<value>\d{2,4})\s*" + _CC_WORDS,
+    + _PRE
+    + r"\s*(?P<value>\d{2,4})\s*(?P<plus>\+)?\s*"
+    + _CC_WORDS
+    + r"\s*"
+    + _POST,
     re.IGNORECASE,
 )
 
+_PRE_MIN = ("от", "минимум", "начиная", "не меньше", "не менее")
+_PRE_MAX = ("до", "максимум", "не больше", "не более", "не выше")
+_POST_MIN = ("+", "плюс", "и выше", "и больше", "и более", "минимум")
+_POST_MAX = ("и меньше", "и менее", "и ниже", "максимум")
 
-def read_engine_cc(text: str) -> int | None:
-    """Объём двигателя в кубических сантиметрах либо `None`."""
+
+@dataclass(frozen=True, slots=True)
+class EngineSize:
+    """Объём и что с ним делать: точка, нижняя (`min`) или верхняя (`max`) граница."""
+
+    value: int
+    direction: str  # "min" | "max" | "exact"
+
+
+def read_engine_size(text: str) -> EngineSize | None:
+    """Объём двигателя с направлением либо `None`."""
     for match in _ENGINE_RE.finditer(text):
         value = int(match.group("value"))
         if MIN_CC <= value <= MAX_CC:
-            return value
+            return EngineSize(value, _direction(match))
     return None
+
+
+def read_engine_cc(text: str) -> int | None:
+    """Только число объёма — потребителям, которым направление не нужно."""
+    size = read_engine_size(text)
+    return size.value if size is not None else None
+
+
+def _direction(match: re.Match[str]) -> str:
+    if match.group("plus"):
+        return "min"
+    pre = " ".join((match.group("pre") or "").lower().split())
+    post = " ".join((match.group("post") or "").lower().split())
+    if pre in _PRE_MIN or post in _POST_MIN:
+        return "min"
+    if pre in _PRE_MAX or post in _POST_MAX:
+        return "max"
+    return "exact"
 
 
 def without_engine_cc(text: str) -> str:
@@ -60,3 +121,55 @@ def without_engine_cc(text: str) -> str:
         return " " if MIN_CC <= value <= MAX_CC else match.group(0)
 
     return " ".join(_ENGINE_RE.sub(cut, text).split())
+
+
+# ── Объём, названный в тексте ЛОТА ───────────────────────────────────────────
+_TEXT_CC_RE = re.compile(r"(?<!\d)(\d{2,4})\s*" + _CC_WORDS + r"\b", re.IGNORECASE)
+_BARE_RE = re.compile(r"(?<![\d.,])(\d{2,4})(?![\d])")
+# Число — НЕ объём, если за ним единица цены (млн, тыс, к, тр, ₫, đ, $, vnd…),
+# группа разрядов (.000 / ,000 / пробел-000) или единица расстояния (км/km),
+# либо перед ним знак валюты. «10 млн» и «125.000» — деньги, «1000 км» — пробег
+# или интервал ТО («менялось каждые 1000 км»), а не 1000 cc.
+_PRICE_AFTER_RE = re.compile(
+    r"\s*(?:млн|миллион\w*|тыс\w*|тр\b|[kк]\b|m\b|₫|đ|\$|vnd|usd|руб\w*|đồng"
+    r"|км\b|km\b|[.,]\d{3}|\s0{3}\b)",
+    re.IGNORECASE,
+)
+_PRICE_BEFORE_RE = re.compile(r"[$₫đ]\s*$")
+
+
+def listing_cc_values(text: str) -> list[int]:
+    """Объёмы, названные в тексте ЛОТА: явные (число+«cc») и голые числа.
+
+    Голое число берётся ОСТОРОЖНО — только 50–1500, не год и не цена, — потому
+    что лоты пишут «nvx 125», «SYM ATTILA 124», «155 abs» без слова «cc». Ложно
+    прочитанный чужой объём отсёк бы верный лот, поэтому сомнительное число не
+    читается вовсе — дисциплина «неизвестное ≠ несовпадение». Точно прочитанный
+    чужой объём отсекать можно, и он тут виден.
+    """
+    values = {
+        int(match.group(1))
+        for match in _TEXT_CC_RE.finditer(text)
+        if MIN_CC <= int(match.group(1)) <= MAX_CC
+    }
+    values |= _bare_cc_values(text)
+    return sorted(values)
+
+
+def _bare_cc_values(text: str) -> set[int]:
+    found: set[int] = set()
+    for match in _BARE_RE.finditer(text):
+        value = int(match.group(1))
+        if not (BARE_MIN_CC <= value <= BARE_MAX_CC) or _is_year(value):
+            continue
+        after = text[match.end() : match.end() + 12]
+        before = text[max(0, match.start() - 2) : match.start()]
+        if _PRICE_AFTER_RE.match(after) or _PRICE_BEFORE_RE.search(before):
+            continue
+        found.add(value)
+    return found
+
+
+def _is_year(value: int) -> bool:
+    """19xx/20xx — год выпуска, а не объём: «Honda Lead 2008» это не 2008 cc."""
+    return 1900 <= value <= 2099

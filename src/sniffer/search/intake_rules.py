@@ -24,10 +24,11 @@ from typing import Any
 
 from sniffer.domain.passport import Category, Intent, Passport, PassportStatus
 from sniffer.search.budget_rules import parse_budget
-from sniffer.search.engine_size import read_engine_cc, without_engine_cc
+from sniffer.search.engine_size import read_engine_size, without_engine_cc
 from sniffer.search.market_terms import ALL_CITY_NAMES, ATTRIBUTE_TERMS, LangTerms
 from sniffer.search.motorbike_models import MOTORBIKE_BRANDS
 from sniffer.search.vocabulary import (
+    brand_category,
     city_variants,
     model_brand,
     model_category,
@@ -214,9 +215,16 @@ def parse_query(text: str, *, default_city: str = "") -> Passport:
     # квартиру Vision» — это название дома. Выведи категорию раньше, и таблица
     # начала бы читать сама себя.
     model = detect_model(query, said)
-    # Категория следует из модели, но ложится только на пустое место — та же
-    # дисциплина, что у марки и коробки: сказанное клиентом главнее выведенного.
-    category = said or model_category(model)
+    # Марка ищется по СКАЗАННОЙ клиентом категории, а не по выведенной: она сама
+    # участвует в выводе категории ниже, и брать выведенную значило бы дать
+    # таблице прочитать саму себя. Для мотобайка это одно и то же (все модели
+    # мотобайковые), но порядок обязан быть честным.
+    brand = detect_brand(query, said)
+    # Категория следует из модели ИЛИ марки, но ложится только на пустое место —
+    # та же дисциплина, что у коробки: сказанное клиентом главнее выведенного.
+    # Модель точнее марки, поэтому раньше неё; все марки рынка мотобайковые, и
+    # «yamaha» без иных слов — мотобайк (иначе в выдачу лезла даже квартира).
+    category = said or model_category(model) or brand_category(brand)
     if intent is None:
         intent = Intent.RENT if category in _RENTED_CATEGORIES else Intent.BUY
 
@@ -225,13 +233,17 @@ def parse_query(text: str, *, default_city: str = "") -> Passport:
     # и «до 200» отличаются одним словом после числа, и разбор бюджета обязан
     # его не увидеть. Живой отказ 01.09.2026 — «200 кубиков» стали бюджетом в
     # 200000 VND (семь долларов), и поиск, разумеется, не нашёл ничего.
-    engine_cc = read_engine_cc(query)
-    if engine_cc is not None:
-        attributes["engine_cc"] = engine_cc
+    engine = read_engine_size(query)
+    if engine is not None:
+        attributes["engine_cc"] = engine.value
+        # Направление несём, только когда оно не точка: «exact» — прежнее
+        # поведение (полоса ±band в relevance), и хранить его незачем, иначе
+        # каждый разбор без направления менял бы форму паспорта.
+        if engine.direction != "exact":
+            attributes["engine_cc_dir"] = engine.direction
     budget = parse_budget(without_engine_cc(query), intent=intent)
     if model:
         attributes["model"] = model
-    brand = detect_brand(query, category)
     if brand:
         attributes["brand"] = brand
     transmission = detect_transmission(query, category)

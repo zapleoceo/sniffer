@@ -396,6 +396,24 @@ def model_brand(model: str | None) -> str | None:
     return known.brand if known else None
 
 
+_MOTORBIKE_BRAND_SET = frozenset(brand.lower() for brand in MOTORBIKE_BRANDS)
+
+
+def brand_category(brand: str | None) -> Category | None:
+    """Категория, следующая из марки: все марки рынка — мотобайковые.
+
+    Симметрично `model_category`, но грубее и потому применяется ПОЗЖЕ: марка
+    называет предмет менее однозначно, чем модель. На нашем рынке `MOTORBIKE_BRANDS`
+    это марки мотобайков (honda, yamaha, sym, …), и «yamaha» без иных слов значит
+    мотобайк — иначе на запрос «yamaha» категория оставалась пустой и в выдачу
+    лезла даже квартира (realcheck 02.09.2026).
+
+    Ложится ТОЛЬКО на пустое место, после слова и модели, — поэтому «сниму
+    квартиру рядом с Honda» остаётся жильём: там категорию дало слово «квартиру».
+    """
+    return Category.MOTORBIKE if brand and brand.lower() in _MOTORBIKE_BRAND_SET else None
+
+
 def model_category(model: str | None) -> Category | None:
     """Что за предмет назван моделью: `vision` → `motorbike`. Незнакомая — `None`.
 

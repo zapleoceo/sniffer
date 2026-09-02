@@ -254,3 +254,114 @@ def test_a_yamaha_request_keeps_every_yamaha() -> None:
     )
 
     assert {candidate.external_id for candidate in got} == {"janus", "nouvo", "exciter"}
+
+
+# ── прокат не доходит до покупателя ─────────────────────────────────────────
+
+
+def test_a_rental_offer_is_dropped_for_a_buyer() -> None:
+    """«🏍 Аренда мотоциклов» лезло в топ почти любого запроса (замер 02.09.2026).
+
+    Клиент с intent=BUY хочет купить, а прокат — оффер аренды, сторона автора.
+    Отсекается по явному предложению аренды, а сама выдача при этом не пустеет:
+    продажа остаётся.
+    """
+    rental = item("🏍 Аренда мотоциклов — выгодные тарифы, доставка", price=None)
+    sale = item("Продам Honda Vision 2019, автомат, один хозяин", price=12_000_000)
+
+    ordered = rank_items(passport(attributes={}), [rental, sale], usd_vnd=RATE, now=NOW)
+
+    assert [candidate.external_id for candidate in ordered] == [sale.external_id]
+
+
+def test_a_rental_offer_is_kept_for_a_renter() -> None:
+    """Клиенту с intent=RENT прокат — это ровно то, что нужно, и он остаётся."""
+    rental = item("🏍 Аренда мотоциклов посуточно, доставка к отелю", price=None)
+
+    ordered = rank_items(
+        passport(intent=Intent.RENT, attributes={}), [rental], usd_vnd=RATE, now=NOW
+    )
+
+    assert [candidate.external_id for candidate in ordered] == [rental.external_id]
+
+
+def test_a_sale_that_only_mentions_rent_is_not_a_rental() -> None:
+    """«продам, не для аренды» — это продажа: слово «аренда» под отрицанием/продажей.
+
+    Фильтруем по ЯВНОМУ предложению аренды, а не по слову «аренда» где попало,
+    иначе честная продажа отсеклась бы вместе с прокатом.
+    """
+    sale = item("Продам скутер, не для аренды, срочно", price=12_000_000, text="один хозяин")
+
+    assert rank_items(passport(attributes={}), [sale], usd_vnd=RATE, now=NOW) == [sale]
+
+
+# ── объём как диапазон доходит до отсева ─────────────────────────────────────
+
+
+def test_a_minimum_displacement_drops_a_smaller_bike_but_keeps_the_unknown() -> None:
+    """«250 кубиков минимум» больше не показывает 125cc (живой отказ 02.09.2026).
+
+    Голое «125» читается как объём, «250 минимум» его отсекает; лот без объёма
+    остаётся — неизвестность не несовпадение.
+    """
+    small = item("Yamaha NVX 125 2017 год, пробег 20к", price=12_000_000)
+    unknown = item("Продам байк, один хозяин, торг", price=12_000_000)
+    big = item("Kawasaki Z400 400cc, механика", price=12_000_000)
+
+    ordered = rank_items(
+        passport(attributes={"engine_cc": 250, "engine_cc_dir": "min"}),
+        [small, unknown, big],
+        usd_vnd=RATE,
+        now=NOW,
+    )
+    kept = {candidate.external_id for candidate in ordered}
+
+    assert small.external_id not in kept
+    assert unknown.external_id in kept
+    assert big.external_id in kept
+
+
+# ── кросспосты схлопываются, разные лоты — нет ──────────────────────────────
+
+
+def _repost(external_id: str, text: str, *, age_hours: int) -> RawItem:
+    return RawItem(
+        source="telegram_groups",
+        external_id=external_id,
+        url=f"https://example.test/{external_id}",
+        title="",
+        text=text,
+        price_vnd=12_000_000,
+        posted_at=NOW - timedelta(hours=age_hours),
+    )
+
+
+def test_a_crosspost_collapses_keeping_the_freshest() -> None:
+    """Один лот в двух чатах: эмодзи, пробелы и повтор фразы разные — слова одни.
+
+    Замер 02.09.2026: «Honda Air Blade 2012» приходил дважды. Точный хэш такое
+    не ловит (текст различается), отпечаток по множеству слов — ловит, и из двух
+    остаётся свежайший.
+    """
+    fresh = _repost("fresh", "Продам Honda Air Blade 2012, инжектор, документы", age_hours=1)
+    # Тот же лот: эмодзи, лишние пробелы и задвоенная первая фраза — набор слов тот же.
+    stale = _repost(
+        "stale",
+        "🔥 Продам Honda Air Blade 2012 🔥  инжектор,  документы. Продам Honda Air Blade",
+        age_hours=48,
+    )
+
+    ordered = rank_items(passport(attributes={}), [stale, fresh], usd_vnd=RATE, now=NOW)
+
+    assert [candidate.external_id for candidate in ordered] == ["fresh"]
+
+
+def test_different_lots_of_one_model_are_not_collapsed() -> None:
+    """Разные годы — разные лоты: набор слов различается, и оба остаются."""
+    a = _repost("a", "Продам Honda Air Blade 2012, инжектор, документы", age_hours=1)
+    b = _repost("b", "Продам Honda Air Blade 2015, инжектор, документы", age_hours=2)
+
+    ordered = rank_items(passport(attributes={}), [a, b], usd_vnd=RATE, now=NOW)
+
+    assert {candidate.external_id for candidate in ordered} == {"a", "b"}

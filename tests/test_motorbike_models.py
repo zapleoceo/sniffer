@@ -216,9 +216,16 @@ def test_every_model_of_the_table_names_its_own_category(model: str) -> None:
 
 
 def test_an_unknown_name_derives_no_category() -> None:
-    """«Honda SH» остаётся неузнанной — и не приносит с собой выдуманной категории."""
+    """Неизвестная МОДЕЛЬ категории не выдумывает: «sh» сама по себе — ничто.
+
+    Категорию теперь выводит и марка (все марки рынка мотобайковые), поэтому
+    «honda sh» — мотобайк ПО МАРКЕ «honda», а не по неизвестной модели «sh».
+    Проверяем обе стороны: имя неизвестной модели без марки категории не даёт,
+    а известная марка — даёт (defect 02.09.2026: «yamaha» оставалась без категории).
+    """
     assert model_category("sh") is None
-    assert parse_query("куплю honda sh до 500", default_city=CITY).category is None
+    assert parse_query("куплю sh до 500", default_city=CITY).category is None
+    assert parse_query("куплю honda sh до 500", default_city=CITY).category is Category.MOTORBIKE
 
 
 def test_the_client_outranks_the_table() -> None:

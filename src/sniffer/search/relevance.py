@@ -6,13 +6,20 @@ import re
 from datetime import UTC, datetime
 from math import exp
 
-from sniffer.domain.passport import Budget, Currency, Passport
+from sniffer.domain.fingerprint import normalized
+from sniffer.domain.passport import Budget, Currency, Intent, Passport
+from sniffer.search.engine_size import listing_cc_values
 from sniffer.search.intake_rules import category_of, detect_brand, detect_transmission
+from sniffer.search.market_terms import RENTAL_PRICE_MARKERS, RENTAL_STEMS
 from sniffer.search.plan import SearchPlan, SearchTask
 from sniffer.search.vocabulary import attribute_phrases, models_named_in
 from sniffer.sources.base import RawItem
 
 PRICE_OVER_BUDGET = 1.30
+
+# Полоса допуска объёма, когда клиент назвал точку, а не границу: «200 кубиков»
+# — это про класс мотоцикла, 175 и 250 клиент назовёт тем же поиском, 700 — нет.
+ENGINE_BAND = 0.25
 
 # Возраст, после которого лот уходит из живой выдачи. Это не тот порог, что в
 # `verifier/liveness` (14 дней): там решается, когда ПРЕДУПРЕДИТЬ, и карточка
@@ -57,8 +64,13 @@ def rank_items(
 
     Отсев в две очереди, и они отменяются по-разному:
 
+    Перед отсевом кросспосты схлопываются (`_dedup`): один лот, переопубликованный
+    в несколько чатов с новыми эмодзи и переставленными фразами, — это одна
+    карточка, а не пять (spec-v2, 2.7).
+
     * **противоречие запросу** (`_contradicts`) — чужая категория, чужая модель,
-      чужая марка, чужая коробка, цена явно выше потолка. Всё это факты о
+      чужая марка, чужая коробка, объём вне запрошенного диапазона, оффер аренды
+      на запрос покупки, цена явно выше потолка. Всё это факты о
       предмете, прочитанные из его собственных слов, а не догадки: клиент назвал
       Lead — Airblade не «похуже», а не тот предмет (spec-v2, 3.2). Очередь НЕ
       отменяется: если подходящего на рынке нет, честнее пустой ответ, который
@@ -79,7 +91,11 @@ def rank_items(
     """
     moment = now or datetime.now(UTC)
     ranked = sorted(items, key=lambda item: _score(item, passport, usd_vnd, moment), reverse=True)
-    asked_for = [item for item in ranked if not _contradicts(item, passport, usd_vnd)]
+    # Дедуп ПОСЛЕ сортировки: у одинакового текста балл одинаков, а из равных
+    # первым стоит свежайший — его и оставляем (spec-v2 2.7). До отсева, но это
+    # безразлично: у кросспоста текст один, значит и вердикт `_contradicts` один.
+    unique = _dedup(ranked)
+    asked_for = [item for item in unique if not _contradicts(item, passport, usd_vnd)]
     return [item for item in asked_for if not _too_old(item, moment)] or asked_for
 
 
@@ -92,6 +108,10 @@ def _contradicts(item: RawItem, passport: Passport, usd_vnd: float | None) -> bo
     """
     if _other_category(item, passport) or _other_model(item, passport):
         return True
+    # Прокат — оффер аренды, чужая сторона сделки: клиент с intent=BUY хочет
+    # купить. Отсекаем только у покупателя — клиенту с intent=RENT прокат нужен.
+    if passport.intent is Intent.BUY and _is_rental_offer(item.title, item.text):
+        return True
     text = f"{item.title} {item.text}"
     wanted_model = str(passport.attributes.get("model") or "")
     if wanted_model and wanted_model not in models_named_in(passport.category, text):
@@ -100,7 +120,9 @@ def _contradicts(item: RawItem, passport: Passport, usd_vnd: float | None) -> bo
         return True
     if _contrary_attribute(passport, "transmission", text):
         return True
-    if _wrong_engine(text, passport.attributes.get("engine_cc")):
+    if _wrong_engine(
+        text, passport.attributes.get("engine_cc"), passport.attributes.get("engine_cc_dir")
+    ):
         return True
     ceiling = _budget_ceiling_vnd(passport.budget, usd_vnd)
     return ceiling is not None and item.price_vnd is not None and item.price_vnd > ceiling
@@ -134,17 +156,91 @@ def _contrary_attribute(passport: Passport, field: str, text: str) -> bool:
     return found is not None and str(found) != str(wanted)
 
 
-_CC_RE = re.compile(r"(?<!\d)(\d{2,4})\s*(?:cc|куб(?:ов|ик(?:ов|а)?)?)\b", re.IGNORECASE)
+def _wrong_engine(text: str, wanted: object, direction: object = None) -> bool:
+    """Объём лота противоречит запрошенному — с учётом направления.
 
+    Направление несёт паспорт (`engine_cc_dir`): «от 250» отсекает лот с cc<250,
+    «до 250» — с cc>250, без направления — полоса ±band вокруг точки. Объёмы лота
+    читает `listing_cc_values`, в т.ч. голым числом («nvx 125»): раньше читалось
+    только «125cc», и «250 минимум» показывал 124–125cc (живой отказ 02.09.2026).
 
-def _wrong_engine(text: str, wanted: object) -> bool:
+    `all(...)`, а не `any(...)`: если ХОТЬ ОДИН прочитанный объём в запросе, лот
+    остаётся. Неизвестный объём (ни одного числа) противоречием не считается.
+    """
     if wanted is None:
         return False
-    found = [int(value) for value in _CC_RE.findall(text)]
+    found = listing_cc_values(text)
     if not found:
         return False
     target = float(str(wanted))
-    return all(abs(value - target) > target * 0.25 for value in found)
+    if direction == "min":
+        return all(value < target for value in found)
+    if direction == "max":
+        return all(value > target for value in found)
+    return all(abs(value - target) > target * ENGINE_BAND for value in found)
+
+
+# ── Прокат: оффер аренды в тексте лота ───────────────────────────────────────
+_RENTAL_RE = re.compile(
+    r"\b(?:"
+    + "|".join(
+        re.escape(stem).replace(r"\ ", r"\s+") for stems in RENTAL_STEMS.values() for stem in stems
+    )
+    + r")\w*",
+    re.IGNORECASE,
+)
+# Продажа в заголовке снимает срабатывание проката, отрицание перед словом
+# аренды — тоже. «прода\w*» ловит продам/продаю/продажа; «не»/«без» — целым
+# словом, иначе «недорогая аренда» приняли бы за отрицание.
+_SALE_RE = re.compile(r"\b(?:прода|sell|bán)\w*|\bfor\s+sale\b", re.IGNORECASE)
+_NEG_RE = re.compile(r"\b(?:не|без|không|not)\b", re.IGNORECASE)
+
+
+def _is_rental_offer(title: str, text: str) -> bool:
+    """Явное предложение аренды в тексте лота — прокат, а не продажа.
+
+    Клиент с intent=BUY хочет купить; «🏍 Аренда мотоциклов», «‼️АРЕНДА БАЙКОВ
+    (сутки/месяц)‼️» — оффер аренды, сторона автора (spec-v2 2.7, замер
+    02.09.2026: лезли в топ почти любого покупательского запроса). Ловим по ЯВНОМУ
+    предложению, а не по слову «аренда» где попало: ценник за период однозначен
+    где угодно, а рамочное слово — только в заголовке и не под продажей/отрицанием,
+    иначе «продам, не для аренды» отсеклось бы как прокат.
+    """
+    if any(marker in f"{title} {text}".casefold() for marker in RENTAL_PRICE_MARKERS):
+        return True
+    head = normalized(title)
+    match = _RENTAL_RE.search(head)
+    if match is None or _SALE_RE.search(head):
+        return False
+    return not _NEG_RE.search(head[: match.start()])
+
+
+def _dedup(items: list[RawItem]) -> list[RawItem]:
+    """Схлопнуть кросспосты, оставив первый — после сортировки это свежайший.
+
+    Один лот приходит в несколько чатов и переопубликуется с новыми эмодзи,
+    пробелами, переставленными или задублированными фразами (замер 02.09.2026:
+    «Honda Air Blade 2012» и «SYM ATTILAVTS 124» по два раза). Точный хэш такое не
+    ловит — эмодзи и повтор фразы дают разный текст. Поэтому отпечаток — МНОЖЕСТВО
+    слов заголовка и текста: у переоформленного кросспоста набор слов тот же, а у
+    другого лота (иная цена, год, лишняя фраза) — другой, и разные лоты одной
+    модели не схлопываются. Плюс дедуп по `(source, external_id)` — тот же лот,
+    вынутый источником дважды. Пустой отпечаток не схлопывает: лот без текста не
+    дубликат такого же безмолвного.
+    """
+    seen_ids: set[tuple[str, str]] = set()
+    seen_words: set[frozenset[str]] = set()
+    kept: list[RawItem] = []
+    for item in items:
+        ident = (item.source, item.external_id)
+        words = frozenset(normalized(f"{item.title} {item.text}").split())
+        if ident in seen_ids or (words and words in seen_words):
+            continue
+        seen_ids.add(ident)
+        if words:
+            seen_words.add(words)
+        kept.append(item)
+    return kept
 
 
 def _other_category(item: RawItem, passport: Passport) -> bool:

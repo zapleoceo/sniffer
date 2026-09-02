@@ -153,6 +153,32 @@ def test_brand_reaches_attributes() -> None:
     assert passport.attributes["brand"] == "honda"
 
 
+def test_a_bare_brand_derives_the_motorbike_category() -> None:
+    """«yamaha» без иных слов — мотобайк: все марки рынка мотобайковые.
+
+    Живой отказ 02.09.2026: на «yamaha» категория оставалась пустой (`None`), и
+    отсев чужой категории не работал — в выдачу лезла даже квартира. Категория
+    выводится из марки так же, как из модели.
+    """
+    passport = parse_query("yamaha", default_city=CITY)
+
+    assert passport.category is Category.MOTORBIKE
+    assert passport.attributes["brand"] == "yamaha"
+
+
+def test_a_said_category_outranks_a_brand_mentioned_in_passing() -> None:
+    """«сниму квартиру рядом с Honda» — жильё, а не байк.
+
+    Вывод из марки ложится ТОЛЬКО на пустое место: сказанное клиентом словом
+    («квартиру») главнее марки, упомянутой мимоходом. Иначе салон Honda по
+    соседству превратил бы аренду квартиры в поиск мотобайка.
+    """
+    passport = parse_query("сниму квартиру рядом с Honda", default_city=CITY)
+
+    assert passport.category is Category.APARTMENT
+    assert passport.intent is Intent.RENT
+
+
 def test_city_from_text_wins_over_default() -> None:
     passport = parse_query("сдам квартиру в Дананге 8 млн в месяц", default_city=CITY)
 
