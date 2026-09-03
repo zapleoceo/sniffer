@@ -158,7 +158,12 @@ async def test_database_updates_price_without_duplicate_and_late_replay(
 ) -> None:
     tasks = CollectionTaskRepository(db_session)
     task_id = await tasks.enqueue(
-        {"city": "nha_trang", "category": "motorbike", "sources": ["chotot"]},
+        {
+            "city": "nha_trang",
+            "category": "motorbike",
+            "deal_type": "sell",
+            "sources": ["chotot"],
+        },
         user_id=1,
         request_id=1,
         request_version=1,
@@ -189,7 +194,12 @@ async def test_database_updates_price_without_duplicate_and_late_replay(
 async def test_unknown_city_foreign_task_and_scope_cannot_publish(db_session: AsyncSession) -> None:
     tasks = CollectionTaskRepository(db_session)
     task_id = await tasks.enqueue(
-        {"city": "nha_trang", "category": "motorbike", "sources": ["chotot"]},
+        {
+            "city": "nha_trang",
+            "category": "motorbike",
+            "deal_type": "sell",
+            "sources": ["chotot"],
+        },
         user_id=1,
         request_id=1,
         request_version=1,
@@ -217,7 +227,12 @@ async def test_unknown_city_foreign_task_and_scope_cannot_publish(db_session: As
 async def test_stale_future_and_removed_records_are_not_served(db_session: AsyncSession) -> None:
     tasks = CollectionTaskRepository(db_session)
     task_id = await tasks.enqueue(
-        {"city": "nha_trang", "category": "motorbike", "sources": ["chotot"]},
+        {
+            "city": "nha_trang",
+            "category": "motorbike",
+            "deal_type": "sell",
+            "sources": ["chotot"],
+        },
         user_id=1,
         request_id=1,
         request_version=1,
