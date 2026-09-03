@@ -49,6 +49,7 @@ from sniffer.sources.telegram_discover_reference import (
     MAX_TRACKED_CHATS,
     MIN_JOIN_PAUSE,
     REJECT_ALREADY_INSIDE,
+    REJECT_ALREADY_MEMBER,
     REJECT_JOIN_REFUSED,
     REJECT_JOIN_REQUEST_SENT,
     REJECT_TOO_MANY_ATTEMPTS,
@@ -173,11 +174,51 @@ class ChatJoiner:
             log.warning("discover.chat_cap_reached", cap=self._max_tracked)
             return None
 
-        candidate = await self._queue.reserve()
+        candidate = await self._fresh_candidate()
         if candidate is None:
             await self._ledger.release_slot(event_id=event_id)
             return None
         return await self._join_reserved(candidate, event_id, now)
+
+    async def _fresh_candidate(self) -> ChatCandidate | None:
+        """Первый кандидат, которого ещё НЕТ в нашем реестре.
+
+        Кандидат на чат, в котором мы уже состоим, не должен стоить ни слота, ни
+        запроса наружу: выяснить это можно у своего же реестра, молча, не
+        спрашивая Telegram. Замер на живой базе 03.09.2026: в очереди стояли
+        ДВАДЦАТЬ таких — ровно все чаты реестра, — то есть двое суток суточного
+        бюджета уходило на вступление в то, что у нас уже есть.
+        (`UserAlreadyParticipantError` такой кандидат выбрасывает и без этой
+        проверки, но ценой одного исходящего запроса каждый — а Telegram считает
+        именно запросы.)
+
+        Пропускать их надо ЗДЕСЬ, а не отбором: сид и находки разведки кладут
+        кандидата в очередь без `screen()`, а между отбором и вступлением
+        проходят часы — за них чат мог попасть в реестр другим путём.
+
+        Цикл ограничен размером реестра: больше уже-известных кандидатов, чем
+        чатов в реестре, быть не может. Каждый шаг цикла — только чтение своей
+        базы, ни одного запроса к Telegram.
+
+        Приглашение (`+hash`) проверить нечем: до вступления Telegram id
+        закрытого чата не отдаёт, а имени у него нет. Такой кандидат идёт как
+        раньше — там от лишнего запроса защищает `ALREADY_INSIDE`.
+        """
+        for _ in range(self._max_tracked):
+            candidate = await self._queue.reserve()
+            if candidate is None:
+                return None
+            if not candidate.username:
+                return candidate
+            if not await self._registry.has_chat(username=candidate.username):
+                return candidate
+            await self._queue.drop(candidate.key)
+            await self._rejected.reject(candidate.key, REJECT_ALREADY_MEMBER)
+            log.info("discover.candidate_already_tracked", candidate=candidate.key)
+        # Столько уже-известных подряд, сколько чатов в реестре: дальше искать
+        # нечего, и слот вызывающий вернёт сам.
+        log.warning("discover.queue_full_of_known_chats", checked=self._max_tracked)
+        return None
 
     async def retry_mutes(self) -> int:
         """Догнать беззвучный режим там, где он не встал с первого раза."""
