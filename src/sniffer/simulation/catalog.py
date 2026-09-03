@@ -155,6 +155,54 @@ def build_catalog() -> tuple[Lot, ...]:
             transmission="manual",
             engine_cc=110,
         ),
+        # ── лоты под персон (03.09.2026) ────────────────────────────────────
+        #
+        # Добавлены не для красоты счётчика: без них персоны, пишущие голое имя
+        # модели, не доходили до карточек вовсе, и проверять было нечего —
+        # «ничего не нашлось» не отличалось от «выдача мусорная». Каждый лот
+        # взят с живой базы Нячанга по формулировке, которая там есть.
+        #
+        # ADV 150 — самый частый из них: 13 живых лотов из 14 со словом «adv»
+        # это ровно «Honda ADV 150 ABS», и цена там 67–80 млн.
+        _lot(
+            "honda-adv-150",
+            "Продам Honda ADV 150 ABS, 2022 год",
+            category=bike,
+            price_vnd=68_000_000,
+            age_days=4,
+            source="telegram_groups",
+            brand="honda",
+            model="adv",
+            transmission="automatic",
+            engine_cc=150,
+        ),
+        # Kawasaki Z300 — тот самый лот, из-за которого «z300» разбирали как
+        # бюджет. Триста кубов, механика: он же закрывает и «250 кубиков
+        # минимум», потому что 300 ≥ 250.
+        _lot(
+            "kawasaki-z300",
+            "Kawasaki Z300 2018, механика, 300 кубов",
+            category=bike,
+            price_vnd=95_000_000,
+            age_days=7,
+            brand="kawasaki",
+            model="z",
+            transmission="manual",
+            engine_cc=300,
+        ),
+        # CBR — семейство без номера в запросе клиента («Honda cbr» из журнала).
+        # У лота номер есть, и объём читается из него, как и на стороне клиента.
+        _lot(
+            "honda-cbr150r",
+            "Honda CBR150R, механика, спорт",
+            category=bike,
+            price_vnd=72_000_000,
+            age_days=11,
+            brand="honda",
+            model="cbr",
+            transmission="manual",
+            engine_cc=150,
+        ),
         _lot(
             "honda-cb200x",
             "Honda CB200X, 200 кубов, механика",
@@ -260,6 +308,18 @@ def build_catalog() -> tuple[Lot, ...]:
             category=flat,
             price_vnd=8_000_000,
             age_days=2,
+            source="telegram_groups",
+        ),
+        # Двушка с мебелью В БЮДЖЕТ. Прежняя стоит 14 млн, и запрос «до 10 млн»
+        # отсекал её правильно — значит рынку не хватало не фильтра, а лота: без
+        # него персона-жилец получала «ничего не нашлось» на безупречно
+        # разобранный паспорт, и проверить выдачу было нечем.
+        _lot(
+            "flat-two-bed-furnished",
+            "2 спальни с мебелью, Винком, длительный срок",
+            category=Category.APARTMENT,
+            price_vnd=9_000_000,
+            age_days=3,
             source="telegram_groups",
         ),
         _lot(
