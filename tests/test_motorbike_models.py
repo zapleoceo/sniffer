@@ -30,7 +30,7 @@ from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
 from sniffer.search.fallback import fallback_plan
 from sniffer.search.intake import merge
 from sniffer.search.intake_rules import detect_brand, detect_model, parse_query, with_model_facts
-from sniffer.search.motorbike_models import BODY_ELECTRIC, MOTORBIKE_MODELS
+from sniffer.search.motorbike_models import BODY_ELECTRIC, BODY_MANUAL, MOTORBIKE_MODELS
 from sniffer.search.relevance import LIVE_MAX_AGE_DAYS, rank_items
 from sniffer.search.vocabulary import (
     model_category,
@@ -285,7 +285,7 @@ def test_the_dialogue_does_not_ask_about_a_gearbox_it_derived() -> None:
     unknown = next_question(without_model, asked)
 
     assert derived is not None and derived.field != "attributes.transmission"
-    assert unknown is not None and unknown.field == "attributes.transmission"
+    assert unknown is not None and unknown.field != "attributes.transmission"
 
 
 def test_the_automatic_button_disappears_when_the_answer_is_known() -> None:
@@ -590,17 +590,241 @@ def test_an_unknown_name_has_no_displacement() -> None:
 
 @pytest.mark.parametrize("model", [model.slug for model in MOTORBIKE_MODELS])
 def test_every_model_declares_a_displacement_or_an_honest_none(model: str) -> None:
-    """Каждая модель ряда явно объявляет объём или явный `None` — молчком не пропущена.
+    """Каждая модель ряда явно объявляет объём или честный `None` — молчком не пропущена.
 
     Список связан с таблицей механически: допишут модель — она попадёт сюда сама,
-    и «а этой объём забыли» не станет тихим пробелом. `None` допустим только у
-    электро; у остальных число в правдоподобных границах мотобайка (49..2000 см³,
-    как `engine_size.MIN_CC`..`MAX_CC`).
+    и «а этой объём забыли» не станет тихим пробелом. Но «честный `None`» теперь
+    зависит от кузова, и это не послабление, а разное знание:
+
+    * **скутер и лапка** (`tay ga`, `xe số`) объём в имени НЕ несут («Lead»,
+      «Wave»), поэтому представительный объём — стабильный факт модели, и его
+      отсутствие было бы пропуском. Число обязательно и в границах мотобайка
+      (49..2000 см³, как `engine_size.MIN_CC`..`MAX_CC`);
+    * **механика** (`côn tay`) — спортивные семейства, у которых объём стоит в
+      САМОМ имени и у семейства РАЗНЫЙ (CBR150 против CBR650, Z300 против Z900):
+      одно число соврало бы на всех членах, кроме одного, поэтому `None` здесь
+      честнее числа, а настоящий объём читается из текста лота. Конкретная модель
+      со стабильным объёмом (R15 — 155, Exciter — 150) число объявить ВПРАВЕ, и
+      тогда оно в границах — но не обязана;
+    * **электро** — объёма нет физически, только `None`.
+
+    Так тест ловит скутер, забывший объём, и электро с выдуманным числом, но не
+    мешает механике честно молчать (`None` теперь и НЕ у электро).
     """
     body = {entry.slug: entry.body for entry in MOTORBIKE_MODELS}[model]
     cc = model_engine_cc(model)
 
     if body == BODY_ELECTRIC:
         assert cc is None
+    elif body == BODY_MANUAL:
+        assert cc is None or 49 <= cc <= 2000
     else:
         assert cc is not None and 49 <= cc <= 2000
+
+
+# ── 10. Мотоциклетные семейства: спорт, нейкед, круизёр, эндуро ──────────────
+
+
+@pytest.mark.parametrize(
+    ("query", "model", "brand"),
+    [
+        # Honda
+        ("нужен honda cbr", "cbr", "honda"),
+        ("продам honda cb1000r", "cb", "honda"),
+        ("honda rebel 300", "rebel", "honda"),
+        ("honda crf 250", "crf", "honda"),
+        ("honda xr150", "xr", "honda"),
+        # Yamaha (r15/exciter уже в таблице — здесь новые)
+        ("yamaha mt", "mt", "yamaha"),
+        ("yamaha r3 2020", "r3", "yamaha"),
+        ("yamaha r25", "r25", "yamaha"),
+        ("yamaha fz150", "fz", "yamaha"),
+        # Kawasaki
+        ("ninja", "ninja", "kawasaki"),
+        ("kawasaki z300", "z", "kawasaki"),
+        ("kawasaki zx-10r", "zx", "kawasaki"),
+        # Suzuki
+        ("suzuki gsx", "gsx", "suzuki"),
+        ("suzuki raider 150", "raider", "suzuki"),
+        # KTM (новая марка)
+        ("ktm duke", "duke", "ktm"),
+        ("ktm rc390", "rc", "ktm"),
+        # Ducati
+        ("ducati monster", "monster", "ducati"),
+        ("ducati panigale", "panigale", "ducati"),
+    ],
+)
+def test_a_sport_family_names_its_brand_gearbox_and_category(
+    query: str, model: str, brand: str
+) -> None:
+    """Мотоциклетное семейство узнаётся моделью, марка и коробка следуют из него.
+
+    Кузов у всех côn tay → МЕХАНИКА (спорт/нейкед/круизёр/эндуро), а не скутер:
+    ровно этого и не хватало — «honda cbr» возвращал Honda PSX (чужой скутер),
+    «kawasaki z300» не узнавалось вовсе. Марка выводится из модели той же таблицей
+    (ninja → kawasaki, duke → ktm), категория — motorbike обратным ходом.
+    """
+    passport = parse_query(query, default_city=CITY)
+
+    assert passport.attributes["model"] == model
+    assert passport.attributes["brand"] == brand
+    assert passport.attributes["transmission"] == "manual"
+    assert passport.category is Category.MOTORBIKE
+
+
+def test_r15_and_exciter_are_not_duplicated_by_the_new_families() -> None:
+    """r15/exciter стояли в таблице до этой правки — вносить их заново нельзя."""
+    slugs = [model.slug for model in MOTORBIKE_MODELS]
+
+    assert slugs.count("r15") == 1
+    assert slugs.count("exciter") == 1
+    # А новые семейства при этом на месте и не столкнулись слагами.
+    assert {"cbr", "mt", "z", "duke", "monster"} <= set(slugs)
+
+
+@pytest.mark.parametrize("query", ["yamaha mt-15", "yamaha mt 15", "продам mt15 2022"])
+def test_mt_is_read_stuck_spaced_or_hyphenated(query: str) -> None:
+    """Продавец пишет объём слитно, через дефис и через пробел — всё это MT.
+
+    Клиент же спрашивает голым «yamaha mt» без числа — это ловит якорь по марке,
+    а формы продавца — якорь по цифре. Оба нужны: убери любой, и половина живых
+    написаний из снимка Нячанга (mt-15, mt-03, mt 15, mt15) перестанет узнаваться.
+    """
+    assert detect_model(query, Category.MOTORBIKE) == "mt"
+
+
+def test_cb_and_cbr_are_two_different_families() -> None:
+    """«cb» и «cbr» различает буква после префикса, а не порядок строк.
+
+    Якорь «cb» — по цифре (`cb\\d`), поэтому «cbr150r» (после cb стоит r) им не
+    ловится, а ловится своим «cbr». Иначе один лот читался бы двумя моделями, и
+    отсев по модели стал бы случайным.
+    """
+    bikes = Category.MOTORBIKE
+
+    assert models_named_in(bikes, "HONDA CBR150R 2018 Blue Card") == ("cbr",)
+    assert models_named_in(bikes, "🔥 HONDA CB1000R 🔥") == ("cb",)
+
+
+def test_a_cbr_lot_stuck_to_its_displacement_is_kept_on_a_cbr_query() -> None:
+    """«honda cbr» обязан ОТДАВАТЬ CBR-лоты, а не отрезать их.
+
+    Имя в объявлении слипается с объёмом («CBR150R»), и целое слово `\\bcbr\\b`
+    его бы не увидело — лот с настоящим CBR отсеялся бы как «чужая модель». Регекс
+    по префиксу это чинит: живой отказ — «honda cbr» возвращал Honda PSX, потому
+    что CBR не узнавался ни в запросе, ни в лоте.
+    """
+    # Без бюджета: спортбайк дороже скутера, и потолок в 500 USD отсёк бы CBR
+    # ценой раньше, чем проверится модель. Здесь проверяется именно модель.
+    cbr = Passport(
+        intent=Intent.BUY,
+        category=Category.MOTORBIKE,
+        city=CITY,
+        attributes={"model": "cbr", "brand": "honda", "transmission": "manual"},
+        raw_query="honda cbr",
+    )
+    real = lot("HONDA CBR150R 2018 Blue Card, механика", price=33_000_000)
+    other = lot("Продам Honda PSX 2011", price=17_000_000)
+
+    assert shown(cbr, [real, other]) == [real.title]
+
+
+def test_the_z_letter_needs_its_brand_and_ignores_kenzo_z20() -> None:
+    """Одиночная «z» ловится в чужих словах, и это не гипотеза, а живой лот.
+
+    На снимке Нячанга «дополнительный свет Kenzo Z20» дал бы ложное «z» голым
+    правилом `z\\d`, и такой лот прошёл бы фильтр на запрос «kawasaki z». Поэтому
+    «z» — только с якорем по марке: «kawasaki z300» узнаётся, «Kenzo Z20» — нет.
+    Безмарочный «Z1000» при этом осознанно пропущен — пропуск оставляет выдачу как
+    была, ложная модель режет верную (дисциплина «candy»/«SH»).
+    """
+    bikes = Category.MOTORBIKE
+
+    assert models_named_in(bikes, "Kawasaki Z1000 2018, срочно") == ("z",)
+    assert "z" not in models_named_in(bikes, "фара Kenzo Z20 противотуманная")
+    assert "z" not in models_named_in(bikes, "Yamaha Sirius, свет Kenzo Z20")
+
+
+def test_monster_needs_ducati_or_a_displacement_not_a_sticker() -> None:
+    """«monster» — обычное слово: наклейка «Monster Energy» на чужом байке не модель.
+
+    Якорь двойной — «ducati monster» либо «monster» + объём («monster 797»);
+    голое «Monster Energy» не проходит ни то, ни другое, и честный Honda Winner с
+    такой наклейкой своей моделью и остаётся.
+    """
+    bikes = Category.MOTORBIKE
+
+    assert models_named_in(bikes, "Ducati Monster 797 2019") == ("monster",)
+    assert "monster" not in models_named_in(bikes, "Honda Winner, наклейки Monster Energy")
+
+
+@pytest.mark.parametrize("text", ["продам mt", "куплю rc", "нужен xr", "honda cb недорого"])
+def test_short_family_names_do_not_fire_without_their_anchor(text: str) -> None:
+    """Короткое имя без цифры объёма и без марки-якоря — не модель.
+
+    Голые «mt», «rc», «xr», «cb» встречаются в тексте случайно, поэтому вносятся
+    ТОЛЬКО с якорем. Без него разбор возвращает прежнее поведение (модель не
+    названа), а не ловит лишнее: ложная модель отрезала бы верную выдачу.
+    """
+    assert detect_model(text, Category.MOTORBIKE) is None
+
+
+def test_ktm_is_a_new_brand_that_names_the_category() -> None:
+    """KTM — новая марка рынка: «ktm» без иных слов это мотобайк, как «yamaha».
+
+    До этого KTM в `MOTORBIKE_BRANDS` не было, и «ktm» оставалась без категории —
+    тот же дефект, что был у «yamaha» (realcheck 02.09.2026).
+    """
+    assert parse_query("ktm до 5000", default_city=CITY).category is Category.MOTORBIKE
+    assert parse_query("ktm до 5000", default_city=CITY).attributes["brand"] == "ktm"
+
+
+def test_a_bare_sport_family_lot_is_dropped_on_a_housing_query() -> None:
+    """Категория следует из имени семейства и на стороне лота: Ninja не жильё.
+
+    «KAWASAKI NINJA 400» слова «мотоцикл» не содержит, но Ninja бывает лишь у
+    байка — тот же вывод, что спас выдачу студий от Honda Lead и Yamaha R15.
+    """
+    wants_flat = Passport(
+        intent=Intent.RENT,
+        category=Category.APARTMENT,
+        city=CITY,
+        raw_query="сниму студию у моря",
+    )
+    bare_bike = lot("KAWASAKI NINJA 400 — продажа, Нячанг")
+    flat = lot("Студия с мебелью, длительный срок")
+
+    assert shown(wants_flat, [bare_bike, flat]) == [flat.title]
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "cbr",
+        "cb",
+        "rebel",
+        "crf",
+        "xr",
+        "mt",
+        "r3",
+        "r25",
+        "fz",
+        "ninja",
+        "z",
+        "zx",
+        "gsx",
+        "raider",
+        "duke",
+        "rc",
+        "monster",
+        "panigale",
+    ],
+)
+def test_a_sport_family_carries_no_displacement(model: str) -> None:
+    """Объём семейства стоит в имени и РАЗНЫЙ — одно число соврало бы.
+
+    Поэтому `engine_cc=None` (как у электро, но по другой причине): настоящий объём
+    берётся из числа лота (`relevance._model_cc_values` вернёт пусто, и лот держит
+    «неизвестное ≠ несовпадение», а не отсекается выдуманным классом).
+    """
+    assert model_engine_cc(model) is None

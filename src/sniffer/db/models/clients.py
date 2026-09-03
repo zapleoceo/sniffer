@@ -42,6 +42,11 @@ class User(BigIdMixin, Base):
         DateTime(timezone=True), nullable=False, server_default=NOW
     )
     is_blocked: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=FALSE)
+    # Явный указатель нужен при нескольких цепочках: «последний изменённый»
+    # запрос не обязательно тот, с которым человек работает сейчас.
+    active_passport_root: Mapped[int | None] = mapped_column(BigInteger)
+    # Нажатие «изменить» переживает рестарт бота и следующий апдейт Telegram.
+    editing_passport_root: Mapped[int | None] = mapped_column(BigInteger)
 
 
 class Passport(BigIdMixin, Base):

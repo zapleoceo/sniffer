@@ -199,6 +199,21 @@ def test_papers_words_live_in_one_table() -> None:
         assert set(words) <= set(JARGON[Category.MOTORBIKE][lang])
 
 
+def test_housing_property_words_live_in_one_table() -> None:
+    """Мебель и вид на море — одно знание на всё жильё, роздано ССЫЛКОЙ.
+
+    Квартира, комната и дом зовут их одними словами. Две копии однажды
+    разъедутся, и правку внесут в одну; здесь проверяется, что это буквально
+    один и тот же объект, а не совпадающие по содержанию списки.
+    """
+    from sniffer.search.market_terms import ATTRIBUTE_TERMS
+
+    apartment = ATTRIBUTE_TERMS[Category.APARTMENT]
+    for category in (Category.ROOM, Category.HOUSE):
+        assert ATTRIBUTE_TERMS[category]["furnished"] is apartment["furnished"]
+        assert ATTRIBUTE_TERMS[category]["sea_view"] is apartment["sea_view"]
+
+
 # --------------------------------------------------------------------------
 # 2. Язык выбирается по источнику, а не по языку клиента
 # --------------------------------------------------------------------------

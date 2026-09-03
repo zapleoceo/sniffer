@@ -17,7 +17,12 @@ from sniffer.config import Settings
 from sniffer.domain.passport import Category, Currency, Intent, PassportStatus, PricePeriod
 from sniffer.search import intake as intake_module
 from sniffer.search.intake import QueryIntake, intake_schema, merge
-from sniffer.search.intake_rules import detect_transmission, parse_query
+from sniffer.search.intake_rules import (
+    detect_category,
+    detect_rooms,
+    detect_transmission,
+    parse_query,
+)
 from sniffer.search.market_terms import ATTRIBUTE_TERMS
 
 CITY = "nha_trang"
@@ -445,3 +450,152 @@ def test_a_model_code_number_is_not_a_budget() -> None:
     # Контроль: настоящий бюджет с пробелом по-прежнему читается.
     assert parse_query("нужен скутер до 300", default_city=CITY).budget.max == 300
     assert parse_query("байк 2019 года до 400", default_city=CITY).budget.max == 400
+
+
+# ── число в счётном контексте — не бюджет (комнаты, срок) ────────────────────
+
+
+@pytest.mark.parametrize(
+    ("text", "budget_max"),
+    [
+        ("квартиру 2 спальни", None),
+        ("аренда авто на 3 дня", None),
+        ("сниму на 3 месяца", None),
+        ("студию на 5 лет", None),
+        ("2 bedroom apartment", None),
+        ("двушку у моря", None),
+        # Контроль: денежное число рядом со счётным остаётся бюджетом, а счётное
+        # его не отменяет — «до 15 млн» несёт множитель, «2» нет.
+        ("2 спальни до 15 млн", 15_000_000),
+        ("квартиру 3 спальни до 500 долларов", 500),
+        ("до 15 млн", 15_000_000),
+    ],
+    ids=[
+        "bedrooms",
+        "days",
+        "months",
+        "years",
+        "en_bedroom",
+        "kolloq",
+        "count_plus_budget",
+        "count_plus_usd",
+        "plain_budget",
+    ],
+)
+def test_a_counting_number_is_not_a_budget(text: str, budget_max: float | None) -> None:
+    """«квартиру 2 спальни» → две спальни, а не «до 2 USD»; «на 3 дня» → срок.
+
+    Число, за которым идёт счётная единица (спальни, дни, месяцы, годы), — не
+    сумма. Тот же приём, что у года («2019 года»): цену и не-цену различает слово
+    ПОСЛЕ числа. Денежное число рядом (с множителем «млн» или валютой) остаётся.
+    """
+    assert parse_query(text, default_city=CITY).budget.max == budget_max
+
+
+# ── прокат — это аренда, а не покупка ───────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "прокат скутера",
+        "прокат байка на месяц",
+        "напрокат байк",
+        "взять напрокат",
+        "прокату мотоцикл",
+    ],
+)
+def test_rental_words_are_rent_not_buy(text: str) -> None:
+    """«прокат»/«напрокат» — клиент хочет ВЗЯТЬ, а не купить.
+
+    Раньше он получал intent=buy, и отсев проката (`relevance`) выбрасывал ровно
+    те лоты, что ему нужны. Теперь intent=rent, и клиент видит прокат.
+    """
+    assert parse_query(text, default_city=CITY).intent is Intent.RENT
+
+
+# ── «жильё» — самый общий вид жилья ─────────────────────────────────────────
+
+
+@pytest.mark.parametrize("form", ["жильё", "жилье", "жилья", "жильём"])
+def test_the_housing_word_gives_the_apartment_category(form: str) -> None:
+    """«жильё посуточно», «сниму жильё» — категория была пустой, теперь apartment.
+
+    APARTMENT — самый общий вид жилья, поэтому «жильё» ведёт туда, а не в
+    комнату/дом (они конкретнее и стоят в таблице позже).
+    """
+    assert parse_query(f"сниму {form}", default_city=CITY).category is Category.APARTMENT
+
+
+def test_the_housing_word_does_not_catch_lookalikes() -> None:
+    """«жилой» (через «о») и «жильцы» (через «ц») — не «жильё»: категории не дают."""
+    assert detect_category("тихий жилой район") is None
+    assert detect_category("шумные жильцы за стеной") is None
+
+
+# ── атрибуты жилья из запроса: комнаты, мебель, вид на море ──────────────────
+
+
+@pytest.mark.parametrize(
+    ("text", "rooms"),
+    [
+        ("снять студию у моря", 1),
+        ("однушку с мебелью", 1),
+        ("квартиру 2 спальни", 2),
+        ("двушка в центре", 2),
+        ("2-комнатную квартиру", 2),
+        ("трёшку у моря", 3),
+        ("квартиру 3 спальни", 3),
+        ("1 bedroom apartment for rent", 1),
+        ("2 bedrooms apartment", 2),
+    ],
+)
+def test_rooms_are_read_from_the_query(text: str, rooms: int) -> None:
+    """Число комнат приезжает атрибутом — и словом, и цифрой, и латиницей."""
+    assert parse_query(text, default_city=CITY).attributes.get("rooms") == rooms
+
+
+def test_furnished_and_sea_view_are_read_from_the_query() -> None:
+    """Мебель и вид на море — из словаря рынка, тем же `_attribute_named_in`."""
+    both = parse_query("сниму квартиру у моря с мебелью", default_city=CITY)
+
+    assert both.attributes["furnished"] is True
+    assert both.attributes["sea_view"] is True
+    assert parse_query("квартира без мебели", default_city=CITY).attributes["furnished"] is False
+    assert parse_query("студия с видом на море", default_city=CITY).attributes["sea_view"] is True
+
+
+def test_housing_attributes_belong_to_the_housing_category() -> None:
+    """У мотобайка комнат и мебели нет — набор атрибутов принадлежит категории.
+
+    Категорийно, а не ветвлением: тот же гейт, что у коробки передач. Абсурдный
+    «скутер 2 спальни» служит проверкой — ни один жилой атрибут не заводится, и
+    «2 спальни» при этом не становится бюджетом.
+    """
+    p = parse_query("скутер 2 спальни с мебелью у моря", default_city=CITY)
+
+    assert p.category is Category.MOTORBIKE
+    assert "rooms" not in p.attributes
+    assert "furnished" not in p.attributes
+    assert "sea_view" not in p.attributes
+    assert p.budget.max is None
+
+
+def test_detect_rooms_is_gated_by_the_category() -> None:
+    """Тот же текст даёт комнаты жилью и молчит транспорту — таблица, не ветка."""
+    assert detect_rooms("2 спальни", Category.APARTMENT) == 2
+    assert detect_rooms("2 спальни", Category.MOTORBIKE) is None
+    assert detect_rooms("2 спальни", None) is None
+
+
+def test_the_rental_term_becomes_the_price_period() -> None:
+    """Срок аренды — период цены: «посуточно» → day, «длительный срок» → month.
+
+    Отдельного атрибута `term` нет: период уже есть в схеме, и «посуточно» это
+    ровно «цена за сутки». Число срока при этом бюджетом не становится (см. выше).
+    """
+    assert parse_query("жильё посуточно", default_city=CITY).budget.period is PricePeriod.DAY
+    assert (
+        parse_query("снять квартиру на длительный срок", default_city=CITY).budget.period
+        is PricePeriod.MONTH
+    )

@@ -325,18 +325,22 @@ def _patterns(models: tuple[MotorbikeModel, ...]) -> ModelPatterns:
 
     «air blade» и «airblade» — одно имя, и держать оба строками значило бы
     однажды забыть третье. Тот же приём, что у написаний города.
+
+    У спортивных семейств recognition задано сырым `pattern`, а не написаниями:
+    их имя слипается с объёмом («cbr150r», «z300»), и хвостовой `\\b` целого слова
+    его бы не поймал (motorbike_models: поле `pattern`). Тогда написания не
+    участвуют — regex берётся как есть.
     """
-    return tuple(
-        (
-            model.slug,
-            re.compile(
-                r"\b(?:"
-                + "|".join(re.escape(name).replace(r"\ ", r"\s*") for name in model.spellings)
-                + r")\b",
-                re.IGNORECASE,
-            ),
-        )
-        for model in models
+    return tuple((model.slug, re.compile(_model_regex(model), re.IGNORECASE)) for model in models)
+
+
+def _model_regex(model: MotorbikeModel) -> str:
+    if model.pattern is not None:
+        return model.pattern
+    return (
+        r"\b(?:"
+        + "|".join(re.escape(name).replace(r"\ ", r"\s*") for name in model.spellings)
+        + r")\b"
     )
 
 

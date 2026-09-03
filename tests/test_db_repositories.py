@@ -351,6 +351,36 @@ async def test_dialogue_state_is_read_back_after_a_restart(db_engine: AsyncEngin
     assert resumed.state.asked == ("budget.max",)
 
 
+async def test_active_query_is_explicit_not_whichever_was_edited_last(
+    db_session: AsyncSession,
+) -> None:
+    user = await UserRepository(db_session).get_or_create(43)
+    assert user.id is not None
+    repo = PassportRepository(db_session)
+    first = await repo.save_new(user.id, _passport(400))
+    second = await repo.save_new(user.id, _passport(300))
+    assert await repo.select(user.id, first.root)
+    await repo.save_revision(second, _passport(250))
+    assert await repo.select(user.id, first.root)
+    await db_session.commit()
+
+    current = await repo.get_current(user.id)
+    queries = await repo.list_queries(user.id)
+
+    assert current is not None and current.root == first.root
+    assert len(queries) == 2
+    assert [row.root for row in queries if row.is_active] == [first.root]
+
+
+async def test_cannot_select_another_users_query(db_session: AsyncSession) -> None:
+    mine = await UserRepository(db_session).get_or_create(44)
+    stranger = await UserRepository(db_session).get_or_create(45)
+    assert mine.id is not None and stranger.id is not None
+    foreign = await PassportRepository(db_session).save_new(stranger.id, _passport(400))
+
+    assert not await PassportRepository(db_session).select(mine.id, foreign.root)
+
+
 # ── очередь ─────────────────────────────────────────────────────────────────
 
 
@@ -1190,6 +1220,24 @@ async def test_an_expired_subscription_stops_receiving_cards(db_session: AsyncSe
 
     assert await repo.active_subscriptions(now=NOW - timedelta(days=1)) != []
     assert await repo.active_subscriptions(now=NOW + timedelta(seconds=1)) == []
+
+
+async def test_paid_monitor_can_be_paused_and_resumed(db_session: AsyncSession) -> None:
+    user = await UserRepository(db_session).get_or_create(7791)
+    assert user.id is not None
+    stored = await PassportRepository(db_session).save_new(user.id, _passport(400))
+    repo = DeliveryRepository(db_session)
+    await repo.pay_and_activate(
+        Payment(user_id=user.id, amount=1, external_id="пауза"),
+        passport_root=stored.root,
+        until=datetime.now(UTC) + timedelta(days=30),
+        since_listing_id=0,
+    )
+
+    assert await repo.set_active(user_id=user.id, passport_root=stored.root, active=False)
+    assert await repo.active_subscriptions() == []
+    assert await repo.set_active(user_id=user.id, passport_root=stored.root, active=True)
+    assert len(await repo.active_subscriptions()) == 1
 
 
 async def test_a_forged_payload_cannot_subscribe_to_someone_elses_request(

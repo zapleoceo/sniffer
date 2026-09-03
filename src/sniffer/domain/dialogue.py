@@ -196,12 +196,13 @@ class Question:
     code: str
     text: str
     options: tuple[Option, ...] = ()
+    skippable: bool = True
 
     @property
     def buttons(self) -> tuple[Option, ...]:
-        """Кнопки вопроса. «Не важно» здесь, а не в каталоге, — чтобы её было
-        нельзя забыть: клиент, которого допрашивают без права пропустить, уходит.
-        """
+        """Варианты ответа и выход для полей, которые можно не ограничивать."""
+        if not self.skippable:
+            return self.options
         return (*self.options, Option(SKIP_LABEL, SKIP))
 
 
@@ -214,11 +215,20 @@ QUESTIONS: tuple[Question, ...] = (
         code="cat",
         text="Что ищем?",
         options=(
-            Option("скутер", "motorbike"),
+            Option("скутер", "scooter"),
+            Option("мотобайк", "motorbike"),
             Option("квартиру", "apartment"),
             Option("комнату", "room"),
             Option("дом", "house"),
         ),
+        skippable=False,
+    ),
+    Question(
+        field="city",
+        code="city",
+        text="В каком городе ищем?",
+        options=(Option("Нячанг", "nha_trang"), Option("Дананг", "da_nang")),
+        skippable=False,
     ),
     Question(
         field="budget.max",
@@ -272,23 +282,16 @@ def question_by_code(code: str) -> Question | None:
 
 
 def blocking_question(passport: Passport, asked: Sequence[str]) -> Question | None:
-    """Единственное поле, без которого искать НЕ на чём, — категория.
+    """Минимальная воронка до поиска: предмет, город и ценовой потолок.
 
-    Всё прочее (бюджет, коробка, состояние, марка) до первой выдачи не
-    спрашивается. passport.md требует обратного тому, что делал код: показать
-    выдачу рано и уточнять обратной связью на карточках — сказать «дорого»,
-    глядя на пять карточек, проще и умнее, чем назвать бюджет в пустоту.
-    Форма из трёх вопросов ДО поиска этот принцип нарушала: клиента допрашивали
-    прежде, чем помочь. Теперь до поиска стоит один вопрос и только тот, без
-    которого нечего искать, — что именно ищем.
-
-    Город блокирующим не считается: его подставляет `default_city`, а
-    неизвестный/необслуживаемый ловит `is_served` в боте отдельным ответом.
-    Уточнения переехали в `feedback_question`: там клиент сам нажал «не то» и
-    ждёт вопроса, а не получает его вместо выдачи.
+    Уже названное не переспрашиваем. Бюджет можно явно пропустить кнопкой,
+    после чего поле остаётся пустым, но событие в `asked` разрешает поиск.
+    Категорию и город пропускать нельзя: широкий поиск по всему рынку или
+    молчаливая подстановка города выдают случайные варианты.
     """
-    if passport.category is None and "category" not in asked:
-        return question_for("category")
+    for field in ("category", "city", "budget.max"):
+        if not has_value(passport, field) and (field != "budget.max" or field not in asked):
+            return question_for(field)
     return None
 
 
@@ -519,7 +522,15 @@ def apply_answer(passport: Passport, field: str, value: AnswerValue) -> Passport
     if field == "budget.max":
         update["budget"] = _budget(passport, value)
     elif field == "category":
-        update["category"] = Category(str(value))
+        update["category"] = Category.MOTORBIKE if value == "scooter" else Category(str(value))
+        if value == "scooter":
+            update["attributes"] = {
+                **passport.attributes,
+                "transmission": "automatic",
+                "body_type": "tay_ga",
+            }
+    elif field == "city":
+        update["city"] = str(value)
     elif field.startswith("attributes."):
         update["attributes"] = {**passport.attributes, field.removeprefix("attributes."): value}
     else:  # pragma: no cover — поля вне каталога вопросов сюда не приходят

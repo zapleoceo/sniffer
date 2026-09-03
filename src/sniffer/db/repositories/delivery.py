@@ -295,6 +295,20 @@ class DeliveryRepository(Repository):
         row = found.first()
         return _subscription(row[0], row[1]) if row is not None else None
 
+    async def set_active(self, *, user_id: int, passport_root: int, active: bool) -> bool:
+        """Поставить мониторинг на паузу или возобновить оплаченный."""
+        changed = await self._session.execute(
+            update(models.Subscription)
+            .where(
+                models.Subscription.user_id == user_id,
+                models.Subscription.passport_root == passport_root,
+                models.Subscription.expires_at > datetime.now(UTC),
+            )
+            .values(is_active=active)
+            .returning(models.Subscription.id)
+        )
+        return changed.scalar_one_or_none() is not None
+
 
 def _subscription(row: models.Subscription, passport: models.Passport) -> SubscriptionState:
     return SubscriptionState(
