@@ -92,6 +92,22 @@ cd "$DEPLOY_PATH"
 [ -f .env ]                || die "нет .env в $DEPLOY_PATH — заполнить по .env.example" 10
 command -v docker >/dev/null || die "docker не установлен" 10
 docker compose version >/dev/null 2>&1 || die "нет docker compose v2" 10
+
+# Профили compose включаются ВСЕ, и это не удобство, а требование проверяемости.
+# Сервис за профилем невидим `docker compose config --services`, а из этого
+# списка проверка здоровья (раздел 6) берёт, за кем следить. 03.09.2026:
+# `agent-collector` падал по кругу — девять перезапусков на разборе настроек, —
+# а деплой рапортовал успех, потому что сервиса в списке не было. Хуже:
+# `up -d --remove-orphans` без профиля вправе снести такой контейнер как сироту,
+# то есть деплой мог и убить работающий сервис.
+#
+# Выключать сервис профилем не нужно и не задумано: ненастроенный процесс
+# ПРОСТАИВАЕТ (`runtime.service` → `service.idle`), а не падает, поэтому
+# поднятый с выключенным флагом контейнер проверку здоровья проходит. Значит
+# «включён ли сервис» решает его настройка в .env, а профиль решает лишь то,
+# участвует ли он в стеке — и участвовать он должен всегда, иначе его отказы
+# никто не увидит.
+COMPOSE_PROFILE_ARGS="--profile agent-catalog"
 info "каталог: $DEPLOY_PATH"
 info "цель:    $TARGET_REF"
 info "compose: $(docker compose version --short 2>/dev/null || echo '?')"
@@ -211,7 +227,7 @@ fi
 # Postgres поднимаем первым и ждём healthy: миграция в неподнятую базу — гонка,
 # а app-контейнеры обязаны стартовать уже на новой схеме.
 log "миграции схемы"
-docker compose up -d postgres
+docker compose $COMPOSE_PROFILE_ARGS up -d postgres
 PG_MIG_CID="$(docker compose ps -q postgres 2>/dev/null | head -n1 || true)"
 if [ -z "$PG_MIG_CID" ]; then
   die "postgres не поднялся — миграции применить негде" 40
@@ -234,11 +250,11 @@ done
 log "запуск"
 # --remove-orphans действует внутри compose-проекта sniffer и до контейнеров
 # Веры и Степана не дотягивается.
-docker compose up -d --remove-orphans
+docker compose $COMPOSE_PROFILE_ARGS up -d --remove-orphans
 
 # ── 6. Здоровье ─────────────────────────────────────────────────────────────
 log "здоровье (даю ${SETTLE_S}с на прогрев)"
-SERVICES="$(docker compose config --services)"
+SERVICES="$(docker compose $COMPOSE_PROFILE_ARGS config --services)"
 
 snapshot() {
   local svc cid
@@ -315,6 +331,18 @@ if [ -n "${PG_CID:-}" ]; then
     FAIL=1
   else
     info "миграции: listings.source на месте"
+  fi
+  # Часовой ПОСЛЕДНЕЙ миграции в цепочке. Цикл выше применяет их по порядку и
+  # падает на ошибке, но это доказывает только то, что psql не вернул ошибку на
+  # ЗАПУЩЕННОМ файле: новый файл, не попавший в `git pull`, не запустится вовсе
+  # и ошибки не даст. Поэтому проверяется наличие таблицы из хвоста цепочки —
+  # ровно тем же приёмом, что и колонка выше, и по той же причине.
+  HAS_TAIL="$(docker exec "$PG_CID" psql -U sniffer -d sniffer -tAc "select count(*) from information_schema.tables where table_schema='public' and table_name='schema_proposals'" 2>/dev/null || echo 0)"
+  if [ "${HAS_TAIL:-0}" -lt 1 ]; then
+    echo "   хвост цепочки миграций не доехал: таблицы schema_proposals нет (004_schema_proposals.sql)" >&2
+    FAIL=1
+  else
+    info "миграции: хвост цепочки (schema_proposals) на месте"
   fi
 fi
 
