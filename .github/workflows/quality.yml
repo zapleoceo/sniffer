@@ -84,7 +84,10 @@ jobs:
       # именно поэтому проверять модели есть смысл против него, а не против
       # metadata.create_all: последнее сверяло бы модели с ними же.
       - name: Схема в тестовой базе
-        run: psql -h localhost -U sniffer -d sniffer_test -v ON_ERROR_STOP=1 -f infra/sql/001_init.sql
+        run: |
+          for migration in infra/sql/00*.sql; do
+            psql -h localhost -U sniffer -d sniffer_test -v ON_ERROR_STOP=1 -f "$migration"
+          done
 
       # Покрытие считается ЗДЕСЬ, а не локально: тесты слоя `db/` идут только
       # с живым Postgres, и локальная цифра всегда ниже настоящей на два
