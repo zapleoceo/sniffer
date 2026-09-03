@@ -1104,7 +1104,7 @@ def seed_rows() -> list[tuple[str, str, int]]:
 def test_seed_repeats_the_document_in_the_same_order() -> None:
     """Стартовый набор — тот самый список владельца, а не пересказ по памяти."""
     rows = seed_rows()
-    assert len(rows) == 35, "сид разобрался пустым — проверка была бы бессмысленной"
+    assert len(rows) == 36, "сид разобрался пустым — проверка была бы бессмысленной"
     assert [username for _, username, _ in rows] == doc_waves()
     assert [priority for *_, priority in rows] == sorted(priority for *_, priority in rows), (
         "приоритеты обязаны возрастать, иначе порядок документа теряется"
