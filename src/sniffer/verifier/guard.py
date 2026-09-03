@@ -62,6 +62,11 @@ GUARD_TEXT_CHARS = 400
 # удваивать: лучше показать непроверенное, чем заставить ждать две минуты.
 GUARD_TIMEOUT_S = 20.0
 GUARD_CAPABILITY = "chat:sales"
+# Замер трёх ранее оборванных ответов: 896–960 output tokens на 12 карточек.
+# Старые 896 не вмещали why/price_text даже на sales. Запас сохраняет пояснения;
+# это потолок, а не обязательный расход. Результаты: docs/json-output-experiments.md.
+GUARD_TOKENS_PER_ITEM = 128
+GUARD_TOKENS_OVERHEAD = 512
 # Верхняя граница правдоподобия: 10 млрд донгов — это 380 тысяч долларов.
 # Больше — ошибка чтения, а не цена байка или квартиры в Нячанге.
 MAX_PLAUSIBLE_VND = 10_000_000_000
@@ -153,7 +158,7 @@ async def screen(
                 schema_name="listing_guard",
                 capability=GUARD_CAPABILITY,
                 system=SYSTEM,
-                max_tokens=64 * len(head) + 128,
+                max_tokens=GUARD_TOKENS_PER_ITEM * len(head) + GUARD_TOKENS_OVERHEAD,
             ),
             timeout=GUARD_TIMEOUT_S,
         )
