@@ -39,8 +39,22 @@ def listing_from(
     *,
     deal_type: str = "sell",
     attributes: dict[str, object] | None = None,
+    city: str = "",
 ) -> Listing:
-    """Минимальная честная карточка из прошедшего гейт сообщения."""
+    """Минимальная честная карточка из прошедшего гейт сообщения.
+
+    `city` — город, названный в САМОМ объявлении; пусто — берём город чата.
+    Разница не косметическая, и видна она не на всех чатах. Пока в реестре были
+    только нячангские группы, город чата и город лота совпадали почти всегда.
+    Первая же общевьетнамская барахолка (`@vietavito`, «все барахолки») это
+    ломает: внутри объявления со всей страны, и город чата приписал бы ханойскую
+    квартиру Нячангу — а матчер фильтрует ровно по этому полю
+    (`matching/rules.py`), то есть ложь дошла бы до выдачи как правда.
+
+    Порядок «текст лота главнее чата» тот же, что у разбора запроса клиента:
+    `parse_query` кладёт `city or default_city`. Заодно чинится случай, который
+    был и раньше: продавец из нячангской группы, продающий байк в Дананге.
+    """
     if raw.id is None:
         raise ValueError("raw message without database id")
     if not result.passed or not result.categories:
@@ -52,7 +66,7 @@ def listing_from(
         external_id=f"{raw.chat_tg_id}:{raw.msg_id}",
         deal_type=deal_type,
         category=result.categories[0].value,
-        city=chat.city,
+        city=city or chat.city,
         title=_title(raw.text),
         summary=_summary(raw.text),
         tg_link=_link(chat.tg_id, chat.username, raw.msg_id),

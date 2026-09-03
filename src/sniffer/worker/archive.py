@@ -121,6 +121,10 @@ class ArchivePipeline:
                 result,
                 deal_type=deal_type,
                 attributes=dict(parsed.attributes),
+                # Город из текста лота. `parse_query` уже получил его выше с
+                # городом чата по умолчанию — оставалось только донести до
+                # карточки, а она брала город чата напрямую.
+                city=parsed.city or "",
             )
         )
         await repo.set_stage(
