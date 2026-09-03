@@ -538,3 +538,71 @@ def test_two_all_filler_lots_are_not_merged() -> None:
     ordered = rank_items(passport(attributes={}), [a, b], usd_vnd=RATE, now=NOW)
 
     assert {candidate.external_id for candidate in ordered} == {"a", "b"}
+
+
+# ── число комнат сужает выдачу жилья ────────────────────────────────────────
+
+
+def _flat(rooms: int) -> Passport:
+    """Паспорт на жильё с числом комнат — интент аренды, как у жилья на рынке."""
+    return passport(intent=Intent.RENT, category=Category.APARTMENT, attributes={"rooms": rooms})
+
+
+def test_a_foreign_room_count_is_dropped() -> None:
+    """«2 спальни» против студии и трёшки — разное жильё, и чужое число отсекается.
+
+    Жёсткий факт, как модель и объём: показать студию на запрос двушки хуже
+    честной пустоты. Точное совпадение — 3 спальни это другой сегмент, не «почти».
+    """
+    studio = _item_flat("studio", "Сдаётся студия у моря, 30 м², мебель")
+    two = _item_flat("two", "Сдам квартиру, 2 спальни, вид на море")
+    three = _item_flat("three", "3-комнатная квартира, длительный срок")
+
+    ordered = rank_items(_flat(2), [studio, two, three], usd_vnd=RATE, now=NOW)
+
+    assert [candidate.external_id for candidate in ordered] == ["two"]
+
+
+def test_a_listing_silent_on_rooms_survives_a_room_request() -> None:
+    """Неизвестное ≠ несовпадение: лот без числа комнат остаётся.
+
+    Половина объявлений число комнат не пишет, и выбрасывать их за молчание
+    значило бы опустошить выдачу — та же дисциплина, что у объёма и марки.
+    """
+    silent = _item_flat("silent", "Уютная квартира у моря, балкон, свежий ремонт")
+
+    assert rank_items(_flat(2), [silent], usd_vnd=RATE, now=NOW) == [silent]
+
+
+def test_an_agency_menu_word_does_not_keep_the_wrong_room_count() -> None:
+    """Подвал «квартиры и студии» — навигация, а не описание: явное «2 спальни» главнее.
+
+    Замер снимка: у 17 агентских лотов в подвале стоит меню видов жилья, и слово
+    «студии» там не про этот лот. Прижатое число подвал не пачкает, поэтому на
+    запрос студии (1) лот с явными двумя спальнями отсекается, а на запрос
+    двушки (2) — проходит. Без этого studio-запрос собирал бы 2-3-комнатные.
+    """
+    menu = _item_flat("menu", "Квартира с 2 спальнями у моря. Ещё варианты: квартиры и студии")
+
+    assert rank_items(_flat(1), [menu], usd_vnd=RATE, now=NOW) == []
+    kept = rank_items(_flat(2), [menu], usd_vnd=RATE, now=NOW)
+    assert [candidate.external_id for candidate in kept] == ["menu"]
+
+
+def test_a_matching_room_count_outranks_a_silent_listing() -> None:
+    """Совпавшее число комнат поднимает балл — это сигнал, не только фильтр.
+
+    Оба лота проходят отсев (один назвал 2 спальни, другой промолчал), но при
+    равной цене и свежести названное совпадение ставит подходящий лот выше.
+    """
+    match = _item_flat("match", "Квартира 2 спальни, у моря", age_hours=24)
+    silent = _item_flat("silent", "Квартира у моря, свежий ремонт", age_hours=24)
+
+    ordered = rank_items(_flat(2), [silent, match], usd_vnd=RATE, now=NOW)
+
+    assert [candidate.external_id for candidate in ordered] == ["match", "silent"]
+
+
+def _item_flat(name: str, text: str, *, age_hours: int = 1) -> RawItem:
+    """Лот жилья: категория читается из «квартира»/«студия» в тексте, цена в бюджете."""
+    return item(name, price=12_000_000, text=text, age_hours=age_hours)

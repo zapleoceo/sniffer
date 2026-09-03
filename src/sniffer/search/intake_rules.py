@@ -27,6 +27,7 @@ from sniffer.search.budget_rules import parse_budget
 from sniffer.search.engine_size import read_engine_size, without_engine_cc
 from sniffer.search.market_terms import ALL_CITY_NAMES, ATTRIBUTE_TERMS, LangTerms
 from sniffer.search.motorbike_models import BODY_SCOOTER, MOTORBIKE_BRANDS
+from sniffer.search.rooms import read_rooms
 from sniffer.search.vocabulary import (
     brand_category,
     city_variants,
@@ -43,8 +44,14 @@ _INTENT_RULES: tuple[tuple[Intent, re.Pattern[str]], ...] = (
     (Intent.RENT_OUT, re.compile(r"\b(?:сда(?:м|ю|ть)|cho\s?thuê)\b", re.IGNORECASE)),
     (
         Intent.RENT,
+        # «прокат»/«напрокат» — это тоже аренда: «прокат скутера» клиент хочет
+        # взять, а не купить. Раньше без них он получал intent=buy, и отсев
+        # проката (`relevance._is_rental_offer`) выбрасывал ровно те лоты, что
+        # ему нужны. Слова здесь — про сторону КЛИЕНТА; в тексте ЛОТА «прокат»
+        # метит оффер аренды (`market_terms.RENTAL_STEMS`), и это другое знание.
         re.compile(
-            r"\b(?:сни(?:му|мать)|снять|аренд\w*|в\s?аренду|rent|to\s?let|thuê)\b",
+            r"\b(?:сни(?:му|мать)|снять|аренд\w*|в\s?аренду|прокат\w*|напрокат"
+            r"|rent|to\s?let|thuê)\b",
             re.IGNORECASE,
         ),
     ),
@@ -75,9 +82,14 @@ _CATEGORY_RULES: tuple[tuple[Category, re.Pattern[str]], ...] = (
     ),
     (
         Category.APARTMENT,
+        # «жильё»/«жилье» — самый общий вид жилья, поэтому оно ведёт в APARTMENT:
+        # «жильё посуточно», «сниму жильё до 15 млн». `жиль[еёяю]` — только формы
+        # слова «жильё» (жилье/жилья/жилью/жильём); «жилой»/«жилец» через «о»/«ц»
+        # не ловятся, а APARTMENT стоит раньше ROOM/HOUSE, поэтому «жильё» с ними
+        # не спорит.
         re.compile(
-            r"\b(?:квартир\w*|апартамент\w*|апарт|студи\w*|однушк\w*|двушк\w*|тр[её]шк\w*"
-            r"|apartment|studio|căn\s?hộ|chung\s?cư)\b",
+            r"\b(?:квартир\w*|апартамент\w*|апарт|жиль[еёяю]\w*|студи\w*|однушк\w*"
+            r"|двушк\w*|тр[её]шк\w*|apartment|studio|căn\s?hộ|chung\s?cư)\b",
             re.IGNORECASE,
         ),
     ),
@@ -202,6 +214,14 @@ _CITY_RULES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
 # купить квартиру нельзя в принципе. Для транспорта симметрично — берут себе.
 _RENTED_CATEGORIES = (Category.APARTMENT, Category.ROOM, Category.HOUSE)
 
+# У жилья свой набор атрибутов — мебель, вид на море, число комнат, — и его
+# извлекают только для жилых категорий. Совпадает с `_RENTED_CATEGORIES` не
+# случайно (то же жильё), но знание разное: там «это снимают», здесь «у этого
+# такие атрибуты», и завтра они могут разойтись (гараж покупают, а комнаты у
+# него есть). Число комнат гейтится этим кортежем; мебель и вид на море — своей
+# таблицей (`ATTRIBUTE_TERMS` заводит их под теми же категориями).
+_HOUSING_CATEGORIES = (Category.APARTMENT, Category.ROOM, Category.HOUSE)
+
 MAX_QUERY_CHARS = 500
 _SCOOTER_RE = re.compile(r"\b(?:скутер\w*|scooters?|xe\s+(?:tay\s+)?ga)\b", re.IGNORECASE)
 
@@ -258,6 +278,10 @@ def parse_query(text: str, *, default_city: str = "") -> Passport:
     papers = detect_papers(query, category)
     if papers:
         attributes["papers"] = papers
+    # Атрибуты жилья — категорийно, а не ветвлением: у байка свой набор
+    # (коробка, документы, объём), у жилья свой. Для транспорта функция вернёт
+    # пусто, потому что мебели и комнат у мотобайка нет в его таблице.
+    attributes.update(detect_housing_attributes(query, category))
 
     known_city = city or default_city or None
     return Passport(
@@ -374,6 +398,43 @@ def detect_papers(text: str, category: Category | None = None) -> str | None:
     негде.
     """
     return _attribute_named_in(category, "papers", text)
+
+
+def detect_rooms(text: str, category: Category | None = None) -> int | None:
+    """Число комнат из запроса: «студию»→1, «2 спальни»→2, «трёшку»→3.
+
+    Категорию спрашивает членство в жилье, а не ветка на каждый атрибут: у
+    транспорта комнат нет, поэтому «мотоцикл на 2 передачи» их не заводит.
+    Голое число комнатой не считается — читает его `rooms.read_rooms`, где и
+    записано, почему «2» без слова это ещё не две комнаты.
+    """
+    if category not in _HOUSING_CATEGORIES:
+        return None
+    return read_rooms(text)
+
+
+def detect_housing_attributes(text: str, category: Category | None) -> dict[str, Any]:
+    """Атрибуты жилья, названные в запросе: число комнат, мебель, вид на море.
+
+    Пусто для нежилой категории — набор атрибутов принадлежит категории, как у
+    мотобайка (коробка, документы). Мебель и вид на море берутся из словаря
+    рынка (`ATTRIBUTE_TERMS`) тем же `_attribute_named_in`, что и коробка: слова
+    там лежат под жилыми категориями один раз (ссылкой), второго списка нет.
+    Булев атрибут в паспорте — `True`/`False`, а в словаре ключ строкой; сводит
+    их `== "true"`, как и на стороне лота (`vocabulary.attribute_terms`).
+    """
+    if category not in _HOUSING_CATEGORIES:
+        return {}
+    found: dict[str, Any] = {}
+    rooms = detect_rooms(text, category)
+    if rooms is not None:
+        found["rooms"] = rooms
+    furnished = _attribute_named_in(category, "furnished", text)
+    if furnished is not None:
+        found["furnished"] = furnished == "true"
+    if _attribute_named_in(category, "sea_view", text) == "true":
+        found["sea_view"] = True
+    return found
 
 
 def _attribute_named_in(category: Category | None, attribute: str, text: str) -> str | None:
