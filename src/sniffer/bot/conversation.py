@@ -112,6 +112,7 @@ class Found:
     fallback: bool = False
     sources: tuple[str, ...] = ()
     stages: dict[str, int] = field(default_factory=dict)
+    status: str | None = None
 
 
 class Recorder(Protocol):
@@ -148,6 +149,7 @@ Send = Callable[[Reply], Awaitable[None]]
 # берёт на себя открытие и закрытие записи. Три точки входа — одна обёртка.
 Body = Callable[["Client", str, Send], Awaitable[None]]
 Finder = Callable[[Passport], Awaitable["Found"]]
+ScopedFinder = Callable[[Dialogue], Awaitable["Found"]]
 Intake = Callable[[], Parser]
 
 
@@ -248,11 +250,13 @@ class Conversation:
         *,
         intake: Intake = QueryIntake,
         finder: Finder = find_live,
+        scoped_finder: ScopedFinder | None = None,
         recorder: Recorder | None = None,
     ) -> None:
         self._store = store
         self._intake = intake
         self._finder = finder
+        self._scoped_finder = scoped_finder
         # По умолчанию — настоящий журнал: разговор создаётся хендлером без
         # аргументов, и всё, что не подставлено здесь, на боевом пути не
         # появится никогда.
@@ -535,7 +539,11 @@ class Conversation:
 
         turn = _current_turn.get()
         try:
-            found = await self._finder(passport)
+            found = (
+                await self._scoped_finder(dialogue)
+                if self._scoped_finder is not None
+                else await self._finder(passport)
+            )
         except Exception as exc:
             # Граница запроса: неожиданная ошибка внутри поиска не должна
             # оставлять клиента без ответа. Трейсбек уходит в лог целиком.
@@ -552,7 +560,7 @@ class Conversation:
             # больше негде, а новое появится.
             await send(
                 Reply(
-                    EMPTY_WITH_OFFER,
+                    f"{found.status}\n\n{OFFER}" if found.status else EMPTY_WITH_OFFER,
                     offer_subscription=True,
                     passport_root=dialogue.passport.root,
                 )
@@ -560,6 +568,8 @@ class Conversation:
             return
         shown = min(len(found.items), get_settings().max_cards)
         header = _result_header(passport, len(found.items), shown)
+        if found.status:
+            header = f"{found.status}\n\n{header}"
         await send(
             Reply(
                 f"{header}\n\n{render_cards(found.items)}",
