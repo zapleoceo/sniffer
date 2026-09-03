@@ -29,6 +29,7 @@ from sniffer.db.models.observability import (
     DialogMessage,
     TelegramSession,
 )
+from sniffer.db.models.proposals import proposals
 from sniffer.db.models.sources import Chat, RawMessage, Seller
 
 __all__ = [
@@ -57,5 +58,6 @@ __all__ = [
     "User",
     "coverage",
     "observations",
+    "proposals",
     "publications",
 ]
