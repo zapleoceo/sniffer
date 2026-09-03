@@ -24,13 +24,14 @@ SRC = pathlib.Path(__file__).parents[1] / "src" / "sniffer"
 # Кто кого не смеет импортировать. Ключ — пакет, значение — запрещённые ему.
 FORBIDDEN: dict[str, frozenset[str]] = {
     # Agent orchestration gets data only through injected MCP read protocols.
-    "agents": frozenset({"db", "bot", "collector", "sources", "pipeline", "worker"}),
+    "agents": frozenset({"db", "bot", "collector", "sources", "pipeline", "worker", "agent_app"}),
     # Ядро предметной области. Не зависит ни от чего своего вообще — иначе
     # его нельзя взять в тест или в утилиту без половины проекта.
     "domain": frozenset(
         {
             "bot",
             "agents",
+            "agent_app",
             "broker",
             "collector",
             "dashboard",
@@ -50,6 +51,7 @@ FORBIDDEN: dict[str, frozenset[str]] = {
     "db": frozenset(
         {
             "agents",
+            "agent_app",
             "bot",
             "collector",
             "dashboard",
@@ -151,6 +153,8 @@ def test_every_package_of_the_project_is_judged_or_named() -> None:
         # интерфейс и считает метрики, поэтому импортирует слои по праву, как и
         # остальные точки входа. Что он меряет — docs/passport.md.
         "simulation",
+        # Composition root for private MCP/agent runtime; holds injected repositories/adapters.
+        "agent_app",
     }
     packages = {path.name for path in SRC.iterdir() if path.is_dir() and path.name != "__pycache__"}
 
