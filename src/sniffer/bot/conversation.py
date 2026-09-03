@@ -38,6 +38,7 @@ from sniffer.domain.dialogue import (
     apply_answer,
     apply_feedback,
     blocking_question,
+    corrects,
     feedback_buttons,
     feedback_question,
     parse_option,
@@ -337,6 +338,28 @@ class Conversation:
             # цепочка заново, и повтор фразы обнулял бы собранные ответы вместе
             # со счётчиком вопросов: лимит обходился бы копипастом.
             await self._restated(dialogue, send)
+            return
+        if current is not None and corrects(message):
+            # Поправка — уточнение ТОЙ ЖЕ просьбы: новая версия в той же
+            # цепочке, а не новый запрос. Живой след 03.09.2026: «найди мне
+            # моцокил 200 кубиков» → бот прочёл 200 000 VND бюджетом → «не
+            # 200000 VND, а обьем … до 200 кубических сантиметров» → цепочка
+            # начиналась заново, категория из первого сообщения исчезала, и бот
+            # спрашивал «Что ищем?» у человека, который только что объяснил,
+            # что именно поняли не так.
+            #
+            # `restates` этого не спасал и не мог: поправка приносит
+            # содержательные слова («кубических», «сантиметров»), то есть по
+            # словам она новый запрос. Отличает её противопоставление «не X, а
+            # Y», и решает это `corrects`; слияние фактов делает `merge_edit` —
+            # тот же, что у ответа словами, чтобы знание было одно.
+            dialogue = await self._store.revise(
+                dialogue,
+                merge_edit(current.passport, passport),
+                kind=EVENT_USER_MESSAGE,
+                payload={"correction": message},
+            )
+            await self._ask_or_search(dialogue, send)
             return
         dialogue = await self._store.start(dialogue, passport)
         await self._ask_or_search(dialogue, send)

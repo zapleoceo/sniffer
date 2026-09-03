@@ -26,11 +26,12 @@ import asyncio
 
 import pytest
 
+from sniffer.domain.dialogue import corrects
 from sniffer.search.intake_rules import parse_query
 from sniffer.simulation.harness import Metrics, run_all
 from sniffer.simulation.personas import CORRECTING, HOUSING, PERSONAS, TERSE, TYPING, VAGUE
 from sniffer.simulation.script import Says
-from sniffer.simulation.verdict import dialogue_faults
+from sniffer.simulation.verdict import dialogue_faults, wish_faults
 
 KEYS = tuple(scenario.key for scenario in PERSONAS)
 
@@ -160,3 +161,54 @@ def test_a_number_in_a_model_name_never_becomes_money(runs: dict[str, Metrics]) 
     for scenario in TERSE + TYPING:
         fields = runs[scenario.key].passport_fields
         assert not fields.get("budget.max"), f"{scenario.key}: число прочитано деньгами"
+
+
+def test_a_fulfilled_wish_moves_to_the_expectations(runs: dict[str, Metrics]) -> None:
+    """Пожелание, которое СБЫЛОСЬ, — уже не пробел и числиться пробелом не вправе.
+
+    Тот же страж, что у предметных сценариев, и по той же причине: пожелания
+    живут под `xfail`, а он не падает никогда — значит выполненное пожелание
+    остаётся зелёным, отчёт продолжает называть его несделанной работой, и
+    требование так и не становится регрессной защитой.
+
+    Этот путь пожелание поправляющего уже прошло: поправка перестала сбрасывать
+    паспорт, поля переехали в `expect`, и теперь их сторожит обычный ассерт.
+    """
+    stale = [
+        scenario.key
+        for scenario in PERSONAS
+        if scenario.wish is not None and not wish_faults(runs[scenario.key])
+    ]
+
+    assert not stale, f"пожелание сбылось, а числится пробелом: {stale}"
+
+
+def test_a_correction_is_told_apart_from_a_new_request() -> None:
+    """Что считается поправкой, а что новым запросом — на живых формулировках.
+
+    Обе стороны важны одинаково. Пропустить поправку — сбросить собранное
+    (это и был дефект). Принять новый запрос за поправку — молча продолжить
+    искать прежнее, и клиент этого даже не увидит.
+    """
+    corrections = (
+        # Из журнала бота, дословно: клиент объясняет, что 200 000 VND — не
+        # бюджет, а объём двигателя.
+        "не 200000 VND, а обьем мощность двигателя до 200 кубических сантиметров",
+        "не скутер, а мотоцикл",
+    )
+    new_requests = (
+        # Тоже из журнала — и это НЕ поправка: «не мотоцикл» здесь уточняет
+        # предмет внутри новой просьбы, противопоставления «а» за ним нет.
+        "нужен скутер, не мотоцикл, honda lead",
+        "нужен мотоцикл",
+        "а покажи самые дешевый скутеры которые есть на продажу",
+        # Отрицания, которые поправками не являются: пропуск, цена, атрибут.
+        "не важно",
+        "недорого",
+        "квартира не новая",
+    )
+
+    for text in corrections:
+        assert corrects(text), f"поправка не узнана: {text!r}"
+    for text in new_requests:
+        assert not corrects(text), f"новый запрос принят за поправку: {text!r}"
