@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from sniffer.agents.contracts import AgentError, ToolCall, Turn
-from sniffer.broker.client import BrokerError
+from sniffer.broker.client import BrokerCapError, BrokerError
 
 
 class BrokerToolResult(Protocol):
@@ -57,6 +57,8 @@ class BrokerModel:
                 max_tokens=self._max_tokens,
                 temperature=0.1,
             )
+        except BrokerCapError:
+            raise AgentError("broker_cap") from None
         except BrokerError:
             raise AgentError("broker_failed") from None
         if type(result.refusal) is not bool or result.refusal:
