@@ -89,6 +89,23 @@ async def test_guard_uses_sales_lane_without_losing_structured_contract() -> Non
     assert options["schema"]["required"] == ["verdicts"]
 
 
+@pytest.mark.parametrize("count, expected_tokens", [(1, 640), (6, 1280), (12, 2048), (30, 2048)])
+async def test_guard_budget_preserves_explanations_without_extra_calls(
+    count: int,
+    expected_tokens: int,
+) -> None:
+    broker = FakeBroker()
+    await screen(
+        WANTED,
+        [item(n, "Honda Vision") for n in range(count)],
+        broker=broker,  # type: ignore[arg-type]
+    )
+    assert broker.calls == 1
+    options = broker.options[0]
+    assert options["max_tokens"] == expected_tokens
+    assert "why" in options["schema"]["properties"]["verdicts"]["items"]["required"]
+
+
 async def test_a_price_written_without_a_label_is_recovered() -> None:
     """«Штормовая скидка! 40 миллионов» — регексп такое не берёт, модель берёт."""
     items = [item(1, "Штормовая скидка! 40 миллионов) Кастомный байк")]

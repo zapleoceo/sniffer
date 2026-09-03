@@ -23,11 +23,15 @@ SRC = pathlib.Path(__file__).parents[1] / "src" / "sniffer"
 
 # Кто кого не смеет импортировать. Ключ — пакет, значение — запрещённые ему.
 FORBIDDEN: dict[str, frozenset[str]] = {
+    # Agent orchestration gets data only through injected MCP read protocols.
+    "agents": frozenset({"db", "bot", "collector", "sources", "pipeline", "worker", "agent_app"}),
     # Ядро предметной области. Не зависит ни от чего своего вообще — иначе
     # его нельзя взять в тест или в утилиту без половины проекта.
     "domain": frozenset(
         {
             "bot",
+            "agents",
+            "agent_app",
             "broker",
             "collector",
             "dashboard",
@@ -46,6 +50,8 @@ FORBIDDEN: dict[str, frozenset[str]] = {
     # обращается к нему, а не наоборот.
     "db": frozenset(
         {
+            "agents",
+            "agent_app",
             "bot",
             "collector",
             "dashboard",
@@ -147,7 +153,39 @@ def test_every_package_of_the_project_is_judged_or_named() -> None:
         # интерфейс и считает метрики, поэтому импортирует слои по праву, как и
         # остальные точки входа. Что он меряет — docs/passport.md.
         "simulation",
+        # Composition root for private MCP/agent runtime; holds injected repositories/adapters.
+        "agent_app",
     }
     packages = {path.name for path in SRC.iterdir() if path.is_dir() and path.name != "__pycache__"}
 
     assert packages <= known, f"новые пакеты не описаны в тесте слоёв: {sorted(packages - known)}"
+
+
+def test_agent_imports_stay_inside_protocol_and_validation_boundaries() -> None:
+    """Provider/DB SDK additions require a deliberate architecture decision."""
+    allowed_external = {
+        "__future__",
+        "asyncio",
+        "copy",
+        "dataclasses",
+        "json",
+        "math",
+        "re",
+        "typing",
+    }
+    allowed_internal = {"sniffer.agents", "sniffer.broker.client", "sniffer.broker.output"}
+    for path in _modules("agents"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            modules: list[str] = []
+            if isinstance(node, ast.Import):
+                modules = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                assert not node.level, "agent imports must be explicit for boundary checks"
+                modules = [node.module or ""]
+            for module in modules:
+                permitted = module.split(".")[0] in allowed_external or any(
+                    module == prefix or module.startswith(prefix + ".")
+                    for prefix in allowed_internal
+                )
+                assert permitted, f"{path.name}: forbidden agent dependency {module}"

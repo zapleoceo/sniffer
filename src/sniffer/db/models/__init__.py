@@ -17,6 +17,7 @@ GIN-индексами и `vector(1024)` в декларативных моде�
 """
 
 from sniffer.db.models.base import EMBEDDING_DIM, Base, BigIdMixin
+from sniffer.db.models.catalog import coverage, observations, publications
 from sniffer.db.models.clients import Passport, PassportEvent, User
 from sniffer.db.models.delivery import Notification, Outbox, Payment, Subscription
 from sniffer.db.models.discovery import ChatCandidate, ChatJoinEvent, ChatReject
@@ -28,6 +29,7 @@ from sniffer.db.models.observability import (
     DialogMessage,
     TelegramSession,
 )
+from sniffer.db.models.proposals import proposals
 from sniffer.db.models.sources import Chat, RawMessage, Seller
 
 __all__ = [
@@ -54,4 +56,8 @@ __all__ = [
     "Subscription",
     "TelegramSession",
     "User",
+    "coverage",
+    "observations",
+    "proposals",
+    "publications",
 ]

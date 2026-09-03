@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Annotated
+from typing import Annotated, Literal
 
-from pydantic import BeforeValidator
+from pydantic import BeforeValidator, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -73,6 +73,11 @@ class Settings(BaseSettings):
     # но число правится конфигом, а не правкой кода: платный тариф отличается
     # от бесплатного значением, а не веткой в рендере.
     max_cards: int = 5
+    catalog_mode: Literal["legacy", "shadow", "pilot", "catalog"] = "legacy"
+    # Internal users.id, NOT Telegram IDs. Empty pilot list enables nobody.
+    catalog_pilot_user_ids: tuple[int, ...] = ()
+    agent_collector_enabled: bool = False
+    agent_collector_interval_s: int = Field(default=3600, ge=3600, le=86400)
     live_search_max_chats: int = 10
     live_search_cache_ttl_s: int = 300
     # Архив нужен, чтобы догонять объявления, пришедшие до вступления в чат.

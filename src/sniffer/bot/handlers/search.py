@@ -19,6 +19,7 @@ from aiogram.types import (
 
 from sniffer.bot import billing, query_menu, subscription
 from sniffer.bot import voice as voice_input
+from sniffer.bot.catalog_finder import CatalogFinder
 from sniffer.bot.conversation import NO_REQUEST_YET, Conversation, Reply, Send
 from sniffer.bot.keyboards import (
     AnswerCallback,
@@ -54,7 +55,7 @@ def conversation() -> Conversation:
     """Один разговор на процесс. Состояние всё равно в базе, а не в нём."""
     global _conversation
     if _conversation is None:
-        _conversation = Conversation(PassportStore())
+        _conversation = Conversation(PassportStore(), scoped_finder=CatalogFinder())
     return _conversation
 
 

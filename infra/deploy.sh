@@ -221,12 +221,14 @@ for _ in $(seq 1 30); do
   [ "$H" = "healthy" ] || [ "$H" = "none" ] && break
   sleep 2
 done
-if docker compose exec -T postgres psql -U sniffer -d sniffer -v ON_ERROR_STOP=1 \
-     < infra/sql/001_init.sql >/dev/null; then
-  info "схема применена из infra/sql/001_init.sql"
-else
-  die "миграции схемы не применились — см. ошибку psql выше" 40
-fi
+for migration in infra/sql/00*.sql; do
+  if docker compose exec -T postgres psql -U sniffer -d sniffer -v ON_ERROR_STOP=1 \
+       < "$migration" >/dev/null; then
+    info "схема применена из $migration"
+  else
+    die "миграция $migration не применилась — см. ошибку psql выше" 40
+  fi
+done
 
 # ── 5. Запуск ───────────────────────────────────────────────────────────────
 log "запуск"
