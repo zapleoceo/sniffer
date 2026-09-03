@@ -46,6 +46,7 @@ from sniffer.search.market_terms import (
 )
 from sniffer.search.motorbike_models import (
     MODELS_BY_CATEGORY,
+    MOTORBIKE_BRANDS,
     TRANSMISSION_BY_BODY,
     MotorbikeModel,
 )
@@ -395,6 +396,24 @@ def model_brand(model: str | None) -> str | None:
     return known.brand if known else None
 
 
+_MOTORBIKE_BRAND_SET = frozenset(brand.lower() for brand in MOTORBIKE_BRANDS)
+
+
+def brand_category(brand: str | None) -> Category | None:
+    """Категория, следующая из марки: все марки рынка — мотобайковые.
+
+    Симметрично `model_category`, но грубее и потому применяется ПОЗЖЕ: марка
+    называет предмет менее однозначно, чем модель. На нашем рынке `MOTORBIKE_BRANDS`
+    это марки мотобайков (honda, yamaha, sym, …), и «yamaha» без иных слов значит
+    мотобайк — иначе на запрос «yamaha» категория оставалась пустой и в выдачу
+    лезла даже квартира (realcheck 02.09.2026).
+
+    Ложится ТОЛЬКО на пустое место, после слова и модели, — поэтому «сниму
+    квартиру рядом с Honda» остаётся жильём: там категорию дало слово «квартиру».
+    """
+    return Category.MOTORBIKE if brand and brand.lower() in _MOTORBIKE_BRAND_SET else None
+
+
 def model_category(model: str | None) -> Category | None:
     """Что за предмет назван моделью: `vision` → `motorbike`. Незнакомая — `None`.
 
@@ -415,3 +434,82 @@ def model_transmission(model: str | None) -> str | None:
     """
     known = _MODELS.get(str(model or ""))
     return TRANSMISSION_BY_BODY.get(known.body) if known else None
+
+
+def model_engine_cc(model: str | None) -> int | None:
+    """Представительный объём модели в см³. `None` — электро либо модель незнакома.
+
+    Тем же путём, что `model_brand`/`model_transmission`: знание живёт в таблице
+    `motorbike_models`, а слои читают его отсюда. Число справочное и огрублённое
+    (у модели ряд вариантов, здесь одно частое) — годится расставить лот по классу
+    объёма, когда сам лот объёма не назвал, но текст лота всегда главнее (см.
+    `relevance._wrong_engine`).
+    """
+    known = _MODELS.get(str(model or ""))
+    return known.engine_cc if known else None
+
+
+# ── Какими словами названа категория: слово рынка, марка или модель ──────────
+# Одно знание на обе стороны воронки. Бесплатный гейт продавца
+# (`pipeline/gate.py`) держал СВОЙ список марок и моделей — honda, vision, nouvo,
+# sirius, winner, exciter, janus, — и он разошёлся с истиной: sym, kymco, lead,
+# attila, pcx, click в нём не было. Терсовое «Sym Attila 50cc, 15тр» гейт
+# отбрасывал как «без категории» ещё ДО базы, и никакая правка поиска потерянный
+# лот уже не спасала. Теперь слова берутся отсюда, из тех же таблиц, что и поиск
+# (`CATEGORY_TERMS`, `MOTORBIKE_BRANDS`, `motorbike_models`), и второй копии,
+# которой есть куда разъехаться, больше нет.
+
+_CYRILLIC_VOWELS = "аеёиоуыэюя"
+_MIN_CATEGORY_STEM = 4
+
+
+def _category_word_pattern(term: str) -> re.Pattern[str]:
+    """Слово рынка → как его пишет продавец в объявлении.
+
+    Русское существительное с гласной на конце склоняется сменой окончания
+    («студия» → «студию»), поэтому у достаточно длинной основы берётся `\\w*`.
+    Короткое или оканчивающееся на согласную слово ищется целиком: иначе
+    «дом\\w*» поймал бы «домашний», «авт\\w*» — «автомат», «велик\\w*» —
+    «великолепный». Пробел значит «может быть, а может и не быть» — та же
+    дисциплина, что у написаний модели и города.
+    """
+    head, _, tail = term.rpartition(" ")
+    if tail[-1:].lower() in _CYRILLIC_VOWELS and len(tail) - 1 >= _MIN_CATEGORY_STEM:
+        stem = re.escape(f"{head} {tail[:-1]}" if head else tail[:-1]).replace(r"\ ", r"\s*")
+        return re.compile(rf"\b{stem}\w*", re.IGNORECASE)
+    whole = re.escape(f"{head} {tail}" if head else tail).replace(r"\ ", r"\s*")
+    return re.compile(rf"\b{whole}\b", re.IGNORECASE)
+
+
+_CATEGORY_WORD_PATTERNS: tuple[tuple[Category, re.Pattern[str]], ...] = tuple(
+    (category, _category_word_pattern(term))
+    for category, langs in CATEGORY_TERMS.items()
+    for terms in langs.values()
+    for term in terms
+)
+_BRAND_RE = re.compile(r"\b(?:" + "|".join(MOTORBIKE_BRANDS) + r")\b", re.IGNORECASE)
+
+
+def category_hints(text: str) -> list[Category]:
+    """Какие категории названы в тексте — словом рынка, маркой или моделью.
+
+    Возвращает СПИСОК: одно сообщение вправе назвать и байк, и жильё сразу
+    («продам скутер, сдам квартиру»). Порядок стабильный — сначала категории,
+    названные словом (`CATEGORY_TERMS`, все языки рынка), потом та, что следует
+    из марки или модели (`MOTORBIKE_BRANDS`, `motorbike_models`); у нас все марки
+    мотобайковые. Порядок не случаен: гейт воронки берёт категорию карточки из
+    первого элемента, и предмет, названный прямым словом, главнее выведенного из
+    имени модели.
+
+    Своего списка слов здесь нет — знание переиспользовано целиком, разъезжаться
+    нечему. Мультиязычно ровно настолько, насколько мультиязычны сами таблицы.
+    """
+    found: list[Category] = []
+    for category, pattern in _CATEGORY_WORD_PATTERNS:
+        if pattern.search(text):
+            found.append(category)
+    for slug in models_named_in(None, text):
+        found.append(_CATEGORY_BY_MODEL[slug])
+    if _BRAND_RE.search(text):
+        found.append(Category.MOTORBIKE)
+    return list(dict.fromkeys(found))

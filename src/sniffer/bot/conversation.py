@@ -25,6 +25,7 @@ from sniffer.bot.billing import OFFER
 from sniffer.bot.cards import render_cards
 from sniffer.bot.store import Client, Dialogue, DialogueStore
 from sniffer.broker.usage import request_scope
+from sniffer.config import get_settings
 from sniffer.domain.dialogue import (
     EVENT_FEEDBACK,
     EVENT_MANUAL_EDIT,
@@ -531,14 +532,62 @@ class Conversation:
                 )
             )
             return
+        shown = min(len(found.items), get_settings().max_cards)
+        header = _result_header(passport, len(found.items), shown)
         await send(
             Reply(
-                render_cards(found.items),
+                f"{header}\n\n{render_cards(found.items)}",
                 feedback=feedback_buttons(passport),
                 offer_subscription=True,
                 passport_root=dialogue.passport.root,
             )
         )
+
+
+# Как назвать категорию во множественном числе в заголовке выдачи. Русские слова,
+# потому что заголовок читает человек, а не `passport.category.value` («motorbike»).
+_CATEGORY_PLURAL: dict[Category, str] = {
+    Category.MOTORBIKE: "байков",
+    Category.APARTMENT: "квартир",
+    Category.ROOM: "комнат",
+    Category.HOUSE: "домов",
+    Category.CAR: "машин",
+    Category.BICYCLE: "велосипедов",
+}
+
+
+def _is_broad(passport: Passport) -> bool:
+    """Запрос без единого сужающего факта — только категория (и, может, город).
+
+    «Скутер» без бюджета, марки, модели и объёма — это ещё не запрос, а тема:
+    под неё подходит пол-базы. Показать пять свежих и молча назвать это ответом —
+    ровно та жалоба владельца «находит шлак в большом количестве, не уточняя».
+    Такой выдаче нужен честный заголовок и приглашение сузить.
+    """
+    a = passport.attributes
+    return not (a.get("model") or a.get("brand") or a.get("engine_cc") or passport.budget.max)
+
+
+def _result_header(passport: Passport, total: int, shown: int) -> str:
+    """Строка над карточками: что нашлось и, если запрос широкий, как сузить.
+
+    Объяснение — не вежливость, а ответ на «не объясняя»: пять карточек без
+    контекста не говорят, из скольких они выбраны и почему именно эти. Широкий
+    запрос вдобавок сам просит сузить — но не вопросом до выдачи (это была бы
+    прежняя форма, которую владелец отверг), а приглашением поверх уже показанных
+    результатов: search-first остаётся.
+    """
+    if total <= shown:
+        return "Вот что нашлось:" if total > 1 else "Нашёлся один вариант:"
+    if _is_broad(passport):
+        noun = _CATEGORY_PLURAL.get(passport.category) if passport.category else None
+        many = f"{noun} нашлось много" if noun else "нашлось много"
+        return (
+            f"Запрос широкий — {many} ({total}). Показываю {shown} самых свежих.\n"
+            "Чтобы сузить, допишите бюджет, марку или модель — например «yamaha до 500» "
+            "или «honda lead»."
+        )
+    return f"Нашёл {total}, показываю {shown} самых подходящих:"
 
 
 def _lap(stage: str) -> None:

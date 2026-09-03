@@ -7,7 +7,13 @@ import pytest
 from sniffer.domain.prices import MAX_PLAUSIBLE_VND, price_hint
 from sniffer.domain.records import Chat, RawMessage
 from sniffer.pipeline.archive import STAGE_REJECTED, classify, listing_from
+from sniffer.search import vocabulary
 from sniffer.search.intake_rules import parse_query
+
+# Боевой путь: воркер внедряет детектор категорий из словаря поиска, поэтому
+# лот, названный одной маркой или моделью, доходит до карточки. Гейт сам про них
+# больше не знает.
+DETECTOR = vocabulary.category_hints
 
 
 @pytest.fixture
@@ -29,7 +35,7 @@ def raw(text: str, *, identifier: int = 7) -> RawMessage:
 def test_passing_archive_message_becomes_linked_listing(chat: Chat) -> None:
     message = raw("Продам Yamaha Nouvo, цена — 3.7tr, документы есть")
 
-    listing = listing_from(message, chat, classify(message))
+    listing = listing_from(message, chat, classify(message, category_hints=DETECTOR))
 
     assert listing.category == "motorbike"
     assert listing.city == "nha_trang"
@@ -43,7 +49,7 @@ def test_explicit_attributes_survive_the_archive_pipeline(chat: Chat) -> None:
     listing = listing_from(
         message,
         chat,
-        classify(message),
+        classify(message, category_hints=DETECTOR),
         deal_type="sell",
         attributes=dict(parsed.attributes),
     )
@@ -59,7 +65,7 @@ def test_explicit_attributes_survive_the_archive_pipeline(chat: Chat) -> None:
     ["Ищу скутер до 5 млн, подскажите", "Honda Vision 2021, состояние отличное"],
 )
 def test_demand_and_chatter_never_become_listings(text: str) -> None:
-    result = classify(raw(text))
+    result = classify(raw(text), category_hints=DETECTOR)
 
     assert not result.passed
     assert result.reason in {"demand_not_offer", "no_price_no_offer_verb"}
@@ -70,7 +76,7 @@ def test_private_chat_link_uses_internal_telegram_id() -> None:
     message = raw("Продам Honda Vision, цена 22 млн")
     chat = Chat(tg_id=-1001234567890, title="Private", city="nha_trang")
 
-    listing = listing_from(message, chat, classify(message))
+    listing = listing_from(message, chat, classify(message, category_hints=DETECTOR))
 
     assert listing.tg_link == "https://t.me/c/1234567890/88"
 

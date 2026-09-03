@@ -24,10 +24,11 @@ from typing import Any
 
 from sniffer.domain.passport import Category, Intent, Passport, PassportStatus
 from sniffer.search.budget_rules import parse_budget
-from sniffer.search.engine_size import read_engine_cc, without_engine_cc
+from sniffer.search.engine_size import read_engine_size, without_engine_cc
 from sniffer.search.market_terms import ALL_CITY_NAMES, ATTRIBUTE_TERMS, LangTerms
 from sniffer.search.motorbike_models import BODY_SCOOTER, MOTORBIKE_BRANDS
 from sniffer.search.vocabulary import (
+    brand_category,
     city_variants,
     model_brand,
     model_category,
@@ -215,9 +216,16 @@ def parse_query(text: str, *, default_city: str = "") -> Passport:
     # квартиру Vision» — это название дома. Выведи категорию раньше, и таблица
     # начала бы читать сама себя.
     model = detect_model(query, said)
-    # Категория следует из модели, но ложится только на пустое место — та же
-    # дисциплина, что у марки и коробки: сказанное клиентом главнее выведенного.
-    category = said or model_category(model)
+    # Марка ищется по СКАЗАННОЙ клиентом категории, а не по выведенной: она сама
+    # участвует в выводе категории ниже, и брать выведенную значило бы дать
+    # таблице прочитать саму себя. Для мотобайка это одно и то же (все модели
+    # мотобайковые), но порядок обязан быть честным.
+    brand = detect_brand(query, said)
+    # Категория следует из модели ИЛИ марки, но ложится только на пустое место —
+    # та же дисциплина, что у коробки: сказанное клиентом главнее выведенного.
+    # Модель точнее марки, поэтому раньше неё; все марки рынка мотобайковые, и
+    # «yamaha» без иных слов — мотобайк (иначе в выдачу лезла даже квартира).
+    category = said or model_category(model) or brand_category(brand)
     if intent is None:
         intent = Intent.RENT if category in _RENTED_CATEGORIES else Intent.BUY
 
@@ -226,13 +234,17 @@ def parse_query(text: str, *, default_city: str = "") -> Passport:
     # и «до 200» отличаются одним словом после числа, и разбор бюджета обязан
     # его не увидеть. Живой отказ 01.09.2026 — «200 кубиков» стали бюджетом в
     # 200000 VND (семь долларов), и поиск, разумеется, не нашёл ничего.
-    engine_cc = read_engine_cc(query)
-    if engine_cc is not None:
-        attributes["engine_cc"] = engine_cc
+    engine = read_engine_size(query)
+    if engine is not None:
+        attributes["engine_cc"] = engine.value
+        # Направление несём, только когда оно не точка: «exact» — прежнее
+        # поведение (полоса ±band в relevance), и хранить его незачем, иначе
+        # каждый разбор без направления менял бы форму паспорта.
+        if engine.direction != "exact":
+            attributes["engine_cc_dir"] = engine.direction
     budget = parse_budget(without_engine_cc(query), intent=intent)
     if model:
         attributes["model"] = model
-    brand = detect_brand(query, category)
     if brand:
         attributes["brand"] = brand
     transmission = detect_transmission(query, category)
@@ -243,6 +255,9 @@ def parse_query(text: str, *, default_city: str = "") -> Passport:
         # после этого «автомат или механика?» — заставлять клиента повторяться.
         attributes["body_type"] = BODY_SCOOTER
         attributes.setdefault("transmission", "automatic")
+    papers = detect_papers(query, category)
+    if papers:
+        attributes["papers"] = papers
 
     known_city = city or default_city or None
     return Passport(
@@ -306,6 +321,25 @@ def detect_model(text: str, category: Category | None = None) -> str | None:
     return model_named_in(category, text)
 
 
+def category_of(text: str) -> Category | None:
+    """Категория текста — по слову, а если слова нет, по названной модели.
+
+    «Honda Lead 110 2008» не содержит слова «скутер» — только имя модели, — но
+    Lead бывает лишь у мотобайка. Сторона запроса и сторона лота ОБЯЗАНЫ читать
+    категорию одинаково: `parse_query` выводит её из модели («хочу вижн» →
+    motorbike), а отбор выдачи раньше этого не делал, и лот, назвавший только
+    модель, для запроса о жилье выглядел «неизвестной категорией» и проходил
+    фильтр (realcheck 03.09.2026 — Honda Lead в выдаче студий).
+
+    Модель ищется уже с учётом слова: у листинга «студия Vision Tower» категория
+    названа словом (apartment), и до модели дело не доходит — «Vision» там имя
+    дома, а не Honda. Та же защита, что у `parse_query`: вывод категории из
+    модели не даёт таблице читать саму себя.
+    """
+    said = detect_category(text)
+    return said or model_category(detect_model(text, said))
+
+
 def detect_transmission(text: str, category: Category | None = None) -> str | None:
     """Коробка, названная словом: «скутер автомат», «на механике», «tay ga», «xe số».
 
@@ -322,6 +356,24 @@ def detect_transmission(text: str, category: Category | None = None) -> str | No
     категории в этом слове нет.
     """
     return _attribute_named_in(category, "transmission", text)
+
+
+def detect_papers(text: str, category: Category | None = None) -> str | None:
+    """Документы, названные словом: «блюкарт», «синяя карта», «giấy tờ đầy đủ».
+
+    Мягкий сигнал, а не фильтр, и это осознанно: продавец без блюкарта об этом
+    обычно молчит, «нет документов» в объявлении почти не пишут. Жёсткий отсев по
+    документам оставил бы клиента с пустой выдачей вместо той, где документные
+    лоты просто выше. Поэтому `papers` в паспорте поднимает балл лота с блюкартом
+    (`relevance._attribute_fit`), но чужую карточку не выбрасывает — в отличие от
+    марки и коробки. Кому нужно строго «только с документами» — это deal_breaker,
+    отдельный механизм (passport.md).
+
+    Слова — из того же словаря рынка (`PAPERS_WORDS` через `ATTRIBUTE_TERMS`),
+    которым документы узнаются и в тексте объявления: разъехаться двум копиям
+    негде.
+    """
+    return _attribute_named_in(category, "papers", text)
 
 
 def _attribute_named_in(category: Category | None, attribute: str, text: str) -> str | None:

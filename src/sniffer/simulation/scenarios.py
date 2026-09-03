@@ -268,9 +268,16 @@ SCENARIOS: tuple[Scenario, ...] = (
     ),
     Scenario(
         key="brand_only_then_category",
-        title="мутно: хочу хонду → уточнить только предмет",
-        steps=(Says("хочу хонду"), Taps("motorbike"), Taps("nha_trang"), Taps("500 USD")),
-        max_questions_before_results=3,
+        title="мутно: хочу хонду (марка задаёт предмет)",
+        steps=(Says("хочу хонду"), Taps("nha_trang"), Taps("500 USD")),
+        # Марка выводит категорию так же, как модель: все марки рынка
+        # мотобайковые, и «хонда» — это мотобайк (defect 02.09.2026: на «yamaha»
+        # категория оставалась пустой и в выдачу лезла даже квартира). Поэтому
+        # «что ищем?» здесь больше не спрашивают — предмет уже назван маркой.
+        # `expect_results=None`: показать выдачу или доуточнить широкий запрос —
+        # обе ветки допустимы, лишь бы категория и марка распознались.
+        max_questions_before_results=2,
+        expect_results=None,
         expect={"category": "motorbike", "attributes.brand": "honda"},
     ),
     Scenario(
@@ -291,6 +298,41 @@ SCENARIOS: tuple[Scenario, ...] = (
         steps=(Says("байк или скутер — главное автомат"), Taps("nha_trang"), Taps("500 USD")),
         max_questions_before_results=2,
         expect={"category": "motorbike", "attributes.transmission": "automatic"},
+    ),
+    Scenario(
+        key="yamaha_not_honda_kymco",
+        title="ямаха скутер (в чате висят Honda и Kymco)",
+        steps=(Says("ямаха скутер"),),
+        # realcheck 03.09.2026: на «ямаха» приходили Honda и Kymco — поля марки у
+        # чата нет, а живой отсев марку не читал (словарь фраз, где марок нет
+        # вовсе). Ямаха в выдаче остаться ОБЯЗАНА, иначе лечение хуже болезни;
+        # чужое — уйти. Мимо запроса судит `fit.py` правдой о лоте, не баллом.
+        expect={"category": "motorbike", "attributes.brand": "yamaha"},
+    ),
+    Scenario(
+        key="automatic_not_manual",
+        title="скутер автомат до 700 (в чате висит механика)",
+        steps=(Says("скутер автомат до 700"),),
+        # Та же болезнь по оси коробки: на «автомат» приходила механика (R15,
+        # Winner). Механика в чате дешёвая — проходит бюджет и обязана уйти
+        # отсевом по коробке, а не отсеяться ценой, оставив ось непроверенной.
+        expect={
+            "category": "motorbike",
+            "attributes.transmission": "automatic",
+            "budget.max": 700.0,
+            "budget.currency": "USD",
+        },
+    ),
+    Scenario(
+        key="studio_no_bare_bike",
+        title="сниму студию (в чате байк, названный одной моделью)",
+        steps=(Says("сниму студию у моря"),),
+        # realcheck 03.09.2026: в выдаче студий всплывал байк, названный ТОЛЬКО
+        # моделью («Honda Lead 110 2008», в каталоге — «Yamaha R15 2019»): слова
+        # категории в нём нет, а модель раньше категорию не выводила, и отсев
+        # чужой категории его не видел. Теперь `category_of` выводит motorbike из
+        # имени модели и на стороне лота — байк в выдаче квартир не всплывает.
+        expect={"category": "apartment", "intent": "rent"},
     ),
     Scenario(
         key="empty_politeness",

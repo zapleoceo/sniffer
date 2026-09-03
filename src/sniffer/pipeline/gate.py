@@ -14,9 +14,16 @@ free-квоты не хватает.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from sniffer.domain.passport import Category
+
+# Детектор категорий, названных в тексте. Внедряется снаружи (воркер даёт
+# `search.vocabulary.category_hints`), а не импортируется: воронка про поиск не
+# знает — это обратная зависимость слоёв. Тот же приём, что у приёмника учёта в
+# `broker/client.py` и у `ChatDirectory` в `sources`.
+CategoryDetector = Callable[[str], list[Category]]
 
 # 300$ · $300 · 300 usd · 300к · 7 triệu · 7tr · 5.000.000 vnd · 5 млн · 300 у.е.
 PRICE_RE = re.compile(
@@ -46,10 +53,16 @@ DEMAND_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Дефолт гейта — только СТАБИЛЬНЫЕ общие слова предмета, не марки и не модели.
+# Марки и модели дрейфуют (honda/yamaha/vision/nouvo/sirius/winner/exciter/janus
+# были тут и разошлись с рынком: sym, kymco, lead, attila, pcx отсутствовали), и
+# их место — в словаре поиска, откуда воркер внедряет детектор. Общее слово
+# «скутер»/«квартира» не дрейфует, поэтому оно остаётся здесь полом: гейт узнаёт
+# прямо названный предмет и без внедрения. Знание, которое ДЕЙСТВИТЕЛЬНО текло, —
+# список марок и моделей — теперь в одном месте (`search`), а не в двух.
 CATEGORY_HINTS: dict[Category, re.Pattern[str]] = {
     Category.MOTORBIKE: re.compile(
-        r"\b(?:байк|скутер|мотоцикл|мопед|honda|yamaha|suzuki|piaggio|vision|air\s?blade"
-        r"|nouvo|sirius|winner|exciter|vespa|janus|motorbike|scooter|moto|xe\s?máy)\b",
+        r"\b(?:байк|скутер|мотоцикл|мопед|мотобайк|motorbike|scooter|moto|xe\s?máy)\b",
         re.IGNORECASE,
     ),
     Category.APARTMENT: re.compile(
@@ -88,8 +101,18 @@ MIN_LENGTH = 25
 MAX_LENGTH = 4000
 
 
-def gate(text: str) -> GateResult:
-    """Пропустить сообщение дальше по воронке или отбросить бесплатно."""
+def _builtin_categories(text: str) -> list[Category]:
+    return [cat for cat, pattern in CATEGORY_HINTS.items() if pattern.search(text)]
+
+
+def gate(text: str, *, category_hints: CategoryDetector | None = None) -> GateResult:
+    """Пропустить сообщение дальше по воронке или отбросить бесплатно.
+
+    Категорию узнаёт внедрённый детектор поверх стабильного дефолта: общее слово
+    предмета ловит дефолт, марку и модель — детектор из словаря поиска. Без
+    детектора работает один дефолт, поэтому терсовое «Sym Attila, 15тр» без
+    внедрения отсекается как «без категории», а с ним проходит.
+    """
     stripped = text.strip()
     if len(stripped) < MIN_LENGTH:
         return GateResult(False, "too_short")
@@ -103,7 +126,9 @@ def gate(text: str) -> GateResult:
     demand_match = DEMAND_RE.search(stripped)
     is_offer = offer_match is not None
     is_demand = demand_match is not None
-    categories = [cat for cat, pattern in CATEGORY_HINTS.items() if pattern.search(stripped)]
+    categories = _builtin_categories(stripped)
+    if category_hints is not None:
+        categories = list(dict.fromkeys([*categories, *category_hints(stripped)]))
 
     result = GateResult(
         passed=False,

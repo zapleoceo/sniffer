@@ -1329,3 +1329,34 @@ def test_the_search_cannot_be_called_without_its_turn() -> None:
         assert "turn" not in inspect.signature(method).parameters, (
             f"{name} снова принимает ход аргументом — его снова забудут передать"
         )
+
+
+async def test_a_broad_query_explains_and_invites_narrowing() -> None:
+    """Жалоба владельца: «скутер → шлак в большом количестве, не уточняя, не объясняя».
+
+    Голый запрос — только категория, ни бюджета, ни модели — это тема, а не
+    запрос: под неё подходит пол-базы. Пять показанных теперь идут с честным
+    заголовком (из скольких выбраны) и приглашением сузить. Не вопросом до выдачи
+    — форму владелец отверг, — а поверх уже показанных карточек: search-first цел.
+    """
+    replies = Replies()
+    items = [found(str(i)) for i in range(40)]
+    await talk(MemoryStore(), bike(), items=items).on_text(CLIENT, "ищу скутер", replies)
+
+    cards = replies.texts[1]
+    assert "широкий" in cards.lower()
+    assert "40" in cards
+    assert "сузить" in cards.lower()
+    assert "открыть оригинал" in cards
+
+
+async def test_a_specific_query_is_not_called_broad() -> None:
+    """Названа модель — запрос узкий: заголовок не зовёт сужать, просто считает."""
+    replies = Replies()
+    items = [found(str(i)) for i in range(6)]
+    passport = bike(attributes={"model": "lead", "brand": "honda"})
+    await talk(MemoryStore(), passport, items=items).on_text(CLIENT, "honda lead", replies)
+
+    cards = replies.texts[1]
+    assert "широкий" not in cards.lower()
+    assert "6" in cards

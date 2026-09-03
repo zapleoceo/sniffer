@@ -36,6 +36,7 @@ from sniffer.search.vocabulary import (
     attribute_phrases,
     board_attribute_phrases,
     borrowed_from,
+    category_hints,
     category_terms,
     is_board_safe,
     source_langs,
@@ -704,3 +705,51 @@ def test_prompt_offers_the_board_only_measured_words() -> None:
     assert "xe mới" not in board_only
     assert "nguyên zin" not in board_only
     assert "оставь query пустым" in board_only
+
+
+# --------------------------------------------------------------------------
+# 9. Категория, названная в тексте — один словарь на обе стороны воронки
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Honda Lead 2019", [Category.MOTORBIKE]),
+        ("Sym Attila", [Category.MOTORBIKE]),
+        ("сдам студию", [Category.APARTMENT]),
+        # Мусор без предмета — пустой список, а не выдуманная категория.
+        ("Всем привет, кто знает хорошего стоматолога", []),
+    ],
+)
+def test_category_hints_reads_word_brand_or_model(text: str, expected: list[Category]) -> None:
+    """Слово рынка, марка и модель называют предмет — и все три читаются отсюда.
+
+    «Honda Lead» и «Sym Attila» слова категории не содержат: предмет в них
+    называет марка или модель. «студию» — падежная форма слова рынка «студия».
+    """
+    assert category_hints(text) == expected
+
+
+def test_category_hints_lists_every_named_category() -> None:
+    """Одно сообщение вправе назвать два предмета — ответ список, а не один."""
+    assert category_hints("продам скутер, сдам квартиру") == [
+        Category.MOTORBIKE,
+        Category.APARTMENT,
+    ]
+
+
+@pytest.mark.parametrize("brand", ["sym", "kymco", "kawasaki", "ducati", "daelim", "vinfast"])
+def test_a_brand_the_old_gate_lacked_now_names_the_motorbike(brand: str) -> None:
+    """Ровно те марки, из-за которых лот терялся: их в списке гейта не было.
+
+    Знание теперь одно — таблица `MOTORBIKE_BRANDS`, — и разъехаться с гейтом ему
+    негде: гейт спрашивает у этой же функции.
+    """
+    assert category_hints(f"Продам {brand}, 15 млн, срочно") == [Category.MOTORBIKE]
+
+
+@pytest.mark.parametrize("model", ["lead", "pcx", "vario", "wave", "nvx", "click", "attila"])
+def test_a_model_the_old_gate_lacked_now_names_the_motorbike(model: str) -> None:
+    """Модели, которых в захардкоженном списке гейта не было вовсе."""
+    assert category_hints(f"{model} 2019, недорого") == [Category.MOTORBIKE]

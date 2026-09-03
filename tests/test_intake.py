@@ -153,6 +153,32 @@ def test_brand_reaches_attributes() -> None:
     assert passport.attributes["brand"] == "honda"
 
 
+def test_a_bare_brand_derives_the_motorbike_category() -> None:
+    """«yamaha» без иных слов — мотобайк: все марки рынка мотобайковые.
+
+    Живой отказ 02.09.2026: на «yamaha» категория оставалась пустой (`None`), и
+    отсев чужой категории не работал — в выдачу лезла даже квартира. Категория
+    выводится из марки так же, как из модели.
+    """
+    passport = parse_query("yamaha", default_city=CITY)
+
+    assert passport.category is Category.MOTORBIKE
+    assert passport.attributes["brand"] == "yamaha"
+
+
+def test_a_said_category_outranks_a_brand_mentioned_in_passing() -> None:
+    """«сниму квартиру рядом с Honda» — жильё, а не байк.
+
+    Вывод из марки ложится ТОЛЬКО на пустое место: сказанное клиентом словом
+    («квартиру») главнее марки, упомянутой мимоходом. Иначе салон Honda по
+    соседству превратил бы аренду квартиры в поиск мотобайка.
+    """
+    passport = parse_query("сниму квартиру рядом с Honda", default_city=CITY)
+
+    assert passport.category is Category.APARTMENT
+    assert passport.intent is Intent.RENT
+
+
 def test_city_from_text_wins_over_default() -> None:
     passport = parse_query("сдам квартиру в Дананге 8 млн в месяц", default_city=CITY)
 
@@ -367,3 +393,55 @@ def test_merge_ignores_unknown_values() -> None:
     assert merged.category is Category.MOTORBIKE
     assert merged.budget.currency is Currency.USD
     assert merged.budget.max == 400
+
+
+def test_papers_are_read_from_the_query() -> None:
+    """«блюкарт»/«с блюкартом» → papers=blue_card, и падеж не мешает.
+
+    Весь ручной поиск байка держался на блюкарте («без доков не надо»), а разбор
+    его не читал вовсе — документное требование терялось, и документные лоты не
+    поднимались в выдаче. Слова — из PAPERS_WORDS, тем же знанием, что и в тексте
+    объявления.
+    """
+    assert (
+        parse_query("байк с блюкартом", default_city=CITY).attributes.get("papers") == "blue_card"
+    )
+    assert (
+        parse_query("скутер, документы есть", default_city=CITY).attributes.get("papers")
+        == "blue_card"
+    )
+
+
+def test_papers_are_a_soft_signal_not_a_gearbox() -> None:
+    """Документы — не коробка: отсутствие слова не заполняет и не отсеивает."""
+    assert "papers" not in parse_query("нужен скутер honda lead", default_city=CITY).attributes
+
+
+def test_a_malformed_number_does_not_crash_the_parse() -> None:
+    """Разбор запроса зовётся на КАЖДОМ сообщении рынка и не вправе падать.
+
+    Регексп суммы жадный и хватает почти-числа: живой отказ 02.09.2026 —
+    «13.000.0002» (лишняя цифра в группе разрядов) ронял float() и весь
+    parse_query, а с ним воркер на этом объявлении. Такая сумма просто не
+    считается названной. Валидные числа рядом по-прежнему читаются.
+    """
+    assert parse_query("Honda Lead 13.000.0002 донг", default_city=CITY).budget.max is None
+    assert parse_query("квартира 1.2.3 млн в нячанге", default_city=CITY).budget.max is None
+    # Контроль: настоящий разделитель тысяч и дробь не сломаны.
+    assert parse_query("скутер 5.000.000 VND", default_city=CITY).budget.max == 5_000_000
+    assert parse_query("до 1,5 млн", default_city=CITY).budget.max == 1_500_000
+
+
+def test_a_model_code_number_is_not_a_budget() -> None:
+    """«Kawasaki z300» — это модель, а не «до 300». Живой отказ 02.09.2026.
+
+    Клиент искал 300-кубовый мотоцикл Z300, а бот прочёл «300» бюджетом («до 300
+    USD») и выдал 50cc «до 300 долларов». Число, склеенное с буквой, — код
+    модели; из «cbr250» не должно вылезти и «50» (хвост за цифрой).
+    """
+    assert parse_query("Kawasaki z300", default_city=CITY).budget.max is None
+    assert parse_query("honda cbr250 механика", default_city=CITY).budget.max is None
+    assert parse_query("mt15", default_city=CITY).budget.max is None
+    # Контроль: настоящий бюджет с пробелом по-прежнему читается.
+    assert parse_query("нужен скутер до 300", default_city=CITY).budget.max == 300
+    assert parse_query("байк 2019 года до 400", default_city=CITY).budget.max == 400

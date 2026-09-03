@@ -103,6 +103,9 @@ CATEGORY_ATTRIBUTES: dict[Category, tuple[str, ...]] = {
     Category.MOTORBIKE: (
         "transmission",
         "engine_cc",
+        # Направление объёма: min|max — граница, отсутствие — точка (±band).
+        # «от 250»/«250 минимум» → лот с cc<250 противоречит (search/engine_size).
+        "engine_cc_dir",
         "year_min",
         # Марка и модель — разные атрибуты: у «honda lead» первое honda, второе
         # lead. Пока модели не было, она приезжала в `brand`, и запрос уходил по

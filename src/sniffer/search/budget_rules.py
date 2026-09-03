@@ -30,7 +30,14 @@ _MULTIPLIERS: dict[str, int] = {
 # необязательной группы: он дописывает окончание множителю («миллиона»,
 # «тысяч»), но не смеет съесть слово после числа — иначе «2019 года» не
 # отличить от суммы.
+# `(?<!\w)` — число обязано начинать токен, а не сидеть в хвосте слова. Число,
+# склеенное с буквой, это код модели, а не сумма: живой отказ 02.09.2026 —
+# «Kawasaki z300» дал бюджет «до 300 USD», и клиент, искавший 300-кубовый
+# мотоцикл, получил 50cc. `z300`, `cbr250`, `mt15` — номер в имени модели; пробел
+# решает: «до 300» сумма, «z300» нет. `\w` (а не только буква) в запрете
+# обязателен: иначе из «cbr250» прочиталось бы «50» — хвост, стоящий за цифрой.
 _AMOUNT_RE = re.compile(
+    r"(?<!\w)"
     r"(?P<num>\d[\d\u00a0 .,]*\d|\d)\s*(?:(?P<mult>k|к|тыс|млн|миллион|лям|tr|triệu|m)\w*)?",
     re.IGNORECASE,
 )
@@ -126,7 +133,10 @@ def _amounts(text: str) -> list[tuple[float, str | None]]:
     found: list[tuple[float, str | None]] = []
     for match in _AMOUNT_RE.finditer(text):
         multiplier = _MULTIPLIERS.get((match.group("mult") or "").lower(), 1)
-        value = _to_number(match.group("num")) * multiplier
+        number = _to_number(match.group("num"))
+        if number is None:
+            continue
+        value = number * multiplier
         if value <= 0:
             continue
         if multiplier == 1 and int(value) in _YEAR_RANGE and _YEAR_RE.match(text[match.end() :]):
@@ -144,12 +154,23 @@ def _marker(before: str) -> str | None:
     return None
 
 
-def _to_number(raw: str) -> float:
+def _to_number(raw: str) -> float | None:
+    """Число из захваченной строки — или None, если арифметике оно не поддаётся.
+
+    None, а не исключение: `parse_query` зовётся на КАЖДОМ сообщении рынка и
+    тексте клиента и падать на произвольном вводе не вправе. Регексп суммы жадный
+    и хватает почти-числа — живой отказ 02.09.2026: «13.000.0002» (лишняя цифра в
+    группе разрядов) ронял `float()`, а с ним весь разбор и воркер на этом
+    сообщении. Такую сумму просто не считаем названной — это честнее краха.
+    """
     text = raw.replace(" ", "").replace("\u00a0", "")
     # «5.000.000» и «5,000,000» — разделители тысяч, а «1,5 млн» — дробь.
     if re.fullmatch(r"\d{1,3}(?:[.,]\d{3})+", text):
         return float(re.sub(r"[.,]", "", text))
-    return float(text.replace(",", "."))
+    try:
+        return float(text.replace(",", "."))
+    except ValueError:
+        return None
 
 
 def _currency(text: str) -> Currency | None:

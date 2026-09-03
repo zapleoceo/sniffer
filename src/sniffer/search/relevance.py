@@ -6,13 +6,20 @@ import re
 from datetime import UTC, datetime
 from math import exp
 
-from sniffer.domain.passport import Budget, Currency, Passport
-from sniffer.search.intake_rules import detect_category
+from sniffer.domain.fingerprint import normalized
+from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
+from sniffer.search.engine_size import listing_cc_values
+from sniffer.search.intake_rules import category_of, detect_brand, detect_transmission
+from sniffer.search.market_terms import RENTAL_PRICE_MARKERS, RENTAL_STEMS
 from sniffer.search.plan import SearchPlan, SearchTask
-from sniffer.search.vocabulary import attribute_phrases, models_named_in
+from sniffer.search.vocabulary import attribute_phrases, model_engine_cc, models_named_in
 from sniffer.sources.base import RawItem
 
 PRICE_OVER_BUDGET = 1.30
+
+# Полоса допуска объёма, когда клиент назвал точку, а не границу: «200 кубиков»
+# — это про класс мотоцикла, 175 и 250 клиент назовёт тем же поиском, 700 — нет.
+ENGINE_BAND = 0.25
 
 # Возраст, после которого лот уходит из живой выдачи. Это не тот порог, что в
 # `verifier/liveness` (14 дней): там решается, когда ПРЕДУПРЕДИТЬ, и карточка
@@ -55,19 +62,25 @@ def rank_items(
     не лечит — она ставит мусор ниже, а показываем мы первые пять, и когда
     лучшего нет, первыми пятью оказывается мусор.
 
-    Отсев трёхступенчатый, и ступени отменяются по-разному:
+    Отсев в две очереди, и они отменяются по-разному:
 
-    * **чужая категория** — не тот предмет вообще: комната и велосипед в выдаче
-      скутеров. Ступень не отменяется, обоснование — у `_other_category`;
-    * **чужая модель** — не низкий балл, а брак выдачи (spec-v2, 3.2): клиент
-      назвал Lead, значит Airblade это не «похуже», а не тот предмет. Ступень не
-      отменяется: если Lead на рынке нет, честнее пустой ответ, который прямо
-      советует «попробуйте без марки» (`bot/conversation.NOTHING_FOUND`), чем
-      пять Airblade — ровно то, на что жаловался владелец;
-    * **совсем старое** — догадка о живости, а не факт о предмете, и лот старше
-      порога всё-таки бывает жив. Поэтому ступень отменяется, когда после неё
-      пусто: пустая выдача хуже слабой, а карточка сама скажет «объявлению N
-      дней, могло быть продано» (`bot/cards.py`).
+    Перед отсевом кросспосты схлопываются (`_dedup`): один лот, переопубликованный
+    в несколько чатов с новыми эмодзи и переставленными фразами, — это одна
+    карточка, а не пять (spec-v2, 2.7).
+
+    * **противоречие запросу** (`_contradicts`) — чужая категория, чужая модель,
+      чужая марка, чужая коробка, объём вне запрошенного диапазона, оффер аренды
+      на запрос покупки, цена явно выше потолка. Всё это факты о
+      предмете, прочитанные из его собственных слов, а не догадки: клиент назвал
+      Lead — Airblade не «похуже», а не тот предмет (spec-v2, 3.2). Очередь НЕ
+      отменяется: если подходящего на рынке нет, честнее пустой ответ, который
+      прямо советует «попробуйте без марки» (`NOTHING_FOUND`), чем пять чужих
+      карточек — ровно то, на что жаловался владелец. Неизвестное свойство
+      противоречием не считается: лот, не назвавший марку/коробку, остаётся;
+    * **совсем старое** (`_too_old`) — догадка о живости, а не факт о предмете, и
+      лот старше порога всё-таки бывает жив. Поэтому очередь отменяется, когда
+      после неё пусто: пустая выдача хуже слабой, а карточка сама скажет
+      «объявлению N дней, могло быть продано» (`bot/cards.py`).
 
     Порога по итоговому баллу здесь нет намеренно, хотя в подписке он есть
     (`matching.MATCH_MIN_SCORE`). Там `posted_at` у карточки обязателен, а в
@@ -78,7 +91,11 @@ def rank_items(
     """
     moment = now or datetime.now(UTC)
     ranked = sorted(items, key=lambda item: _score(item, passport, usd_vnd, moment), reverse=True)
-    asked_for = [item for item in ranked if not _contradicts(item, passport, usd_vnd)]
+    # Дедуп ПОСЛЕ сортировки: у одинакового текста балл одинаков, а из равных
+    # первым стоит свежайший — его и оставляем (spec-v2 2.7). До отсева, но это
+    # безразлично: у кросспоста текст один, значит и вердикт `_contradicts` один.
+    unique = _dedup(ranked)
+    asked_for = [item for item in unique if not _contradicts(item, passport, usd_vnd)]
     return [item for item in asked_for if not _too_old(item, moment)] or asked_for
 
 
@@ -91,6 +108,10 @@ def _contradicts(item: RawItem, passport: Passport, usd_vnd: float | None) -> bo
     """
     if _other_category(item, passport) or _other_model(item, passport):
         return True
+    # Прокат — оффер аренды, чужая сторона сделки: клиент с intent=BUY хочет
+    # купить. Отсекаем только у покупателя — клиенту с intent=RENT прокат нужен.
+    if passport.intent is Intent.BUY and _is_rental_offer(item.title, item.text):
+        return True
     text = f"{item.title} {item.text}"
     wanted_model = str(passport.attributes.get("model") or "")
     if wanted_model and wanted_model not in models_named_in(passport.category, text):
@@ -99,36 +120,183 @@ def _contradicts(item: RawItem, passport: Passport, usd_vnd: float | None) -> bo
         return True
     if _contrary_attribute(passport, "transmission", text):
         return True
-    if _wrong_engine(text, passport.attributes.get("engine_cc")):
+    if _wrong_engine(
+        text,
+        passport.attributes.get("engine_cc"),
+        passport.attributes.get("engine_cc_dir"),
+        passport.category,
+    ):
         return True
     ceiling = _budget_ceiling_vnd(passport.budget, usd_vnd)
     return ceiling is not None and item.price_vnd is not None and item.price_vnd > ceiling
 
 
 def _contrary_attribute(passport: Passport, field: str, text: str) -> bool:
+    """Текст лота ЯВНО называет другое известное значение свойства.
+
+    Марку и коробку лота читаем теми же детекторами, что читают запрос клиента
+    (`detect_brand` / `detect_transmission`), а не словарём фраз. Через словарь
+    это не работало и молча: слов марки в `ATTRIBUTE_TERMS` нет вовсе (там
+    свойства — коробка, документы, состояние), поэтому марка в тексте лота не
+    находилась НИКОГДА, и фильтр по марке был мёртв — Honda приходила на «ямаха»
+    (realcheck 03.09.2026). Детектор ещё и не зависит от категории: на мутном
+    «надёжное ямаха» без категории фразы не разрешались, и фильтр молчал вторично.
+
+    Неизвестность — не противоречие: лот, не назвавший марку/коробку, остаётся
+    (та же дисциплина, что у категории и модели). Марку `detect_brand` выводит и
+    из модели: «Exciter» — Yamaha, поэтому на запрос honda он отсеётся, даже не
+    написав «yamaha» словом.
+    """
     wanted = passport.attributes.get(field)
-    if not wanted or _mentions(passport, field, wanted, text):
+    if not wanted:
         return False
-    # Противоречие доказано, только если текст явно называет другое известное
-    # значение. Отсутствие свойства остаётся неизвестностью.
-    alternatives = {
-        "brand": ("honda", "yamaha", "vespa", "suzuki", "sym"),
-        "transmission": ("automatic", "manual", "semi"),
-    }[field]
-    return any(_mentions(passport, field, value, text) for value in alternatives if value != wanted)
+    if field == "brand":
+        found = detect_brand(text, passport.category)
+    elif field == "transmission":
+        found = detect_transmission(text, passport.category)
+    else:
+        return False
+    return found is not None and str(found) != str(wanted)
 
 
-_CC_RE = re.compile(r"(?<!\d)(\d{2,4})\s*(?:cc|куб(?:ов|ик(?:ов|а)?)?)\b", re.IGNORECASE)
+def _wrong_engine(text: str, wanted: object, direction: object, category: Category | None) -> bool:
+    """Объём лота противоречит запрошенному — с учётом направления.
 
+    Направление несёт паспорт (`engine_cc_dir`): «от 250» отсекает лот с cc<250,
+    «до 250» — с cc>250, без направления — полоса ±band вокруг точки. Объёмы лота
+    читает `listing_cc_values`, в т.ч. голым числом («nvx 125»): раньше читалось
+    только «125cc», и «250 минимум» показывал 124–125cc (живой отказ 02.09.2026).
 
-def _wrong_engine(text: str, wanted: object) -> bool:
+    Когда в тексте объёма нет вовсе, но назван известный модельный ряд, объём
+    берётся у модели (`_model_cc_values`): R15 (155) и Air Blade (110) на «250
+    минимум» отсеиваются, хотя своё число не пишут (жалоба владельца — 142
+    карточки там, где честных 0–2). Текст ГЛАВНЕЕ модели: явный объём — это объём
+    этого экземпляра, а модельный — догадка о ряде, и её подставляют лишь на
+    пустое место (`... or ...`), иначе «Air Blade 125» спорил бы со своим же 125.
+
+    `all(...)`, а не `any(...)`: если ХОТЬ ОДИН прочитанный объём в запросе, лот
+    остаётся. Ни числа в тексте, ни объёма у модели — противоречием НЕ считается
+    (неизвестное ≠ несовпадение): лот без объёма и без знакомой модели уцелеет.
+    """
     if wanted is None:
         return False
-    found = [int(value) for value in _CC_RE.findall(text)]
+    found = listing_cc_values(text) or _model_cc_values(category, text)
     if not found:
-        return False
+        # Нижняя граница требует ПОЛОЖИТЕЛЬНОГО доказательства, как имя модели.
+        # «От 250» — это пол, а Нячанг рынок малокубатурный: лот, чей объём
+        # подтвердить нечем, почти наверняка ниже пола, и показать его как «250+»
+        # — обман (жалоба владельца 03.09.2026: на «250 минимум» шли 46 лотов с
+        # неизвестным объёмом). Верхняя граница и точка ±band остаются терпимы:
+        # там неизвестный объём чаще подходит, и прежнее «неизвестное ≠
+        # несовпадение» вернее. Это единственное место, где направление меняет
+        # само правило, а не только сравнение.
+        return direction == "min"
     target = float(str(wanted))
-    return all(abs(value - target) > target * 0.25 for value in found)
+    if direction == "min":
+        return all(value < target for value in found)
+    if direction == "max":
+        return all(value > target for value in found)
+    return all(abs(value - target) > target * ENGINE_BAND for value in found)
+
+
+def _model_cc_values(category: Category | None, text: str) -> list[int]:
+    """Объёмы моделей, названных в тексте лота, — фолбэк, когда числа в тексте нет.
+
+    Знание берётся через `vocabulary`, а не импортом таблицы моделей в этот слой:
+    тот же путь, что у марки и коробки лота (`model_*`). Электро и незнакомые
+    модели объёма не дают — `None` отбрасывается, и «неизвестное ≠ несовпадение»
+    держится само собой: пустой список объёмом не считается.
+    """
+    named = models_named_in(category, text)
+    return [cc for cc in (model_engine_cc(slug) for slug in named) if cc is not None]
+
+
+# ── Прокат: оффер аренды в тексте лота ───────────────────────────────────────
+_RENTAL_RE = re.compile(
+    r"\b(?:"
+    + "|".join(
+        re.escape(stem).replace(r"\ ", r"\s+") for stems in RENTAL_STEMS.values() for stem in stems
+    )
+    + r")\w*",
+    re.IGNORECASE,
+)
+# Продажа в заголовке снимает срабатывание проката, отрицание перед словом
+# аренды — тоже. «прода\w*» ловит продам/продаю/продажа; «не»/«без» — целым
+# словом, иначе «недорогая аренда» приняли бы за отрицание.
+_SALE_RE = re.compile(r"\b(?:прода|sell|bán)\w*|\bfor\s+sale\b", re.IGNORECASE)
+_NEG_RE = re.compile(r"\b(?:не|без|không|not)\b", re.IGNORECASE)
+
+
+def _is_rental_offer(title: str, text: str) -> bool:
+    """Явное предложение аренды в тексте лота — прокат, а не продажа.
+
+    Клиент с intent=BUY хочет купить; «🏍 Аренда мотоциклов», «‼️АРЕНДА БАЙКОВ
+    (сутки/месяц)‼️» — оффер аренды, сторона автора (spec-v2 2.7, замер
+    02.09.2026: лезли в топ почти любого покупательского запроса). Ловим по ЯВНОМУ
+    предложению, а не по слову «аренда» где попало: ценник за период однозначен
+    где угодно, а рамочное слово — только в заголовке и не под продажей/отрицанием,
+    иначе «продам, не для аренды» отсеклось бы как прокат.
+    """
+    if any(marker in f"{title} {text}".casefold() for marker in RENTAL_PRICE_MARKERS):
+        return True
+    head = normalized(title)
+    match = _RENTAL_RE.search(head)
+    if match is None or _SALE_RE.search(head):
+        return False
+    return not _NEG_RE.search(head[: match.start()])
+
+
+# Слова-приставки, которые кросспост дописывает, не меняя сам лот: категория
+# предмета и глагол продажи. Их (и эмодзи — их убирает `normalized`) при
+# переопубликовании переставляют и добавляют чаще всего, а отличить один лот от
+# другого они не помогают. Список НАРОЧНО крошечный и берёт только заведомо
+# декоративное: год, цена, пробег, модель, комплектация сюда не входят — поэтому
+# два РАЗНЫХ лота, чем бы они по существу ни различались, в один отпечаток не
+# схлопнутся. Это не копия CATEGORY_TERMS: там знание «какими словами зовут
+# категорию», здесь — «какие слова не различают два лота», и в нём есть
+# продам/срочно, которых там нет.
+_SERVICE_WORDS: frozenset[str] = frozenset(
+    {"скутер", "байк", "мотобайк", "мотоцикл", "мопед", "продам", "продаю", "срочно"}
+)
+
+
+def _dedup(items: list[RawItem]) -> list[RawItem]:
+    """Схлопнуть кросспосты, оставив первый — после сортировки это свежайший.
+
+    Один лот приходит в несколько чатов и переопубликуется с новыми эмодзи,
+    пробелами, переставленными или задублированными фразами (замер 02.09.2026:
+    «Honda Air Blade 2012» и «SYM ATTILAVTS 124» по два раза). Точный хэш такое не
+    ловит — эмодзи и повтор фразы дают разный текст. Поэтому отпечаток — множество
+    СОДЕРЖАТЕЛЬНЫХ слов текста: полный набор минус служебные приставки
+    (`_SERVICE_WORDS`). Так кросспост, отличающийся лишь приставкой («Скутер SYM
+    ATTILAVTS 124» против «SYM ATTILAVTS 124»), схлопывается, а два разных лота —
+    нет: год, цена в тексте, пробег, разная модель остаются в отпечатке и держат
+    их порознь (spec-v2, 2.7). Схлопнуться могут только тексты, различающиеся ЛИШЬ
+    декоративными словами, — любой различающий токен спасает лот. Точное совпадение
+    — частный случай.
+
+    Отпечаток по ТЕКСТУ, а не «заголовок + текст»: кросспостят в группах Telegram,
+    а там у поста заголовка нет вовсе (`telegram_mapping`: «Заголовка у поста в
+    группе не бывает») — для источника дедупа это ровно прежнее поведение.
+    Заголовок же, где он есть, у объявления эхо текста, и обрезком слова он лишь
+    раздробил бы один лот на два (ровно так его рвёт срез `title[:70]` в
+    диагностике). Плюс дедуп по `(source, external_id)` — тот же лот, вынутый
+    источником дважды. Пустой содержательный отпечаток не схлопывает: лот из одних
+    приставок не дубликат такого же безмолвного.
+    """
+    seen_ids: set[tuple[str, str]] = set()
+    seen_words: set[frozenset[str]] = set()
+    kept: list[RawItem] = []
+    for item in items:
+        ident = (item.source, item.external_id)
+        words = frozenset(normalized(item.text).split()) - _SERVICE_WORDS
+        if ident in seen_ids or (words and words in seen_words):
+            continue
+        seen_ids.add(ident)
+        if words:
+            seen_words.add(words)
+        kept.append(item)
+    return kept
 
 
 def _other_category(item: RawItem, passport: Passport) -> bool:
@@ -142,8 +310,11 @@ def _other_category(item: RawItem, passport: Passport) -> bool:
     и почти все из-за этого).
 
     Категория лота читается ТЕМ ЖЕ разбором, которым читается запрос клиента
-    (`intake_rules.detect_category`): знание «какими словами называют предмет»
-    одно, и второй парсер здесь однажды разошёлся бы с первым.
+    (`intake_rules.category_of`): знание «какими словами называют предмет» одно,
+    и второй парсер здесь однажды разошёлся бы с первым. И читается она с тем же
+    выводом из модели: «Honda Lead 110 2008» слова «скутер» не содержит, но Lead
+    бывает только у мотобайка, и без этого вывода такой лот проходил в выдачу
+    студий как «неизвестная категория» (realcheck 03.09.2026).
 
     Ступень не отменяется при пустом результате, и это не симметрично возрасту.
     Возраст — догадка о живости, чужая категория — факт о предмете, прочитанный
@@ -156,7 +327,7 @@ def _other_category(item: RawItem, passport: Passport) -> bool:
     """
     if passport.category is None:
         return False
-    named = detect_category(f"{item.title} {item.text}")
+    named = category_of(f"{item.title} {item.text}")
     return named is not None and named is not passport.category
 
 
@@ -283,6 +454,12 @@ def _mentions(passport: Passport, field: str, value: object, haystack: str) -> b
     """
     if field == "model":
         return str(value) in models_named_in(passport.category, haystack)
+    # Марка, как и модель, — имя, а не свойство рынка: слов в `ATTRIBUTE_TERMS`
+    # у неё нет, ищется тем же детектором. Иначе «brand» попадала бы в
+    # знаменатель доли атрибутов, никогда не попадая в числитель, и роняла бы
+    # балл каждого лота.
+    if field == "brand":
+        return detect_brand(haystack, passport.category) == str(value)
     phrases = [
         phrase
         for lang in ("ru", "vi", "en")
