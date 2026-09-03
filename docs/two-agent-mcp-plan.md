@@ -5,6 +5,20 @@
 `codex/sniffer-native-tools`. До завершения ворот пилот и production не переключаются.
 Каждая фича — отдельный коммит с тестами, документацией и проверкой другой моделью.
 
+### Что уже реализовано в новой ветке
+
+Начат этап 0: строгая граница JSON-ответа и диагностика, измеренный запас
+выходных токенов проверки объявлений, передача native tools через клиент брокера,
+read-only agent runtime и MCP ClientSession-протокол. Офлайн-симуляции проверяют
+цикл «брокер → инструмент → результат → брокер» и отказ без действий на
+некорректном пакете. См. [broker-contract.md](broker-contract.md),
+[agent-runtime.md](agent-runtime.md).
+
+Это ещё не завершение миграции: runtime не подключён к боту, production
+MCP-сервер не развёрнут, надёжной агентской очереди, роли почасового сборщика
+и предложений изменения схемы пока нет. Native tools должны пройти отдельный
+межрепозиторный gate AIbroker и проверку провайдеров до включения в production.
+
 ## 1. Решение простыми словами
 
 Один агент разговаривает с человеком и ищет в готовом каталоге. Второй агент
@@ -186,8 +200,8 @@ category, deal_type и price_period из паспорта пользовател
 
 ## 8. Реализуемость и главный технический риск
 
-AIbroker сейчас принимает messages/response_format и возвращает text. Его
-ChatRequest/ChatMessage не передают native tools/tool_choice/tool_calls/tool_call_id
+На момент исходного аудита AIbroker принимал messages/response_format и возвращал text. Его
+ChatRequest/ChatMessage не передавали native tools/tool_choice/tool_calls/tool_call_id
 по всей цепочке. Он не является MCP-клиентом. Для рекомендуемого варианта нужен
 agent runtime в SnifferBot и поддержка native tool calls в брокере end-to-end:
 вход → очередь → провайдер → результат → следующий шаг. Fallback разрешён только
