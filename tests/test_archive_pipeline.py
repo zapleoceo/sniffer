@@ -107,3 +107,74 @@ def test_the_ceiling_is_where_the_column_ends() -> None:
     assert MAX_PLAUSIBLE_VND == 10_000_000_000
     assert price_hint(f"Цена: {MAX_PLAUSIBLE_VND} VND")[1] == MAX_PLAUSIBLE_VND
     assert price_hint(f"Цена: {MAX_PLAUSIBLE_VND + 1} VND") == ("", None)
+
+
+def test_a_lot_names_its_own_city_and_the_card_believes_the_lot(chat: Chat) -> None:
+    """Город лота главнее города чата: иначе ханойская квартира станет нячангской.
+
+    Пока в реестре были только нячангские группы, разница не проявлялась. Первая
+    общевьетнамская барахолка её вскрывает: матчер фильтрует ровно по этому полю
+    (`matching/rules.py`), значит город чата дошёл бы до выдачи как правда.
+    """
+    message = raw("Продам Honda Vision в Дананге, 15 млн VND")
+    parsed = parse_query(message.text, default_city=chat.city)
+
+    listing = listing_from(
+        message,
+        chat,
+        classify(message, category_hints=DETECTOR),
+        attributes=dict(parsed.attributes),
+        city=parsed.city or "",
+    )
+
+    assert listing.city == "da_nang", "карточка поверила чату, а не объявлению"
+
+
+def test_a_lot_without_a_city_falls_back_to_the_chat(chat: Chat) -> None:
+    """Молчание объявления о городе — не «города нет», а «спроси у чата».
+
+    Иначе большинство карточек осталось бы вовсе без города: в нячангской группе
+    город в тексте не пишут, он и так понятен из места.
+    """
+    message = raw("Продам Honda Vision, 15 млн VND")
+    parsed = parse_query(message.text, default_city=chat.city)
+
+    listing = listing_from(
+        message,
+        chat,
+        classify(message, category_hints=DETECTOR),
+        city=parsed.city or "",
+    )
+
+    assert listing.city == "nha_trang"
+
+
+def test_a_multi_city_chat_does_not_stamp_its_own_city_on_everything() -> None:
+    """Общевьетнамская барахолка: город лота решает по каждому объявлению.
+
+    Ровно тот чат, из-за которого правка и появилась (`@vietavito`, «все
+    барахолки»): чат говорит «здесь торгуют», а не «здесь торгуют в Нячанге».
+    """
+    aggregator = Chat(
+        tg_id=-1003986519874,
+        username="vietavito",
+        title="Vietavito | все барахолки",
+        city="nha_trang",
+    )
+    lots = {
+        "Сдам квартиру в Ханое, 8 млн донгов": "ha_noi",
+        "Продам скутер, Фукуок, 12 млн": "phu_quoc",
+        "Продам Honda Lead, Нячанг, 14 млн": "nha_trang",
+        "Продам Honda Lead, 14 млн": "nha_trang",
+    }
+
+    for text, expected in lots.items():
+        message = raw(text)
+        parsed = parse_query(text, default_city=aggregator.city)
+        listing = listing_from(
+            message,
+            aggregator,
+            classify(message, category_hints=DETECTOR),
+            city=parsed.city or "",
+        )
+        assert listing.city == expected, f"{text!r} → {listing.city}, ждали {expected}"

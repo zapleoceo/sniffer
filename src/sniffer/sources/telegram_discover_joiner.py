@@ -49,6 +49,7 @@ from sniffer.sources.telegram_discover_reference import (
     MAX_TRACKED_CHATS,
     MIN_JOIN_PAUSE,
     REJECT_ALREADY_INSIDE,
+    REJECT_ALREADY_MEMBER,
     REJECT_JOIN_REFUSED,
     REJECT_JOIN_REQUEST_SENT,
     REJECT_TOO_MANY_ATTEMPTS,
@@ -71,7 +72,8 @@ Jitter = Callable[[], timedelta]
 # больше не годится. Все шесть — ответы СЕРВЕРА, то есть запрос наружу уже
 # состоялся, поэтому слот они НЕ возвращают.
 #
-# Возвращали. И это давало 24 запроса в сутки вместо трёх: `release_slot`
+# Возвращали. И это давало 24 запроса в сутки — столько, сколько влезает при
+# часовой паузе, то есть лимит переставал существовать вовсе: `release_slot`
 # удаляет событие, а вместе с ним исчезает и `next_allowed_at`, то есть пауза
 # в час. Замер: очередь из плохих кандидатов, вызов раз в час — 24 исходящих
 # `JoinChannel` за сутки; при остановленном времени — 40. Флуд-лимит Telegram
@@ -172,11 +174,51 @@ class ChatJoiner:
             log.warning("discover.chat_cap_reached", cap=self._max_tracked)
             return None
 
-        candidate = await self._queue.reserve()
+        candidate = await self._fresh_candidate()
         if candidate is None:
             await self._ledger.release_slot(event_id=event_id)
             return None
         return await self._join_reserved(candidate, event_id, now)
+
+    async def _fresh_candidate(self) -> ChatCandidate | None:
+        """Первый кандидат, которого ещё НЕТ в нашем реестре.
+
+        Кандидат на чат, в котором мы уже состоим, не должен стоить ни слота, ни
+        запроса наружу: выяснить это можно у своего же реестра, молча, не
+        спрашивая Telegram. Замер на живой базе 03.09.2026: в очереди стояли
+        ДВАДЦАТЬ таких — ровно все чаты реестра, — то есть двое суток суточного
+        бюджета уходило на вступление в то, что у нас уже есть.
+        (`UserAlreadyParticipantError` такой кандидат выбрасывает и без этой
+        проверки, но ценой одного исходящего запроса каждый — а Telegram считает
+        именно запросы.)
+
+        Пропускать их надо ЗДЕСЬ, а не отбором: сид и находки разведки кладут
+        кандидата в очередь без `screen()`, а между отбором и вступлением
+        проходят часы — за них чат мог попасть в реестр другим путём.
+
+        Цикл ограничен размером реестра: больше уже-известных кандидатов, чем
+        чатов в реестре, быть не может. Каждый шаг цикла — только чтение своей
+        базы, ни одного запроса к Telegram.
+
+        Приглашение (`+hash`) проверить нечем: до вступления Telegram id
+        закрытого чата не отдаёт, а имени у него нет. Такой кандидат идёт как
+        раньше — там от лишнего запроса защищает `ALREADY_INSIDE`.
+        """
+        for _ in range(self._max_tracked):
+            candidate = await self._queue.reserve()
+            if candidate is None:
+                return None
+            if not candidate.username:
+                return candidate
+            if not await self._registry.has_chat(username=candidate.username):
+                return candidate
+            await self._queue.drop(candidate.key)
+            await self._rejected.reject(candidate.key, REJECT_ALREADY_MEMBER)
+            log.info("discover.candidate_already_tracked", candidate=candidate.key)
+        # Столько уже-известных подряд, сколько чатов в реестре: дальше искать
+        # нечего, и слот вызывающий вернёт сам.
+        log.warning("discover.queue_full_of_known_chats", checked=self._max_tracked)
+        return None
 
     async def retry_mutes(self) -> int:
         """Догнать беззвучный режим там, где он не встал с первого раза."""
@@ -212,8 +254,8 @@ class ChatJoiner:
             # исходящий запрос: Telegram его записал, и заявка теперь висит у
             # модератора. Поэтому слот НЕ возвращается, хотя чата мы не
             # получили: вернуть его значит разрешить ещё одну такую же попытку
-            # через час, и суточный лимит из трёх запросов превращается в
-            # двадцать четыре.
+            # через час, и суточный лимит превращается в двадцать четыре
+            # запроса — столько влезает в сутки при часовой паузе.
             #
             # Кандидат при этом выбрасывается насовсем — исход известен точно, в
             # отличие от обрыва связи ниже. Отбор такие группы отсекает заранее

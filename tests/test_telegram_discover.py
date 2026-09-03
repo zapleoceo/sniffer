@@ -1104,7 +1104,7 @@ def seed_rows() -> list[tuple[str, str, int]]:
 def test_seed_repeats_the_document_in_the_same_order() -> None:
     """Стартовый набор — тот самый список владельца, а не пересказ по памяти."""
     rows = seed_rows()
-    assert len(rows) == 35, "сид разобрался пустым — проверка была бы бессмысленной"
+    assert len(rows) == 36, "сид разобрался пустым — проверка была бы бессмысленной"
     assert [username for _, username, _ in rows] == doc_waves()
     assert [priority for *_, priority in rows] == sorted(priority for *_, priority in rows), (
         "приоритеты обязаны возрастать, иначе порядок документа теряется"
@@ -1587,3 +1587,37 @@ async def test_an_invite_that_did_not_let_us_in_stays_unknown() -> None:
 
     with pytest.raises(LookupError):
         await telegram_discover_client.TelethonJoiner(client).join_invite("GoOdHaShAbCdEf12")
+
+
+async def test_a_candidate_we_already_track_costs_no_request_and_no_slot() -> None:
+    """Чат из реестра — не кандидат: ни слота, ни запроса к Telegram.
+
+    Замер на живой базе 03.09.2026: в очереди стояли двадцать таких — ровно все
+    чаты реестра, — и при десяти вступлениях в сутки это двое суток бюджета на
+    вступление в то, что у нас уже есть. `UserAlreadyParticipantError` их
+    выбрасывает и без этой проверки, но ценой одного исходящего запроса каждый,
+    а Telegram считает именно запросы.
+    """
+    db = seeded_db("known", "fresh")
+    db.chats[-777] = DiscoveredChat(-777, "known", "Уже читаем", CITY)
+    client = joiner_client("known", "fresh")
+
+    chat = await joiner(db, client, now=NOON).join_next()
+
+    assert chat is not None and chat.username == "fresh", "взят не тот кандидат"
+    assert outgoing_joins(client) == 1, "на уже известный чат ушёл запрос"
+    assert db.rejects.get("@known") == telegram_discover_reference.REJECT_ALREADY_MEMBER
+    assert not any(row["key"] == "@known" for row in db.candidates)
+
+
+async def test_a_queue_of_only_known_chats_spends_nothing() -> None:
+    """Очередь целиком из уже известных чатов не тратит ни одного вступления."""
+    names = tuple(f"known{index}" for index in range(5))
+    db = seeded_db(*names)
+    for index, name in enumerate(names):
+        db.chats[-(900 + index)] = DiscoveredChat(-(900 + index), name, "Уже читаем", CITY)
+    client = joiner_client(*names)
+
+    assert await joiner(db, client, now=NOON).join_next() is None
+    assert outgoing_joins(client) == 0
+    assert db.candidates == [], "очередь не разобрана — они вернутся завтра"
