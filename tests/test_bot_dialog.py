@@ -521,8 +521,8 @@ async def test_skip_button_sends_us_searching() -> None:
     replies = Replies()
     await talker.on_answer(CLIENT, "cat", SKIP, replies)
 
-    assert "Ищу" in replies.texts[0], "после пропуска категории ищем по тому, что есть"
-    assert [reply.question for reply in replies.sent] == [None, None], "нового вопроса нет"
+    assert replies.sent[0].question is not None
+    assert replies.sent[0].question.field == "category", "категорию нельзя пропустить"
 
     versions = [row.version for row in store.rows]
     assert versions == [1], "пропуск ничего не меняет — значит, и версии не создаёт"
@@ -552,12 +552,7 @@ async def test_words_instead_of_a_button_are_understood() -> None:
 
 
 async def test_skip_in_words_works_like_the_button() -> None:
-    """«да не важно» словами делает ровно то же, что кнопка «не важно».
-
-    Вопрос теперь про категорию, но разбор пропуска тот же: слово-пропуск не
-    меняет паспорт (версии нет) и, раз это единственный блокирующий вопрос,
-    отправляет искать по тому, что уже известно.
-    """
+    """Обязательная категория не пропускается словами, как и callback-кнопкой."""
     store = MemoryStore()
     talker = talk(store, vague())
     await talker.on_text(CLIENT, "honda до 300", Replies())
@@ -566,10 +561,11 @@ async def test_skip_in_words_works_like_the_button() -> None:
     await talker.on_text(CLIENT, "да не важно", replies)
 
     state = (await store.load(CLIENT)).state
-    assert state.asked == ("category",), "категорию спросили и пропустили"
+    assert state.asked == ("category",), "обязательный вопрос остаётся текущим"
     assert [row.version for row in store.rows] == [1], "пропуск версии не создаёт"
-    assert [reply.question for reply in replies.sent] == [None, None], "следом выдача, а не вопрос"
-    assert "Ищу" in replies.texts[0]
+    assert replies.sent[0].question is not None
+    assert replies.sent[0].question.field == "category", "словами тоже нельзя пропустить"
+    assert "Ищу" not in replies.texts[0]
 
 
 async def test_text_that_is_not_an_answer_starts_a_new_request() -> None:
@@ -1341,9 +1337,11 @@ async def test_a_broad_query_explains_and_invites_narrowing() -> None:
     """
     replies = Replies()
     items = [found(str(i)) for i in range(40)]
-    await talk(MemoryStore(), bike(), items=items).on_text(CLIENT, "ищу скутер", replies)
+    talker = talk(MemoryStore(), bike(budget=Budget()), items=items)
+    await talker.on_text(CLIENT, "ищу скутер", replies)
+    await talker.on_answer(CLIENT, "budget", SKIP, replies)
 
-    cards = replies.texts[1]
+    cards = replies.texts[-1]
     assert "широкий" in cards.lower()
     assert "40" in cards
     assert "сузить" in cards.lower()

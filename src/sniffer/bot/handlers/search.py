@@ -227,7 +227,7 @@ async def manage_request(callback: CallbackQuery, callback_data: RequestsCallbac
         await query_menu.select(client, root, editing=True)
         await message.answer(
             f"Изменяем: <b>{query_menu.title(item.passport)}</b>\n\n"
-            "Напишите новую формулировку запроса целиком."
+            "Напишите, что изменить, например «до 500», или новую формулировку целиком."
         )
         return
     elif action in {"pause", "resume"}:

@@ -215,7 +215,8 @@ QUESTIONS: tuple[Question, ...] = (
         code="cat",
         text="Что ищем?",
         options=(
-            Option("скутер", "motorbike"),
+            Option("скутер", "scooter"),
+            Option("мотобайк", "motorbike"),
             Option("квартиру", "apartment"),
             Option("комнату", "room"),
             Option("дом", "house"),
@@ -289,7 +290,7 @@ def blocking_question(passport: Passport, asked: Sequence[str]) -> Question | No
     молчаливая подстановка города выдают случайные варианты.
     """
     for field in ("category", "city", "budget.max"):
-        if not has_value(passport, field) and field not in asked:
+        if not has_value(passport, field) and (field != "budget.max" or field not in asked):
             return question_for(field)
     return None
 
@@ -521,7 +522,13 @@ def apply_answer(passport: Passport, field: str, value: AnswerValue) -> Passport
     if field == "budget.max":
         update["budget"] = _budget(passport, value)
     elif field == "category":
-        update["category"] = Category(str(value))
+        update["category"] = Category.MOTORBIKE if value == "scooter" else Category(str(value))
+        if value == "scooter":
+            update["attributes"] = {
+                **passport.attributes,
+                "transmission": "automatic",
+                "body_type": "tay_ga",
+            }
     elif field == "city":
         update["city"] = str(value)
     elif field.startswith("attributes."):

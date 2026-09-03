@@ -55,8 +55,14 @@ SCENARIOS: tuple[Scenario, ...] = (
             Taps("500 USD"),
         ),
         max_questions_before_results=3,
-        expect_results=False,
-        expect={"attributes.engine_cc": 200, "category": "motorbike"},
+        expect={
+            "attributes.engine_cc": 200,
+            "category": "motorbike",
+            "city": "nha_trang",
+            "budget.max": 500.0,
+            "budget.currency": "USD",
+            "intent": "buy",
+        },
         # Ради этой строки харнес и написан: 200 кубиков стоили клиента дважды.
     ),
     Scenario(
@@ -300,9 +306,43 @@ SCENARIOS: tuple[Scenario, ...] = (
         expect={"category": "motorbike", "attributes.transmission": "automatic"},
     ),
     Scenario(
+        key="plain_scooter_automatic_funnel",
+        title="скутер автомат — город и бюджет кнопками",
+        steps=(Says("скутер автомат"), Taps("da_nang"), Taps("500 USD")),
+        max_questions_before_results=2,
+        expect={
+            "intent": "buy",
+            "category": "motorbike",
+            "city": "da_nang",
+            "budget.max": 500.0,
+            "budget.currency": "USD",
+            "attributes.transmission": "automatic",
+        },
+    ),
+    Scenario(
+        key="yamaha_da_nang_refinement",
+        title="ямаха в Дананге — уточнение цены после выдачи",
+        steps=(
+            Says("ищу ямаха скутер"),
+            Taps("da_nang"),
+            Taps("1000 USD"),
+            Reacts(Feedback.PRICEY),
+        ),
+        max_questions_before_results=2,
+        expect={
+            "intent": "buy",
+            "category": "motorbike",
+            "city": "da_nang",
+            "budget.max": 700.0,
+            "budget.currency": "USD",
+            "attributes.brand": "yamaha",
+        },
+    ),
+    Scenario(
         key="yamaha_not_honda_kymco",
         title="ямаха скутер (в чате висят Honda и Kymco)",
-        steps=(Says("ямаха скутер"),),
+        steps=(Says("ямаха скутер"), Taps("da_nang"), Taps("1000 USD")),
+        max_questions_before_results=2,
         # realcheck 03.09.2026: на «ямаха» приходили Honda и Kymco — поля марки у
         # чата нет, а живой отсев марку не читал (словарь фраз, где марок нет
         # вовсе). Ямаха в выдаче остаться ОБЯЗАНА, иначе лечение хуже болезни;
@@ -312,7 +352,8 @@ SCENARIOS: tuple[Scenario, ...] = (
     Scenario(
         key="automatic_not_manual",
         title="скутер автомат до 700 (в чате висит механика)",
-        steps=(Says("скутер автомат до 700"),),
+        steps=(Says("скутер автомат до 700"), Taps("nha_trang")),
+        max_questions_before_results=1,
         # Та же болезнь по оси коробки: на «автомат» приходила механика (R15,
         # Winner). Механика в чате дешёвая — проходит бюджет и обязана уйти
         # отсевом по коробке, а не отсеяться ценой, оставив ось непроверенной.
@@ -326,7 +367,8 @@ SCENARIOS: tuple[Scenario, ...] = (
     Scenario(
         key="studio_no_bare_bike",
         title="сниму студию (в чате байк, названный одной моделью)",
-        steps=(Says("сниму студию у моря"),),
+        steps=(Says("сниму студию у моря"), Taps("nha_trang"), Taps("500 USD")),
+        max_questions_before_results=2,
         # realcheck 03.09.2026: в выдаче студий всплывал байк, названный ТОЛЬКО
         # моделью («Honda Lead 110 2008», в каталоге — «Yamaha R15 2019»): слова
         # категории в нём нет, а модель раньше категорию не выводила, и отсев
