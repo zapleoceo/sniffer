@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -18,6 +17,7 @@ import httpx
 import structlog
 
 from sniffer.broker.contracts import UsageSink
+from sniffer.broker.output import InvalidOutput, OutputReason, check_schema, parse_object
 from sniffer.config import get_settings
 
 log = structlog.get_logger(__name__)
@@ -33,6 +33,21 @@ class BrokerError(RuntimeError):
 
 class BrokerCapError(BrokerError):
     """Дневной лимит проекта исчерпан. Не ретраить до 00:00 UTC."""
+
+
+class BrokerOutputError(BrokerError):
+    """Paid output rejected locally; safe diagnostics never contain model text."""
+
+    def __init__(self, reason: OutputReason, result: BrokerResult) -> None:
+        self.reason = reason
+        self.request_id = result.request_id
+        self.job_id = result.job_id
+        self.provider = result.provider
+        self.finish_reason = result.finish_reason
+        super().__init__(
+            f"structured output rejected: {reason}; provider={self.provider}; "
+            f"request_id={self.request_id}; job_id={self.job_id}"
+        )
 
 
 @dataclass(slots=True)
@@ -53,6 +68,9 @@ class BrokerResult:
     tokens_in: int = 0
     tokens_out: int = 0
     latency_ms: int | None = None
+    job_id: int | None = None
+    finish_reason: str | None = None
+    refusal: bool = False
 
 
 class BrokerClient:
@@ -111,13 +129,12 @@ class BrokerClient:
         system: str | None = None,
         max_tokens: int = 2048,
     ) -> dict[str, Any]:
-        """Строгий JSON по схеме.
+        """Request a schema, then independently validate the paid response.
 
-        Отправляем полный json_schema, а не bare json_object: провайдеры со
-        схемной поддержкой грамматически ограничивают генерацию, и модель
-        физически не может вернуть битый JSON. Это корневое лечение
-        InvalidJSON, а не постфактум-валидация.
+        Provider constraints do not prevent truncation or refusal. Never repair
+        output or silently resubmit a paid call; callers choose their fallback.
         """
+        check_schema(schema)
         messages: list[dict[str, Any]] = []
         if system:
             messages.append({"role": "system", "content": system})
@@ -133,11 +150,18 @@ class BrokerClient:
                 "json_schema": {"name": schema_name, "strict": True, "schema": schema},
             },
         )
+        if result.refusal:
+            raise BrokerOutputError("refusal", result)
+        if result.finish_reason is not None and (
+            not isinstance(result.finish_reason, str)
+            or result.finish_reason.lower() not in {"stop", "end_turn", "completed"}
+        ):
+            raise BrokerOutputError("incomplete", result)
         try:
-            parsed: dict[str, Any] = json.loads(result.text)
-        except json.JSONDecodeError as exc:
-            raise BrokerError(f"провайдер {result.provider} вернул невалидный JSON") from exc
-        return parsed
+            return parse_object(result.text, schema)
+        except InvalidOutput as exc:
+            # Do not chain jsonschema's exception: it contains the raw instance.
+            raise BrokerOutputError(exc.reason, result) from None
 
     async def transcribe(self, audio: bytes, *, filename: str = "voice.ogg") -> str:
         """Голос → текст. Синхронный запрос: у брокера это прокси, не очередь.
@@ -209,6 +233,9 @@ class BrokerClient:
                     tokens_in=_as_int(body.get("tokens_in")) or 0,
                     tokens_out=_as_int(body.get("tokens_out")) or 0,
                     latency_ms=_as_int(body.get("latency_ms")),
+                    job_id=job_id,
+                    finish_reason=body.get("finish_reason"),
+                    refusal=bool(body.get("refusal")),
                 )
             if status == "error":
                 error = str(body.get("error", ""))
