@@ -71,6 +71,7 @@ class BrokerResult:
     job_id: int | None = None
     finish_reason: str | None = None
     refusal: bool = False
+    tool_calls: list[dict[str, Any]] | None = None
 
 
 class BrokerClient:
@@ -103,9 +104,15 @@ class BrokerClient:
         *,
         capability: str = "chat:fast",
         response_format: dict[str, Any] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
         max_tokens: int = 1024,
         temperature: float = 0.7,
     ) -> BrokerResult:
+        if tools is not None and (not tools or response_format is not None):
+            raise ValueError("tools must be nonempty and cannot accompany response_format")
+        if tool_choice is not None and tools is None:
+            raise ValueError("tool_choice requires tools")
         payload: dict[str, Any] = {
             "messages": messages,
             "max_tokens": max_tokens,
@@ -113,6 +120,9 @@ class BrokerClient:
         }
         if response_format is not None:
             payload["response_format"] = response_format
+        if tools is not None:
+            payload["tools"] = tools
+            payload["tool_choice"] = tool_choice if tool_choice is not None else "auto"
 
         job_id = await self._submit(capability, payload)
         result = await self._poll(job_id)
@@ -236,6 +246,7 @@ class BrokerClient:
                     job_id=job_id,
                     finish_reason=body.get("finish_reason"),
                     refusal=bool(body.get("refusal")),
+                    tool_calls=body.get("tool_calls"),
                 )
             if status == "error":
                 error = str(body.get("error", ""))
