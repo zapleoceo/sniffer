@@ -18,7 +18,13 @@ from tests.test_bot_dialog import (
 )
 
 
-async def test_word_skip_cannot_bypass_mandatory_city_or_category() -> None:
+async def test_word_skip_cannot_bypass_mandatory_category() -> None:
+    """search-first (владелец, 04.09.2026): единственное обязательное поле —
+    категория, без предмета нечего искать. Город больше не в воронке —
+    `blocking_question` (`domain/dialogue.py`) его не спрашивает вовсе. Здесь
+    проверяется, что «не важно» словами не пропускает категорию, а как только
+    она названа, бот ищет сразу, не дожидаясь города.
+    """
     store = MemoryStore()
     replies = Replies()
     calls: list[Passport] = []
@@ -28,22 +34,34 @@ async def test_word_skip_cannot_bypass_mandatory_city_or_category() -> None:
         return Found(items=[])
 
     talker = Conversation(store, intake=RulesIntake, finder=finder, recorder=FakeJournal())
-    await talker.on_text(CLIENT, "нужен скутер", replies)
+    await talker.on_text(CLIENT, "ищу что-нибудь", replies)
     assert replies.sent[-1].question is not None
-    assert replies.sent[-1].question.field == "city"
+    assert replies.sent[-1].question.field == "category"
 
     await talker.on_text(CLIENT, "не важно", replies)
     assert replies.sent[-1].question is not None
-    assert replies.sent[-1].question.field == "city"
+    assert replies.sent[-1].question.field == "category", (
+        "категорию нельзя пропустить словом «не важно»"
+    )
+    assert not calls
 
-    await talker.on_answer(CLIENT, "city", "nha_trang", replies)
-    await talker.on_text(CLIENT, "не важно", replies)
-    # Budget is the only optional funnel field, so its skip proceeds to search.
-    assert replies.sent[-1].question is None
+    await talker.on_text(CLIENT, "скутер", replies)
+    assert replies.sent[-1].question is None, (
+        "категория названа — дальше сразу выдача, без вопроса про город"
+    )
     assert len(calls) == 1
+    assert calls[0].city is None, (
+        "RulesIntake без default_city — город остаётся тем, что было в тексте (ничем)"
+    )
 
 
-async def test_callback_skip_cannot_bypass_mandatory_category_or_city() -> None:
+async def test_callback_skip_cannot_bypass_mandatory_category() -> None:
+    """search-first: категорию не пропустить кнопкой «не важно». Города в
+    этой воронке кнопкой больше не спрашивают вовсе — «нажатие» по коду
+    "city", когда никакого вопроса не висит, `Conversation._answered` молча
+    игнорирует, как и любую кнопку под уже неактуальной клавиатурой
+    (сравни `test_stale_button_does_not_answer_twice` в test_bot_dialog.py).
+    """
     store = MemoryStore()
     replies = Replies()
 
@@ -62,15 +80,56 @@ async def test_callback_skip_cannot_bypass_mandatory_category_or_city() -> None:
     assert replies.sent[-1].question.field == "category"
     await talker.on_answer(CLIENT, "cat", SKIP, replies)
     assert replies.sent[-1].question is not None
-    assert replies.sent[-1].question.field == "category"
+    assert replies.sent[-1].question.field == "category", "категорию нельзя пропустить кнопкой"
 
     await talker.on_text(CLIENT, "скутер", replies)
+    assert replies.sent[-1].question is None, (
+        "категория названа — сразу выдача, город не спрашивается"
+    )
+
+    after_search = len(replies.sent)
     await talker.on_answer(CLIENT, "city", SKIP, replies)
+    assert len(replies.sent) == after_search, (
+        "кнопки «город» под этим ответом уже нет — нажатие молча игнорируется"
+    )
+
+
+async def test_repeat_of_a_categoryless_draft_still_asks_for_it() -> None:
+    """search-first (04.09.2026): единственное обязательное поле — категория.
+
+    Раньше здесь проверялся пропуск ГОРОДА (`bike(city=None, ...)`): повтор
+    черновика без города всё равно упирался в вопрос воронки. Город больше не
+    в воронке и ничего не блокирует (см. тест ниже) — мандатной осталась
+    только категория, и повтор черновика без неё обязан спросить, а не искать
+    по пустому предмету.
+    """
+    store = MemoryStore()
+    draft = await store.start(
+        await store.load(CLIENT),
+        bike(category=None, budget=Budget()),
+    )
+    assert draft.passport is not None
+    calls: list[Passport] = []
+
+    async def finder(passport: Passport) -> Found:
+        calls.append(passport)
+        return Found(items=[])
+
+    talker = Conversation(store, intake=RulesIntake, finder=finder, recorder=FakeJournal())
+    replies = Replies()
+    await talker.repeat(CLIENT, draft.passport.root, replies)
+
+    assert not calls
     assert replies.sent[-1].question is not None
-    assert replies.sent[-1].question.field == "city"
+    assert replies.sent[-1].question.field == "category"
 
 
-async def test_repeat_of_draft_still_runs_the_mandatory_funnel() -> None:
+async def test_repeat_of_a_cityless_draft_searches_without_asking() -> None:
+    """Город больше не в воронке: черновик без города всё равно ищет сразу —
+    категории достаточно, `blocking_question` про город не спрашивает вовсе.
+    Дополняет тест выше: там нельзя пропустить категорию, здесь — можно смело
+    не иметь города, и это не брак, а сама суть search-first.
+    """
     store = MemoryStore()
     draft = await store.start(
         await store.load(CLIENT),
@@ -87,12 +146,19 @@ async def test_repeat_of_draft_still_runs_the_mandatory_funnel() -> None:
     replies = Replies()
     await talker.repeat(CLIENT, draft.passport.root, replies)
 
-    assert not calls
-    assert replies.sent[-1].question is not None
-    assert replies.sent[-1].question.field == "city"
+    assert len(calls) == 1
+    assert calls[0].city is None, (
+        "город не подставляется задним числом при повторе — он и не спрашивался"
+    )
+    assert replies.sent[-1].question is None
 
 
 async def test_scooter_category_button_sets_automatic_transmission() -> None:
+    """search-first: категория — единственный вопрос, поэтому ответ на него
+    сразу уходит в поиск. Прежде здесь ещё отвечали на город и бюджет — эти
+    вопросы больше не задаются, и такие ответы были бы кнопками в пустоту
+    (`Conversation._answered` молча игнорирует нажатие без висящего вопроса).
+    """
     store = MemoryStore()
     replies = Replies()
 
@@ -108,8 +174,7 @@ async def test_scooter_category_button_sets_automatic_transmission() -> None:
 
     await talker.on_text(CLIENT, "ищу что-нибудь", replies)
     await talker.on_answer(CLIENT, "cat", "scooter", replies)
-    await talker.on_answer(CLIENT, "city", "nha_trang", replies)
-    await talker.on_answer(CLIENT, "budget", "500 USD", replies)
+    assert replies.sent[-1].question is None, "категория названа — дальше сразу выдача"
 
     current = await store.load(CLIENT)
     assert current.passport is not None
@@ -118,6 +183,10 @@ async def test_scooter_category_button_sets_automatic_transmission() -> None:
 
 
 async def test_apartment_category_button_defaults_to_rent() -> None:
+    """search-first: см. комментарий у `test_scooter_category_button_sets_
+    automatic_transmission` — город и бюджет здесь по той же причине не
+    спрашиваются и не отвечаются.
+    """
     store = MemoryStore()
     replies = Replies()
 
@@ -127,8 +196,7 @@ async def test_apartment_category_button_defaults_to_rent() -> None:
     talker = Conversation(store, intake=RulesIntake, finder=finder, recorder=FakeJournal())
     await talker.on_text(CLIENT, "ищу жильё", replies)
     await talker.on_answer(CLIENT, "cat", "apartment", replies)
-    await talker.on_answer(CLIENT, "city", "nha_trang", replies)
-    await talker.on_answer(CLIENT, "budget", "500 USD", replies)
+    assert replies.sent[-1].question is None, "категория названа — дальше сразу выдача"
 
     current = await store.load(CLIENT)
     assert current.passport is not None
@@ -213,7 +281,34 @@ async def test_explicit_edit_can_change_rent_to_buy() -> None:
     assert current.passport.passport.category is Category.APARTMENT
 
 
+@pytest.mark.skip(
+    reason=(
+        "search-first (владелец, 04.09.2026) убрал вопрос про город и бюджет до "
+        "выдачи. Этот тест проверял, что ОДНО свободное сообщение «Дананг до 500», "
+        "отвечая на висящий вопрос про город, попутно называет и бюджет, закрывая "
+        "воронку разом. Теперь после «нужен скутер» бот ищет сразу же (категория "
+        "уже названа), ни один вопрос не висит — и «Дананг до 500» отвечать уже "
+        "не на что: это не restates() (город меняется) и не corrects() (нет «не X, "
+        "а Y»), значит это НОВЫЙ черновик, а он не называет категорию и бот вновь "
+        "спрашивает «Что ищем?» вместо того, чтобы дополнить уже найденный запрос. "
+        "Проверено прогоном (не теория): itemized в отчёте задачи 2026-09-04. Это "
+        "устройство dialogue.py/conversation.py (не трогать по заданию), а не "
+        "дефект — но и не то же самое поведение, что было. Затянуть тест до "
+        "зелёного можно только соврав об ожиданиях или придумав новый механизм "
+        "слияния свободного текста с уже показанной выдачей — решение продукта, "
+        "не тестового агента, поэтому тест остановлен, а не переписан."
+    )
+)
 async def test_city_reply_with_budget_finishes_scooter_funnel() -> None:
+    """ОТКЛЮЧЕН (search-first, 04.09.2026) — причина в маркере `skip` выше.
+
+    Раньше эта живая последовательность («нужен скутер» → вопрос про город →
+    «Дананг до 500» одним сообщением закрывает и город, и бюджет) была тем, как
+    заканчивалась воронка. Тело оставлено документацией прежнего поведения: если
+    продукт решит поддержать склейку свободного текста с уже найденным запросом
+    без промежуточного вопроса, тест можно включить обратно, поправив ожидания
+    под новый механизм.
+    """
     store = MemoryStore()
     replies = Replies()
     calls: list[Passport] = []

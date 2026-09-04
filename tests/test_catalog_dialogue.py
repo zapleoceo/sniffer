@@ -13,7 +13,6 @@ from sniffer.bot.catalog_finder import CatalogFinder
 from sniffer.bot.conversation import Conversation, Found
 from sniffer.bot.store import Dialogue
 from sniffer.config import Settings
-from sniffer.domain.dialogue import SKIP
 from sniffer.domain.passport import Passport
 from sniffer.domain.records import StoredPassport
 from sniffer.search.intake_rules import parse_query
@@ -136,7 +135,13 @@ def test_default_and_invalid_settings() -> None:
         Settings.model_validate({"catalog_mode": "autodetect"})
 
 
-async def test_scoped_dialogue_preserves_scooter_funnel_and_empty_status() -> None:
+async def test_scoped_dialogue_asks_only_for_category_and_reports_empty_status() -> None:
+    """search-first (владелец, 04.09.2026): единственный блокирующий вопрос —
+    категория. Путь через `scoped_finder` (каталожный режим) обязан вести себя
+    так же, как путь через обычный `finder` — вопросы про город и бюджет из
+    воронки ушли отовсюду разом, а не только с легаси-пути.
+    """
+
     class Parser:
         async def parse(self, text: str) -> Passport:
             return parse_query(text)
@@ -148,22 +153,19 @@ async def test_scoped_dialogue_preserves_scooter_funnel_and_empty_status() -> No
         store, intake=Parser, finder=legacy, scoped_finder=finder, recorder=FakeJournal()
     )
     replies = Replies()
-    await talk.on_text(CLIENT, "нужен скутер", replies)
+    await talk.on_text(CLIENT, "ищу что-нибудь", replies)
     assert replies.sent[-1].question is not None
-    assert replies.sent[-1].question.field == "city"
+    assert replies.sent[-1].question.field == "category"
     finder.assert_not_awaited()
-    await talk.on_answer(CLIENT, "city", "nha_trang", replies)
-    assert replies.sent[-1].question is not None
-    assert replies.sent[-1].question.field == "budget.max"
-    finder.assert_not_awaited()
-    await talk.on_answer(CLIENT, "budget", SKIP, replies)
+
+    await talk.on_answer(CLIENT, "cat", "scooter", replies)
     assert finder.await_count == 1
     legacy.assert_not_awaited()
     assert replies.texts[-1].startswith("Данных пока нет. Сбор запланирован.")
     current = await store.load(CLIENT)
     assert finder.await_args is not None
     assert finder.await_args.args[0] == current
-    assert current.state.asked == ("city", "budget.max")
+    assert current.state.asked == ("category",)
 
 
 async def test_selected_old_request_and_revised_version_reach_catalog() -> None:

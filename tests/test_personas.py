@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 import pytest
 
@@ -30,16 +31,108 @@ from sniffer.domain.dialogue import corrects
 from sniffer.search.intake_rules import parse_query
 from sniffer.simulation.harness import Metrics, run_all
 from sniffer.simulation.personas import CORRECTING, HOUSING, PERSONAS, TERSE, TYPING, VAGUE
-from sniffer.simulation.script import Says
+from sniffer.simulation.script import Says, Scenario, Step
 from sniffer.simulation.verdict import dialogue_faults, wish_faults
 
 KEYS = tuple(scenario.key for scenario in PERSONAS)
+
+# ── search-first (решение владельца 04.09.2026) ─────────────────────────────
+#
+# `domain.dialogue.blocking_question` спрашивает до выдачи только категорию:
+# город подставляется дефолтом (`intake.QueryIntake.parse` → `default_city`),
+# бюджет уточняется обратной связью «дорого» под карточками. Восемь персон
+# ниже родом из прежней воронки категория→город→бюджет и жмут
+# `Taps("nha_trang")` / `Taps(SKIP)` ПОСЛЕ того, как категория уже понятна из
+# первой же фразы — то есть отвечают на кнопки вопросов, которых search-first
+# больше не задаёт.
+#
+# Харнес (`simulation.harness._play`) честно воспроизводит клавиатуру: код
+# кнопки берётся у ПОСЛЕДНЕГО заданного вопроса. Раз вопроса про город и
+# бюджет не было, «нажатие» либо попадает на код давно закрытого вопроса о
+# категории — и `Conversation._answered` молча его игнорирует, ровно как
+# нажатие на клавиатуру под уже устаревшими карточками
+# (`test_stale_button_does_not_answer_twice` в test_bot_dialog.py), — либо
+# код и вовсе пуст, и бот отвечает `NO_REQUEST_YET` («Сначала напишите, что
+# ищете»). Это дефект СЦЕНАРИЯ, не бота: живой Telegram-клиент такую
+# клавиатуру не показал бы вовсе, нажимать там нечего. Считать это регрессом
+# значило бы требовать от search-first отвечать на кнопки, которых он сам не
+# предлагал — ровно ту жалобу владельца, ради которой воронку и откатили.
+#
+# `simulation/personas.py` в этой задаче не в моей зоне (его ведёт отдельный
+# агент), поэтому исходные шаги не правятся в источнике — только здесь, для
+# прогона `runs`. Дословная формулировка персоны (первый `Says` — то, что она
+# на самом деле написала) не меняется НИ В ОДНОМ сценарии; меняется только то,
+# по каким кнопкам она бы жала, будь эти кнопки ещё на экране.
+_SEARCH_FIRST_STEPS: dict[str, tuple[Step, ...]] = {
+    "terse_z300": (Says("Kawasaki z300"),),
+    "terse_cbr": (Says("Honda cbr"),),
+    "terse_adv": (Says("Adv"),),
+    "typo_250_minimum": (Says("нужен потоцикл 250 кубиков минимум"),),
+    "typo_volume_word": (Says("обьем до 200 кубиков, скутер"),),
+    "correction_cc_not_price": (
+        Says("найди мне моцокил 200 кубиков. какие есть сейчас"),
+        Says("не 200000 VND, а обьем мощность двигателя до 200 кубических сантиметров"),
+    ),
+    "vague_hello_then_scooter": (Says("привет"), Says("нужен скутер")),
+    "vague_cheapest": (Says("а покажи самые дешевый скутеры которые есть на продажу"),),
+}
+
+# Категория известна из первого сообщения почти везде — вопросов до выдачи
+# ноль. Исключение — «привет»: в нём нет ни одного факта, «Что ищем?» на него
+# единственно верный ответ и он же единственный вопрос; следующим сообщением
+# («нужен скутер») категория называется СЛОВАМИ, а не кнопкой
+# (`Conversation._answer_in_words`), и выдача идёт сразу следом.
+_SEARCH_FIRST_QUESTIONS: dict[str, int] = {
+    "terse_z300": 0,
+    "terse_cbr": 0,
+    "terse_adv": 0,
+    "typo_250_minimum": 0,
+    "typo_volume_word": 0,
+    "correction_cc_not_price": 0,
+    "vague_hello_then_scooter": 1,
+    "vague_cheapest": 0,
+}
+
+# Город в `correction_cc_not_price` раньше приезжал КНОПКОЙ («nha_trang») —
+# вопрос под ней search-first больше не задаёт. Харнес (`simulation.harness.
+# _RulesIntake`, не мой файл в этой задаче) теперь и сам подставляет
+# `default_city` тем же путём, что бой (`search.intake.QueryIntake.parse`), —
+# и город снова, как и раньше, доживает до конца диалога: разница только в
+# ИСТОЧНИКЕ (дефолт вместо кнопки), а само регрессное свойство сценария —
+# что ПОПРАВКА не должна стирать уже собранные факты — по-прежнему верно
+# и для города тоже, не только для category/engine_cc.
+_SEARCH_FIRST_EXPECT: dict[str, dict[str, object]] = {
+    "correction_cc_not_price": {
+        "category": "motorbike",
+        "city": "nha_trang",
+        "attributes.engine_cc": 200,
+        "attributes.engine_cc_dir": "max",
+    },
+}
+
+
+def _search_first(scenario: Scenario) -> Scenario:
+    """Сценарий персоны, очищенный от кнопок воронки, которой больше нет."""
+    if scenario.key not in _SEARCH_FIRST_STEPS:
+        return scenario
+    updates: dict[str, object] = {
+        "steps": _SEARCH_FIRST_STEPS[scenario.key],
+        "max_questions_before_results": _SEARCH_FIRST_QUESTIONS[scenario.key],
+    }
+    if scenario.key in _SEARCH_FIRST_EXPECT:
+        updates["expect"] = _SEARCH_FIRST_EXPECT[scenario.key]
+    return replace(scenario, **updates)  # type: ignore[arg-type]
+
+
+SEARCH_FIRST_PERSONAS: tuple[Scenario, ...] = tuple(_search_first(s) for s in PERSONAS)
 
 
 @pytest.fixture(scope="module")
 def runs() -> dict[str, Metrics]:
     """Один прогон на модуль: сеть и модель не нужны, но и лишних не надо."""
-    return {metrics.scenario.key: metrics for metrics in asyncio.run(run_all(PERSONAS))}
+    return {
+        metrics.scenario.key: metrics for metrics in asyncio.run(run_all(SEARCH_FIRST_PERSONAS))
+    }
 
 
 def test_every_persona_is_covered() -> None:
