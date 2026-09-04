@@ -27,7 +27,7 @@ from collections.abc import Mapping
 
 import pytest
 
-from sniffer.domain.passport import Category, Passport
+from sniffer.domain.passport import Category, Intent, Passport
 from sniffer.simulation.catalog import CATALOG
 from sniffer.simulation.fit import off_target
 from sniffer.simulation.harness import Metrics, run_all, run_scenario
@@ -163,6 +163,40 @@ def test_feedback_is_the_place_for_questions(runs: dict[str, Metrics]) -> None:
         assert metrics.reached_results, f"{key}: выдачи не было вовсе"
 
 
+# ── универсальность: сторона сделки решает судьбу проката ───────────────────
+
+_RENTAL_IDS = frozenset(lot.item.external_id for lot in CATALOG if lot.rental)
+
+
+def _shown_ids(metrics: Metrics) -> set[str]:
+    return {card.external_id for card in metrics.shown}
+
+
+def test_rent_shows_rental_offers(runs: dict[str, Metrics]) -> None:
+    """Клиенту с intent=rent прокат нужен — и обязан оказаться в выдаче.
+
+    Раньше «прокат»/«арендовать» читались как buy, и отсев проката выбрасывал
+    ровно то, что клиент просил (passport.md, «Прокат — аренда»). Прокатные лоты
+    свежие нарочно, чтобы попасть в пятёрку широкой выдачи.
+    """
+    assert _RENTAL_IDS, "в каталоге нет прокатных лотов — проверять нечего"
+    for key in ("rent_bike_month", "rent_scooter_daily"):
+        metrics = runs[key]
+        assert metrics.reached_results, f"{key}: выдачи не было"
+        assert _shown_ids(metrics) & _RENTAL_IDS, f"{key}: прокат в выдаче не показан"
+
+
+def test_buy_hides_rental_offers(runs: dict[str, Metrics]) -> None:
+    """Тот же прокат клиенту с intent=buy — чужая сторона сделки, и его нет.
+
+    Контроль к предыдущему тесту: рынок один, разводит выдачу только намерение
+    (`relevance._is_rental_offer`, spec-v2 2.7).
+    """
+    metrics = runs["buy_scooter_control"]
+    assert metrics.reached_results, "покупателю выдача всё равно нужна"
+    assert not (_shown_ids(metrics) & _RENTAL_IDS), "прокат просочился покупателю"
+
+
 # ── харнес меряет бота, а не себя ───────────────────────────────────────────
 
 
@@ -181,6 +215,42 @@ def test_the_market_keeps_lots_that_do_not_fit() -> None:
     assert any("чужая категория" in reason for reason in reasons.values()), "нет чужой категории"
     assert any(lot.item.posted_at is not None for lot in CATALOG)
     assert sum(1 for reason in reasons.values() if not reason) >= 2, "нет ни одного попадания"
+
+
+def test_off_target_measures_the_universal_axes() -> None:
+    """Мерка судит и жильё, и сторону сделки — не только байк-покупку.
+
+    Инвариант `test_the_cards_shown_all_fit_the_request` увидел бы регресс этих
+    осей ТОЛЬКО если бы отсев пропустил лот в выдачу. Здесь мерка проверяется
+    напрямую, как марка и категория выше: чужое число комнат и оффер аренды
+    покупателю — «мимо», а те же лоты правой стороне сделки — нет.
+    """
+    two_rooms = Passport(category=Category.APARTMENT, attributes={"rooms": 2})
+    studios = [lot for lot in CATALOG if lot.category is Category.APARTMENT and lot.rooms == 1]
+    assert studios, "в каталоге нет студии, судить нечего"
+    assert all("чужие комнаты" in off_target(lot, two_rooms) for lot in studios)
+
+    buyer = Passport(category=Category.MOTORBIKE, intent=Intent.BUY)
+    renter = Passport(category=Category.MOTORBIKE, intent=Intent.RENT)
+    rentals = [lot for lot in CATALOG if lot.rental]
+    assert rentals, "в каталоге нет прокатного лота, контроль пуст"
+    assert all("оффер аренды" in off_target(lot, buyer) for lot in rentals)
+    assert all(off_target(lot, renter) == "" for lot in rentals), "арендатору прокат не «мимо»"
+
+
+def test_a_furnished_lot_is_soft_not_off_target() -> None:
+    """Мебель — мягкий сигнал: квартира без мебели на запрос «с мебелью» не «мимо».
+
+    Зеркало к комнатам: rooms жёсткие и отсекают, furnished лишь опускает балл
+    (passport.md, spec-v2 2.7). Мерка обязана эту асимметрию соблюдать, иначе
+    отсекла бы половину объявлений, где мебель просто не упомянута.
+    """
+    wants_furnished = Passport(
+        category=Category.APARTMENT, attributes={"rooms": 2, "furnished": True}
+    )
+    two_rooms = [lot for lot in CATALOG if lot.category is Category.APARTMENT and lot.rooms == 2]
+    assert two_rooms, "нет двухкомнатной, судить нечего"
+    assert all(off_target(lot, wants_furnished) == "" for lot in two_rooms)
 
 
 def test_the_report_names_every_scenario(runs: dict[str, Metrics]) -> None:

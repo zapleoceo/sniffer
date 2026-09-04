@@ -13,7 +13,7 @@
 
 from __future__ import annotations
 
-from sniffer.domain.passport import Budget, Currency, Passport
+from sniffer.domain.passport import Budget, Currency, Intent, Passport
 from sniffer.simulation.catalog import Lot
 
 # Курс зафиксирован намеренно: живой `usd_vnd_rate()` ходит в сеть, а отчёт,
@@ -32,11 +32,18 @@ def off_target(lot: Lot, passport: Passport) -> str:
         # Дальше не смотрим: у комнаты нет ни марки, ни коробки, и дописывать
         # «чужая марка» к «чужая категория» значит мерить один дефект четырежды.
         return "чужая категория"
+    # Оффер аренды покупателю — чужая сторона сделки, жёсткий факт того же рода,
+    # что категория (spec-v2 2.7). Судит правдой `rental`, а не текстом: мерка
+    # читает Lot, а не парсит объявление. Арендатору (`intent=RENT`) прокат нужен,
+    # поэтому проверка только у покупателя.
+    if passport.intent is Intent.BUY and lot.rental:
+        return "оффер аренды покупателю"
     attributes = passport.attributes
     checks: tuple[tuple[bool, str], ...] = (
         (_mismatch(attributes.get("brand"), lot.brand), "чужая марка"),
         (_mismatch(attributes.get("model"), lot.model), "чужая модель"),
         (_mismatch(attributes.get("transmission"), lot.transmission), "чужая коробка"),
+        (_wrong_rooms(lot, attributes.get("rooms")), "чужие комнаты"),
         (_over_budget(lot, passport.budget), "дороже бюджета"),
         (_wrong_engine(lot, attributes.get("engine_cc")), "не тот объём"),
     )
@@ -71,3 +78,16 @@ def _wrong_engine(lot: Lot, wanted: object) -> bool:
         return False
     asked = float(str(wanted))
     return abs(lot.engine_cc - asked) > asked * ENGINE_CC_TOLERANCE
+
+
+def _wrong_rooms(lot: Lot, wanted: object) -> bool:
+    """Число комнат лота не то, что просил клиент. Молчание расхождением не считается.
+
+    Жёсткий факт, как модель и объём: «2 спальни» против студии — разное жильё
+    (passport.md, spec-v2 2.7). Точное совпадение, а не «хотя бы»: 3 комнаты на
+    запрос двух — другой сегмент. Лот, число комнат не назвавший (`rooms=None`),
+    не противоречит — половина объявлений его не пишет.
+    """
+    if wanted is None or lot.rooms is None:
+        return False
+    return int(str(wanted)) != lot.rooms

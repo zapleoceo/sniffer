@@ -38,12 +38,19 @@ from sniffer.simulation.fit import USD_VND
 # (`yamaha-r15-bare`): для запроса о жилье он «неизвестная категория» и лез в
 # выдачу квартир, пока категория не стала выводиться из имени модели и на стороне
 # лота (`category_of`). Без такого лота в шуме эту защиту синтетика бы не мерила.
+#
+# Четвёртая ось — чужое число КОМНАТ из чата (`apt-three-chat`): структурного
+# поля комнат у чата нет, и «3 спальни» на запрос «2 спальни» ловит только
+# текстовый отсев (`relevance._wrong_rooms`). У доски поле комнат есть, и её
+# лоты с чужим числом убирает `_source_accepts` ниже; чат же обязан просочиться,
+# иначе `_wrong_rooms` синтетика не мерила бы — ровно как марку без kymco-like-chat.
 _NOISE_KEYS = (
     "giant-escape-3",
     "room-shared-kitchen",
     "kymco-like-chat",
     "yamaha-r15-chat",
     "yamaha-r15-bare",
+    "apt-three-chat",
 )
 
 
@@ -84,6 +91,14 @@ def _source_accepts(lot: Lot, passport: Passport) -> bool:
         target = float(str(wanted_cc))
         if abs(lot.engine_cc - target) > target * 0.25:
             return False
+    # Число комнат доска отбирает структурным полем — как марку и объём: лот
+    # доски с чужим числом до общего контура не доедет. Чат такого поля не имеет,
+    # поэтому его лот с чужими комнатами живёт в `_NOISE_KEYS` и проверяется уже
+    # текстом (`relevance._wrong_rooms`). Неизвестное число комнат у лота — не
+    # противоречие: доска его не отфильтрует, и мы не отсекаем.
+    wanted_rooms = attrs.get("rooms")
+    if wanted_rooms is not None and lot.rooms is not None and lot.rooms != wanted_rooms:
+        return False
     return True
 
 
