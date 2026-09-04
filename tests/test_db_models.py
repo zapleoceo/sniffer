@@ -1,4 +1,4 @@
-"""ORM-модели против `001_init.sql` — без базы.
+"""ORM-модели против всех аддитивных миграций — без базы.
 
 Схему создаёт SQL-файл, модели используются для запросов. Разъехавшись, они
 дают не ошибку импорта, а ошибку в рантайме на живом клиенте, поэтому имена
@@ -12,9 +12,10 @@ from pathlib import Path
 
 from sqlalchemy import UniqueConstraint
 
+from sniffer.db import collection_models as _collection_models  # noqa: F401
 from sniffer.db.models import Base
 
-SCHEMA = Path(__file__).resolve().parents[1] / "infra" / "sql" / "001_init.sql"
+SCHEMA_DIR = Path(__file__).resolve().parents[1] / "infra" / "sql"
 
 # Строки внутри CREATE TABLE, которые описывают не колонку, а ограничение.
 NOT_A_COLUMN = ("unique", "primary", "foreign", "check", "constraint", "exclude")
@@ -22,7 +23,11 @@ NOT_A_COLUMN = ("unique", "primary", "foreign", "check", "constraint", "exclude"
 
 def _sql_tables() -> dict[str, set[str]]:
     """Таблицы и их колонки, как они записаны в DDL."""
-    body = re.sub(r"--[^\n]*", "", SCHEMA.read_text(encoding="utf-8"))
+    body = re.sub(
+        r"--[^\n]*",
+        "",
+        "\n".join(path.read_text(encoding="utf-8") for path in sorted(SCHEMA_DIR.glob("00*.sql"))),
+    )
     tables: dict[str, set[str]] = {}
     for match in re.finditer(r"CREATE TABLE IF NOT EXISTS (\w+)\s*\((.*?)\n\);", body, re.DOTALL):
         name, columns = match.group(1), set()

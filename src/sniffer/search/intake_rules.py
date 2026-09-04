@@ -24,9 +24,9 @@ from typing import Any
 
 from sniffer.domain.passport import Category, Intent, Passport, PassportStatus
 from sniffer.search.budget_rules import parse_budget
-from sniffer.search.engine_size import read_engine_size, without_engine_cc
+from sniffer.search.engine_size import cc_glued_to_name, read_engine_size, without_engine_cc
 from sniffer.search.market_terms import ALL_CITY_NAMES, ATTRIBUTE_TERMS, LangTerms
-from sniffer.search.motorbike_models import MOTORBIKE_BRANDS
+from sniffer.search.motorbike_models import BODY_SCOOTER, MOTORBIKE_BRANDS
 from sniffer.search.rooms import read_rooms
 from sniffer.search.vocabulary import (
     brand_category,
@@ -72,6 +72,16 @@ _CATEGORY_RULES: tuple[tuple[Category, re.Pattern[str]], ...] = (
         Category.MOTORBIKE,
         re.compile(
             r"\b(?:скутер\w*|байк\w*|мотобайк\w*|мотоцикл\w*|мопед\w*"
+            # Опечатки в САМОМ слове категории — из журнала бота (03.09.2026):
+            # «найди мне моцокил 200 кубиков», «нужен потоцикл 250 кубиков
+            # минимум». Не узнав их, бот терял категорию целиком и спрашивал
+            # «что ищем?» у человека, который её только что назвал.
+            #
+            # Список, а не поиск похожего: расстояние правок узнало бы и
+            # «мотокросс», и «моторолер», а цена ложной категории — выдача не
+            # того предмета. Здесь ровно две формы, обе встречены живьём;
+            # третья добавляется, когда встретится третья.
+            r"|моцокил\w*|потоцикл\w*"
             r"|scooter|motorbike|moto|xe\s?máy|xe\s?ga)\b",
             re.IGNORECASE,
         ),
@@ -223,6 +233,7 @@ _RENTED_CATEGORIES = (Category.APARTMENT, Category.ROOM, Category.HOUSE)
 _HOUSING_CATEGORIES = (Category.APARTMENT, Category.ROOM, Category.HOUSE)
 
 MAX_QUERY_CHARS = 500
+_SCOOTER_RE = re.compile(r"\b(?:скутер\w*|scooters?|xe\s+(?:tay\s+)?ga)\b", re.IGNORECASE)
 
 
 def parse_query(text: str, *, default_city: str = "") -> Passport:
@@ -264,11 +275,28 @@ def parse_query(text: str, *, default_city: str = "") -> Passport:
     budget = parse_budget(without_engine_cc(query), intent=intent)
     if model:
         attributes["model"] = model
+        # Объём из числа, прижатого к имени семейства: «z300» → 300. Только на
+        # пустое место — сказанное клиентом словом («до 200 кубиков») главнее.
+        #
+        # Без этого Z300 и Z900 давали ОДИН паспорт (модель `z`, объёма нет), и
+        # клиент, назвавший триста, получал девятисотые. Сторона лота это число
+        # читала всегда (`listing_cc_values`), сторона клиента — нет; асимметрия
+        # и была дефектом. У модели с объёмом в таблице (скутеры: «Lead — это
+        # 110») ничего не меняется: там объём известен и прижатого числа нет.
+        if "engine_cc" not in attributes:
+            glued = cc_glued_to_name(query, model)
+            if glued is not None:
+                attributes["engine_cc"] = glued
     if brand:
         attributes["brand"] = brand
     transmission = detect_transmission(query, category)
     if transmission:
         attributes["transmission"] = transmission
+    if category is Category.MOTORBIKE and _SCOOTER_RE.search(query):
+        # «Скутер» уже называет и кузов, и способ переключения. Спрашивать
+        # после этого «автомат или механика?» — заставлять клиента повторяться.
+        attributes["body_type"] = BODY_SCOOTER
+        attributes.setdefault("transmission", "automatic")
     papers = detect_papers(query, category)
     if papers:
         attributes["papers"] = papers

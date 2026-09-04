@@ -37,7 +37,8 @@ SCENARIOS: tuple[Scenario, ...] = (
     Scenario(
         key="scooter_lead",
         title="нужен скутер, не мотоцикл, honda lead",
-        steps=(Says("нужен скутер, не мотоцикл, honda lead"),),
+        steps=(Says("нужен скутер, не мотоцикл, honda lead"), Taps("nha_trang"), Taps("500 USD")),
+        max_questions_before_results=2,
         # Живой отказ 02.09.2026: бот отдал три Airblade, потому что «lead»
         # читалось маркой и дальше не участвовало нигде. Модель обязана быть
         # своим полем, а коробка — следовать из неё: Lead всегда автомат, и
@@ -45,31 +46,50 @@ SCENARIOS: tuple[Scenario, ...] = (
         expect={
             "category": "motorbike",
             "city": "nha_trang",
+            "budget.max": 500.0,
             "attributes.brand": "honda",
             "attributes.model": "lead",
             "attributes.transmission": "automatic",
         },
-        forbid=("budget.max",),
     ),
     Scenario(
         key="typo_200cc",
         title="найди мне моцокил 200 кубиков (опечатка + объём)",
-        steps=(Says("найди мне моцокил 200 кубиков"), Taps("motorbike")),
-        max_questions_before_results=1,
-        expect={"attributes.engine_cc": 200, "category": "motorbike"},
+        # Шаг «нажать категорию» убран, и вопросов стало на один меньше: бот
+        # теперь узнаёт «моцокил» сам (`intake_rules`, опечатки из журнала), а
+        # прежняя версия сценария закрепляла обратное — что категорию у клиента
+        # приходится переспрашивать. Тап по категории после правки уходил в
+        # вопрос о ГОРОДЕ, и город становился «motorbike»: сценарий, описывающий
+        # поведение шагами, ломается ровно тогда, когда бот умнеет, и это
+        # правильно — иначе улучшение прошло бы незамеченным.
+        steps=(
+            Says("найди мне моцокил 200 кубиков"),
+            Taps("nha_trang"),
+            Taps("500 USD"),
+        ),
+        max_questions_before_results=2,
+        expect={
+            "attributes.engine_cc": 200,
+            "category": "motorbike",
+            "city": "nha_trang",
+            "budget.max": 500.0,
+            "budget.currency": "USD",
+            "intent": "buy",
+        },
         # Ради этой строки харнес и написан: 200 кубиков стоили клиента дважды.
-        forbid=("budget.max",),
     ),
     Scenario(
         key="scooter_nha_trang",
         title="ищу скутер в Нячанге",
-        steps=(Says("ищу скутер в Нячанге"),),
+        steps=(Says("ищу скутер в Нячанге"), Taps("500 USD")),
+        max_questions_before_results=1,
         expect={"category": "motorbike", "city": "nha_trang", "intent": "buy"},
     ),
     Scenario(
         key="apartment_10m",
         title="квартиру снять до 10 млн",
-        steps=(Says("квартиру снять до 10 млн"),),
+        steps=(Says("квартиру снять до 10 млн"), Taps("nha_trang")),
+        max_questions_before_results=1,
         expect={
             "category": "apartment",
             "intent": "rent",
@@ -88,8 +108,8 @@ SCENARIOS: tuple[Scenario, ...] = (
     Scenario(
         key="what_is_there",
         title="что тут есть → «не важно»",
-        steps=(Says("что тут есть"), Taps(SKIP)),
-        max_questions_before_results=1,
+        steps=(Says("что тут есть"), Taps("motorbike"), Taps("nha_trang"), Taps(SKIP)),
+        max_questions_before_results=3,
         expect_text="Ищу",
     ),
     Scenario(
@@ -111,13 +131,19 @@ SCENARIOS: tuple[Scenario, ...] = (
     Scenario(
         key="apartment_furnished",
         title="нужна квартира с мебелью на длительный срок",
-        steps=(Says("нужна квартира с мебелью на длительный срок"),),
+        steps=(
+            Says("нужна квартира с мебелью на длительный срок"),
+            Taps("nha_trang"),
+            Taps("500 USD"),
+        ),
+        max_questions_before_results=2,
         expect={"category": "apartment", "intent": "rent"},
     ),
     Scenario(
         key="scooter_automatic_500",
         title="скутер автомат до 500 долларов",
-        steps=(Says("скутер автомат до 500 долларов"),),
+        steps=(Says("скутер автомат до 500 долларов"), Taps("nha_trang")),
+        max_questions_before_results=1,
         # Коробка названа словом, и разбор обязан её услышать. Пока не слышал,
         # бот предлагал под карточками кнопку «нужен автомат» — то есть
         # переспрашивал то, что клиент уже сказал.
@@ -131,7 +157,9 @@ SCENARIOS: tuple[Scenario, ...] = (
     Scenario(
         key="motorbike_manual_exciter",
         title="мотоцикл механика exciter",
-        steps=(Says("мотоцикл механика exciter"),),
+        steps=(Says("мотоцикл механика exciter"), Taps("nha_trang"), Taps("500 USD")),
+        max_questions_before_results=2,
+        expect_results=False,
         # Exciter — модель Yamaha, и марка обязана выводиться ИЗ неё, а не
         # совпадать с ней: пока модели и марки лежали одним списком, паспорт
         # получал brand=exciter, а производителя не знал никто.
@@ -145,34 +173,41 @@ SCENARIOS: tuple[Scenario, ...] = (
     Scenario(
         key="repeat_same_words",
         title="повтор той же фразы слово в слово",
-        steps=(Says("ищу скутер в нячанге"), Says("ищу скутер в нячанге")),
+        steps=(
+            Says("ищу скутер в нячанге до 500 долларов"),
+            Says("ищу скутер в нячанге до 500 долларов"),
+        ),
         expect={"category": "motorbike", "city": "nha_trang"},
     ),
     Scenario(
         key="topic_switch",
         title="смена темы посреди диалога",
-        steps=(Says("ищу скутер в нячанге"), Says("ладно, тогда квартиру до 10 млн")),
+        steps=(
+            Says("ищу скутер в нячанге до 500 долларов"),
+            Says("ладно, тогда квартиру в нячанге до 10 млн"),
+        ),
         expect={"category": "apartment", "budget.max": 10_000_000.0, "intent": "rent"},
     ),
     Scenario(
         key="words_instead_of_button",
         title="ответ словами вместо кнопки",
-        steps=(Says("привет"), Says("скутер")),
-        max_questions_before_results=1,
+        steps=(Says("привет"), Says("скутер"), Taps("nha_trang"), Taps("500 USD")),
+        max_questions_before_results=3,
         expect={"category": "motorbike"},
     ),
     Scenario(
         key="pricey_after_results",
         title="«дорого» после выдачи",
-        steps=(Says("скутер honda до 500"), Reacts(Feedback.PRICEY)),
+        steps=(Says("скутер honda в нячанге до 500"), Reacts(Feedback.PRICEY)),
         expect={"category": "motorbike", "budget.max": 350.0},
     ),
     Scenario(
         key="wrong_after_results",
         title="«не то» после выдачи",
-        steps=(Says("ищу скутер в нячанге"), Reacts(Feedback.WRONG)),
+        steps=(Says("ищу скутер в нячанге"), Taps("500 USD"), Reacts(Feedback.WRONG)),
+        max_questions_before_results=1,
         expect={"category": "motorbike"},
-        expect_text="бюджет",
+        expect_text="Состояние",
     ),
     Scenario(
         key="bare_budget",
@@ -185,31 +220,36 @@ SCENARIOS: tuple[Scenario, ...] = (
     Scenario(
         key="scooter_da_nang",
         title="ищу скутер в Дананге (второй обслуживаемый город)",
-        steps=(Says("ищу скутер в Дананге"),),
+        steps=(Says("ищу скутер в Дананге"), Taps("500 USD")),
+        max_questions_before_results=1,
         expect={"category": "motorbike", "city": "da_nang"},
     ),
     Scenario(
         key="room_cheap",
         title="сниму комнату недорого",
-        steps=(Says("сниму комнату недорого"),),
+        steps=(Says("сниму комнату недорого"), Taps("nha_trang"), Taps("500 USD")),
+        max_questions_before_results=2,
         expect={"category": "room", "intent": "rent"},
     ),
     Scenario(
         key="english_scooter",
         title="looking for a scooter in nha trang",
-        steps=(Says("looking for a scooter in nha trang"),),
+        steps=(Says("looking for a scooter in nha trang"), Taps("500 USD")),
+        max_questions_before_results=1,
         expect={"category": "motorbike", "city": "nha_trang"},
     ),
     Scenario(
         key="vietnamese_bike",
         title="xe máy honda nha trang",
-        steps=(Says("xe máy honda nha trang"),),
+        steps=(Says("xe máy honda nha trang"), Taps("500 USD")),
+        max_questions_before_results=1,
         expect={"category": "motorbike", "city": "nha_trang", "attributes.brand": "honda"},
     ),
     Scenario(
         key="cyrillic_brand",
         title="ищу хонду вижн до 400 (марка кириллицей)",
-        steps=(Says("ищу хонду вижн до 400"),),
+        steps=(Says("ищу хонду вижн до 400"), Taps("nha_trang")),
+        max_questions_before_results=1,
         # Ни одного вопроса: предмет назван моделью. Пока категория из модели не
         # выводилась, бот спрашивал «что ищем?» у клиента, который уже ответил, —
         # это и есть та «тупизна», на которую жаловался владелец.
@@ -225,49 +265,97 @@ SCENARIOS: tuple[Scenario, ...] = (
     Scenario(
         key="vague_cheap_thing",
         title="мутно: хочу что-нибудь недорогое",
-        steps=(Says("хочу что-нибудь недорогое"), Taps("motorbike")),
-        max_questions_before_results=1,
+        steps=(
+            Says("хочу что-нибудь недорогое"),
+            Taps("motorbike"),
+            Taps("nha_trang"),
+            Taps("500 USD"),
+        ),
+        max_questions_before_results=3,
         expect={"category": "motorbike"},
     ),
     Scenario(
         key="vague_rental",
         title="мутно: переезжаю в Нячанг, хочу что-нибудь снять",
-        steps=(Says("переезжаю в Нячанг, хочу что-нибудь снять"), Taps("apartment")),
-        max_questions_before_results=1,
+        steps=(
+            Says("переезжаю в Нячанг, хочу что-нибудь снять"),
+            Taps("apartment"),
+            Taps("500 USD"),
+        ),
+        max_questions_before_results=2,
         expect={"category": "apartment", "city": "nha_trang", "intent": "rent"},
     ),
     Scenario(
         key="brand_only_then_category",
         title="мутно: хочу хонду (марка задаёт предмет)",
-        steps=(Says("хочу хонду"),),
+        steps=(Says("хочу хонду"), Taps("nha_trang"), Taps("500 USD")),
         # Марка выводит категорию так же, как модель: все марки рынка
         # мотобайковые, и «хонда» — это мотобайк (defect 02.09.2026: на «yamaha»
         # категория оставалась пустой и в выдачу лезла даже квартира). Поэтому
         # «что ищем?» здесь больше не спрашивают — предмет уже назван маркой.
         # `expect_results=None`: показать выдачу или доуточнить широкий запрос —
         # обе ветки допустимы, лишь бы категория и марка распознались.
-        max_questions_before_results=1,
+        max_questions_before_results=2,
         expect_results=None,
         expect={"category": "motorbike", "attributes.brand": "honda"},
     ),
     Scenario(
         key="bare_engine",
         title="мутно: нужно до 125 кубов, больше не хочу",
-        steps=(Says("нужно до 125 кубов, больше не хочу"), Taps("motorbike")),
-        max_questions_before_results=1,
+        steps=(
+            Says("нужно до 125 кубов, больше не хочу"),
+            Taps("motorbike"),
+            Taps("nha_trang"),
+            Taps("500 USD"),
+        ),
+        max_questions_before_results=3,
         expect={"category": "motorbike", "attributes.engine_cc": 125},
-        forbid=("budget.max",),
     ),
     Scenario(
         key="broad_automatic_bike",
         title="байк или скутер — главное автомат",
-        steps=(Says("байк или скутер — главное автомат"),),
+        steps=(Says("байк или скутер — главное автомат"), Taps("nha_trang"), Taps("500 USD")),
+        max_questions_before_results=2,
         expect={"category": "motorbike", "attributes.transmission": "automatic"},
+    ),
+    Scenario(
+        key="plain_scooter_automatic_funnel",
+        title="скутер автомат — город и бюджет кнопками",
+        steps=(Says("скутер автомат"), Taps("da_nang"), Taps("500 USD")),
+        max_questions_before_results=2,
+        expect={
+            "intent": "buy",
+            "category": "motorbike",
+            "city": "da_nang",
+            "budget.max": 500.0,
+            "budget.currency": "USD",
+            "attributes.transmission": "automatic",
+        },
+    ),
+    Scenario(
+        key="yamaha_da_nang_refinement",
+        title="ямаха в Дананге — уточнение цены после выдачи",
+        steps=(
+            Says("ищу ямаха скутер"),
+            Taps("da_nang"),
+            Taps("1000 USD"),
+            Reacts(Feedback.PRICEY),
+        ),
+        max_questions_before_results=2,
+        expect={
+            "intent": "buy",
+            "category": "motorbike",
+            "city": "da_nang",
+            "budget.max": 700.0,
+            "budget.currency": "USD",
+            "attributes.brand": "yamaha",
+        },
     ),
     Scenario(
         key="yamaha_not_honda_kymco",
         title="ямаха скутер (в чате висят Honda и Kymco)",
-        steps=(Says("ямаха скутер"),),
+        steps=(Says("ямаха скутер"), Taps("da_nang"), Taps("1000 USD")),
+        max_questions_before_results=2,
         # realcheck 03.09.2026: на «ямаха» приходили Honda и Kymco — поля марки у
         # чата нет, а живой отсев марку не читал (словарь фраз, где марок нет
         # вовсе). Ямаха в выдаче остаться ОБЯЗАНА, иначе лечение хуже болезни;
@@ -277,7 +365,8 @@ SCENARIOS: tuple[Scenario, ...] = (
     Scenario(
         key="automatic_not_manual",
         title="скутер автомат до 700 (в чате висит механика)",
-        steps=(Says("скутер автомат до 700"),),
+        steps=(Says("скутер автомат до 700"), Taps("nha_trang")),
+        max_questions_before_results=1,
         # Та же болезнь по оси коробки: на «автомат» приходила механика (R15,
         # Winner). Механика в чате дешёвая — проходит бюджет и обязана уйти
         # отсевом по коробке, а не отсеяться ценой, оставив ось непроверенной.

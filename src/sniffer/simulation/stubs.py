@@ -30,11 +30,20 @@ class MemoryStore:
         self.rows: list[StoredPassport] = []
         self.events: list[PassportEvent] = []
         self._users: dict[int, int] = {}
+        self._active: dict[int, int] = {}
+        self._editing: set[int] = set()
 
     async def load(self, client: Client) -> Dialogue:
         user_id = self._users.setdefault(client.tg_user_id, len(self._users) + 1)
+        active = self._active.get(user_id)
         current = next(
-            (row for row in reversed(self.rows) if row.user_id == user_id and row.is_current),
+            (
+                row
+                for row in reversed(self.rows)
+                if row.user_id == user_id
+                and row.is_current
+                and (active is None or row.root == active)
+            ),
             None,
         )
         if current is None:
@@ -42,13 +51,20 @@ class MemoryStore:
         root = current.root
         chain = {row.id for row in self.rows if row.id == root or row.root_id == root}
         events = [event for event in self.events if event.passport_id in chain]
-        return Dialogue(user_id=user_id, passport=current, state=replay(events))
+        return Dialogue(
+            user_id=user_id,
+            passport=current,
+            state=replay(events),
+            editing=current.root in self._editing,
+        )
 
     async def start(self, dialogue: Dialogue, passport: Passport) -> Dialogue:
         stored = StoredPassport(
             id=len(self.rows) + 1, user_id=dialogue.user_id, version=1, passport=passport
         )
         self.rows.append(stored)
+        self._active[dialogue.user_id] = stored.root
+        self._editing.discard(stored.root)
         self._event(stored.id, EVENT_USER_MESSAGE, {"text": passport.raw_query})
         return Dialogue(user_id=dialogue.user_id, passport=stored, state=DialogueState())
 
@@ -70,6 +86,8 @@ class MemoryStore:
             passport=passport,
         )
         self.rows.append(stored)
+        self._active[dialogue.user_id] = root
+        self._editing.discard(root)
         self._event(stored.id, kind, payload)
         return Dialogue(
             user_id=dialogue.user_id,
@@ -82,6 +100,20 @@ class MemoryStore:
             raise ValueError("событие без паспорта")
         self._event(dialogue.passport.id, kind, payload)
         return replace(dialogue, state=advance(dialogue.state, kind, payload))
+
+    async def select(self, dialogue: Dialogue, root: int, *, editing: bool = False) -> Dialogue:
+        owned = any(row.user_id == dialogue.user_id and row.root == root for row in self.rows)
+        if not owned:
+            return dialogue
+        self._active[dialogue.user_id] = root
+        if editing:
+            self._editing.add(root)
+        else:
+            self._editing.discard(root)
+        client = next(
+            Client(tg_id) for tg_id, user_id in self._users.items() if user_id == dialogue.user_id
+        )
+        return await self.load(client)
 
     def _event(self, passport_id: int, kind: str, payload: dict[str, Any]) -> None:
         self.events.append(PassportEvent(passport_id=passport_id, kind=kind, payload=payload))

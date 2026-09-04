@@ -7,15 +7,16 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 
 from sniffer.db import models
 from sniffer.db.mappers import passport_values, to_passport_event, to_stored_passport
 from sniffer.db.repositories.base import Repository
 from sniffer.domain.passport import Passport
-from sniffer.domain.records import PassportEvent, StoredPassport
+from sniffer.domain.records import PassportEvent, QueryOverview, StoredPassport
 
 
 class PassportRepository(Repository):
@@ -30,19 +31,97 @@ class PassportRepository(Repository):
         каждый свой запрос, — поэтому «текущий» это самый свежий из актуальных,
         а не единственный.
         """
+        active = await self._session.scalar(
+            select(models.User.active_passport_root).where(models.User.id == user_id)
+        )
+        chain = func.coalesce(models.Passport.root_id, models.Passport.id)
+        conditions = [models.Passport.user_id == user_id, models.Passport.is_current.is_(True)]
+        if active is not None:
+            conditions.append(chain == active)
         row = await self._session.scalar(
             select(models.Passport)
-            .where(models.Passport.user_id == user_id, models.Passport.is_current.is_(True))
+            .where(*conditions)
             .order_by(models.Passport.created_at.desc(), models.Passport.id.desc())
             .limit(1)
         )
+        if active is None and row is not None:
+            await self._session.execute(
+                update(models.User)
+                .where(models.User.id == user_id)
+                .values(active_passport_root=row.root_id or row.id)
+            )
         return to_stored_passport(row) if row is not None else None
+
+    async def select(self, user_id: int, root: int, *, editing: bool = False) -> bool:
+        """Выбрать свою цепочку; чужой root не меняет состояние."""
+        chain = func.coalesce(models.Passport.root_id, models.Passport.id)
+        owned = await self._session.scalar(
+            select(models.Passport.id)
+            .where(models.Passport.user_id == user_id, chain == root)
+            .limit(1)
+        )
+        if owned is None:
+            return False
+        await self._session.execute(
+            update(models.User)
+            .where(models.User.id == user_id)
+            .values(
+                active_passport_root=root,
+                editing_passport_root=root if editing else None,
+            )
+        )
+        return True
+
+    async def clear_editing(self, user_id: int) -> None:
+        await self._session.execute(
+            update(models.User).where(models.User.id == user_id).values(editing_passport_root=None)
+        )
+
+    async def list_queries(self, user_id: int) -> list[QueryOverview]:
+        """Все актуальные цепочки и их мониторинги, свежие сверху."""
+        chain = func.coalesce(models.Passport.root_id, models.Passport.id)
+        rows = await self._session.execute(
+            select(models.Passport, models.Subscription, models.User.active_passport_root)
+            .join(models.User, models.User.id == models.Passport.user_id)
+            .outerjoin(
+                models.Subscription,
+                and_(
+                    models.Subscription.user_id == user_id,
+                    models.Subscription.passport_root == chain,
+                ),
+            )
+            .where(models.Passport.user_id == user_id, models.Passport.is_current.is_(True))
+            .order_by(models.Passport.created_at.desc(), models.Passport.id.desc())
+        )
+        result: list[QueryOverview] = []
+        moment = datetime.now(UTC)
+        for passport, subscription, active_root in rows:
+            root = passport.root_id or passport.id
+            monitoring = "off"
+            expires_at = None
+            if subscription is not None:
+                expires_at = subscription.expires_at
+                if expires_at is not None and expires_at <= moment:
+                    monitoring = "expired"
+                else:
+                    monitoring = "active" if subscription.is_active else "paused"
+            result.append(
+                QueryOverview(
+                    root=root,
+                    passport=to_stored_passport(passport).passport,
+                    is_active=root == active_root,
+                    monitoring=monitoring,
+                    expires_at=expires_at,
+                )
+            )
+        return result
 
     async def save_new(self, user_id: int, passport: Passport) -> StoredPassport:
         """Первая версия цепочки: `root_id` пустой, корнем служит свой же id."""
         row = models.Passport(user_id=user_id, version=1, root_id=None, **passport_values(passport))
         self._session.add(row)
         await self._session.flush()
+        await self.select(user_id, row.id)
         return to_stored_passport(row)
 
     async def save_revision(self, previous: StoredPassport, passport: Passport) -> StoredPassport:
@@ -83,6 +162,7 @@ class PassportRepository(Repository):
         )
         self._session.add(row)
         await self._session.flush()
+        await self.select(previous.user_id, root)
         return to_stored_passport(row)
 
     async def list_versions(self, root: int) -> list[StoredPassport]:

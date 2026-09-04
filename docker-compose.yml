@@ -68,6 +68,16 @@ services:
     command: python -m sniffer.collector
     mem_limit: ${SNIFFER_MEM_COLLECTOR:-320m}
 
+  # Broker/MCP agent that fills the verified catalog. It is deliberately a
+  # profile: normal deploys keep the legacy stack unchanged until the pilot is
+  # explicitly enabled and the host has enough memory.
+  agent-collector:
+    <<: *app
+    profiles: ["agent-catalog"]
+    container_name: sniffer-agent-collector
+    command: python -m sniffer.agent_app.collector
+    mem_limit: ${SNIFFER_MEM_AGENT_COLLECTOR:-256m}
+
   # Воронка: гейт → prefilter → извлечение → матчинг. Перезапускается без
   # потерь, состояние живёт в таблице jobs.
   worker:

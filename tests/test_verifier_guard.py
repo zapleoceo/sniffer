@@ -41,10 +41,12 @@ class FakeBroker:
         self.boom = boom
         self.calls = 0
         self.prompts: list[str] = []
+        self.options: list[dict[str, Any]] = []
 
-    async def structured(self, prompt: str, **_: Any) -> dict[str, Any]:
+    async def structured(self, prompt: str, **options: Any) -> dict[str, Any]:
         self.calls += 1
         self.prompts.append(prompt)
+        self.options.append(options)
         if self.boom is not None:
             raise self.boom
         return self.payload
@@ -74,6 +76,34 @@ async def test_a_rejected_card_never_reaches_the_client() -> None:
     kept = await screen(WANTED, items, broker=broker)  # type: ignore[arg-type]
 
     assert [card.external_id for card in kept] == ["1"]
+
+
+async def test_guard_uses_sales_lane_without_losing_structured_contract() -> None:
+    broker = FakeBroker()
+    await screen(WANTED, [item(1, "Honda Vision")], broker=broker)  # type: ignore[arg-type]
+    assert broker.calls == 1
+    options = broker.options[0]
+    assert options["capability"] == "chat:sales"
+    assert options["schema_name"] == "listing_guard"
+    assert options["schema"]["additionalProperties"] is False
+    assert options["schema"]["required"] == ["verdicts"]
+
+
+@pytest.mark.parametrize("count, expected_tokens", [(1, 640), (6, 1280), (12, 2048), (30, 2048)])
+async def test_guard_budget_preserves_explanations_without_extra_calls(
+    count: int,
+    expected_tokens: int,
+) -> None:
+    broker = FakeBroker()
+    await screen(
+        WANTED,
+        [item(n, "Honda Vision") for n in range(count)],
+        broker=broker,  # type: ignore[arg-type]
+    )
+    assert broker.calls == 1
+    options = broker.options[0]
+    assert options["max_tokens"] == expected_tokens
+    assert "why" in options["schema"]["properties"]["verdicts"]["items"]["required"]
 
 
 async def test_a_price_written_without_a_label_is_recovered() -> None:

@@ -60,7 +60,7 @@ class QueryIntake:
 
     async def parse(self, text: str) -> Passport:
         settings = get_settings()
-        rules = parse_query(text, default_city=settings.default_city)
+        rules = parse_query(text)
 
         if self._broker is None and not settings.broker_project_key.strip():
             # Ключа нет — идти некуда. Молча ждать таймаут на каждом сообщении
@@ -204,7 +204,11 @@ def merge(rules: Passport, payload: Any) -> Passport:
             "confidence": 0.8,
             "missing_fields": [
                 field
-                for field, value in (("category", category), ("budget.max", budget.max))
+                for field, value in (
+                    ("category", category),
+                    ("city", city),
+                    ("budget.max", budget.max),
+                )
                 if value is None
             ],
             "status": PassportStatus.READY if category and city else PassportStatus.DRAFT,

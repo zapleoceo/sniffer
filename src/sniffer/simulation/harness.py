@@ -20,7 +20,6 @@ from dataclasses import dataclass, field
 
 from sniffer.bot.conversation import Conversation, Reply
 from sniffer.bot.store import Client
-from sniffer.config import get_settings
 from sniffer.domain.passport import Passport
 from sniffer.search.intake_rules import parse_query
 from sniffer.simulation.catalog import CATALOG, Lot
@@ -45,7 +44,7 @@ class _RulesIntake:
     """
 
     async def parse(self, text: str) -> Passport:
-        return parse_query(text, default_city=get_settings().default_city)
+        return parse_query(text)
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,7 +62,7 @@ class Metrics:
 
     scenario: Scenario
     # Главная цифра: сколько вопросов клиент выслушал ДО первой карточки.
-    # Ноль при известной категории, один при неизвестной; больше — регресс.
+    # Только недостающие категория, город и бюджет: от нуля до трёх.
     questions_before_results: int
     # Вопросы всего: обратная связь вправе спросить и после выдачи, и это
     # нормально. Разница между этим числом и предыдущим — цена уточнений.

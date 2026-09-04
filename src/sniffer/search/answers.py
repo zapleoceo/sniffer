@@ -17,7 +17,13 @@ import re
 
 from sniffer.domain.dialogue import AnswerValue
 from sniffer.search.budget_rules import parse_budget
-from sniffer.search.intake_rules import detect_brand, detect_category, detect_transmission
+from sniffer.search.intake_rules import (
+    detect_brand,
+    detect_category,
+    detect_city,
+    detect_transmission,
+    parse_query,
+)
 from sniffer.search.rooms import read_rooms
 
 # «Не важно» в любом виде. Кнопка есть, но нажимают не всегда: половина людей
@@ -82,8 +88,13 @@ def interpret(field: str, text: str) -> AnswerValue | None:
         budget = parse_budget(text)
         return budget if budget.max else None
     if field == "category":
+        parsed = parse_query(text)
+        if parsed.attributes.get("body_type") == "tay_ga":
+            return "scooter"
         category = detect_category(text)
         return category.value if category else None
+    if field == "city":
+        return detect_city(text)
     if field == "attributes.brand":
         return detect_brand(text)
     if field == "attributes.transmission":

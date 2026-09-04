@@ -17,6 +17,8 @@ from aiogram.filters.callback_data import CallbackData
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from sniffer.bot.conversation import Reply
+from sniffer.bot.query_menu import title
+from sniffer.domain.records import QueryOverview
 
 # Сколько кнопок в ряд. Три коротких («автомат», «механика», «не важно») в один
 # ряд ещё читаются, длинные подписи телефон обрежет.
@@ -32,21 +34,25 @@ class AnswerCallback(CallbackData, prefix="ans"):
 
     code: str
     value: str
+    root: int
 
 
 class FeedbackCallback(CallbackData, prefix="fb"):
     """Обратная связь на выдаче: «дорого», «не то», «нужен автомат»."""
 
     kind: str
+    root: int
 
 
 class SubscribeCallback(CallbackData, prefix="sub"):
-    """«Следить за новыми». Данных не несёт: тема берётся из текущего паспорта.
+    """«Следить» привязан к карточкам, под которыми клиент его нажал."""
 
-    Класть корень цепочки в `callback_data` было бы удобнее и хуже: кнопка
-    живёт в чате неделями, а паспорт за это время сменится, и клиент оплатил бы
-    подписку на тот запрос, который видел когда-то, а не на свой нынешний.
-    """
+    root: int
+
+
+class RequestsCallback(CallbackData, prefix="req"):
+    action: str
+    root: int = 0
 
 
 def markup(reply: Reply) -> InlineKeyboardMarkup | None:
@@ -55,7 +61,11 @@ def markup(reply: Reply) -> InlineKeyboardMarkup | None:
         return _rows(
             InlineKeyboardButton(
                 text=option.label,
-                callback_data=AnswerCallback(code=reply.question.code, value=option.value).pack(),
+                callback_data=AnswerCallback(
+                    code=reply.question.code,
+                    value=option.value,
+                    root=reply.passport_root or 0,
+                ).pack(),
             )
             for option in reply.question.buttons
         )
@@ -63,7 +73,9 @@ def markup(reply: Reply) -> InlineKeyboardMarkup | None:
         buttons = [
             InlineKeyboardButton(
                 text=option.label,
-                callback_data=FeedbackCallback(kind=option.value).pack(),
+                callback_data=FeedbackCallback(
+                    kind=option.value, root=reply.passport_root or 0
+                ).pack(),
             )
             for option in reply.feedback
         ]
@@ -75,12 +87,88 @@ def markup(reply: Reply) -> InlineKeyboardMarkup | None:
             rows.append(
                 [
                     InlineKeyboardButton(
-                        text=SUBSCRIBE_LABEL, callback_data=SubscribeCallback().pack()
+                        text=SUBSCRIBE_LABEL,
+                        callback_data=SubscribeCallback(root=reply.passport_root or 0).pack(),
                     )
                 ]
             )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="📂 Мои запросы", callback_data=RequestsCallback(action="list").pack()
+                )
+            ]
+        )
         return InlineKeyboardMarkup(inline_keyboard=rows)
     return None
+
+
+def requests_markup(items: list[QueryOverview]) -> InlineKeyboardMarkup:
+    icons = {"active": "🟢", "paused": "⏸", "expired": "⌛", "off": "▫️"}
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=_request_label(item, icons),
+                callback_data=RequestsCallback(action="open", root=item.root).pack(),
+            )
+        ]
+        for item in items
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _request_label(item: QueryOverview, icons: dict[str, str]) -> str:
+    selected = "✓ " if item.is_active else ""
+    return f"{selected}{icons[item.monitoring]} {title(item.passport)}"
+
+
+def request_actions(item: QueryOverview) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                text="🔎 Искать снова",
+                callback_data=RequestsCallback(action="search", root=item.root).pack(),
+            ),
+            InlineKeyboardButton(
+                text="✏️ Изменить",
+                callback_data=RequestsCallback(action="edit", root=item.root).pack(),
+            ),
+        ]
+    ]
+    if item.monitoring == "active":
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="⏸ Выключить мониторинг",
+                    callback_data=RequestsCallback(action="pause", root=item.root).pack(),
+                )
+            ]
+        )
+    elif item.monitoring == "paused":
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="▶️ Включить мониторинг",
+                    callback_data=RequestsCallback(action="resume", root=item.root).pack(),
+                )
+            ]
+        )
+    elif item.monitoring in {"off", "expired"}:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=SUBSCRIBE_LABEL, callback_data=SubscribeCallback(root=item.root).pack()
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="← Все запросы", callback_data=RequestsCallback(action="list").pack()
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _rows(buttons: Iterable[InlineKeyboardButton]) -> InlineKeyboardMarkup:

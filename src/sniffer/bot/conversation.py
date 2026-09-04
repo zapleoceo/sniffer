@@ -38,6 +38,7 @@ from sniffer.domain.dialogue import (
     apply_answer,
     apply_feedback,
     blocking_question,
+    corrects,
     feedback_buttons,
     feedback_question,
     parse_option,
@@ -49,8 +50,10 @@ from sniffer.domain.passport import Category, Passport
 from sniffer.search.answers import interpret, is_skip
 from sniffer.search.currency import usd_vnd_rate
 from sniffer.search.intake import QueryIntake
+from sniffer.search.intake_rules import parse_query
 from sniffer.search.live import run_plan
 from sniffer.search.planner import SearchPlanner
+from sniffer.search.refinements import merge_edit, price_refinement
 from sniffer.search.relevance import rank_items, with_vnd_budget
 from sniffer.search.vocabulary import city_name, is_served, served_cities
 from sniffer.sources.base import RawItem, registered_sources
@@ -85,6 +88,7 @@ class Reply:
     # Предложить слежение за новыми объявлениями. Признак, а не готовая кнопка:
     # домен решает «уместно ли», разметку рисует `keyboards`.
     offer_subscription: bool = False
+    passport_root: int | None = None
 
 
 class Parser(Protocol):
@@ -109,6 +113,7 @@ class Found:
     fallback: bool = False
     sources: tuple[str, ...] = ()
     stages: dict[str, int] = field(default_factory=dict)
+    status: str | None = None
 
 
 class Recorder(Protocol):
@@ -145,6 +150,7 @@ Send = Callable[[Reply], Awaitable[None]]
 # берёт на себя открытие и закрытие записи. Три точки входа — одна обёртка.
 Body = Callable[["Client", str, Send], Awaitable[None]]
 Finder = Callable[[Passport], Awaitable["Found"]]
+ScopedFinder = Callable[[Dialogue], Awaitable["Found"]]
 Intake = Callable[[], Parser]
 
 
@@ -245,11 +251,13 @@ class Conversation:
         *,
         intake: Intake = QueryIntake,
         finder: Finder = find_live,
+        scoped_finder: ScopedFinder | None = None,
         recorder: Recorder | None = None,
     ) -> None:
         self._store = store
         self._intake = intake
         self._finder = finder
+        self._scoped_finder = scoped_finder
         # По умолчанию — настоящий журнал: разговор создаётся хендлером без
         # аргументов, и всё, что не подставлено здесь, на боевом пути не
         # появится никогда.
@@ -295,6 +303,29 @@ class Conversation:
     async def _turn(self, client: Client, message: str, send: Send) -> None:
         dialogue = await self._store.load(client)
         current = dialogue.passport
+        if current is not None and (not dialogue.state.pending or dialogue.editing):
+            refined = price_refinement(current.passport, message)
+            if refined is not None:
+                dialogue = await self._store.revise(
+                    dialogue,
+                    refined,
+                    kind=EVENT_MANUAL_EDIT,
+                    payload={"field": "budget.max", "text": message},
+                )
+                await self._ask_or_search(dialogue, send)
+                return
+        if dialogue.editing and current is not None:
+            passport = await self._intake().parse(message)
+            passport = merge_edit(current.passport, passport)
+            _lap("intake_ms")
+            dialogue = await self._store.revise(
+                dialogue,
+                passport,
+                kind=EVENT_MANUAL_EDIT,
+                payload={"field": "query", "value": message},
+            )
+            await self._ask_or_search(dialogue, send)
+            return
         if dialogue.state.pending and current is not None:
             answered = await self._answer_in_words(dialogue, dialogue.state.pending, message, send)
             if answered:
@@ -308,7 +339,46 @@ class Conversation:
             # со счётчиком вопросов: лимит обходился бы копипастом.
             await self._restated(dialogue, send)
             return
+        if current is not None and corrects(message):
+            # Поправка — уточнение ТОЙ ЖЕ просьбы: новая версия в той же
+            # цепочке, а не новый запрос. Живой след 03.09.2026: «найди мне
+            # моцокил 200 кубиков» → бот прочёл 200 000 VND бюджетом → «не
+            # 200000 VND, а обьем … до 200 кубических сантиметров» → цепочка
+            # начиналась заново, категория из первого сообщения исчезала, и бот
+            # спрашивал «Что ищем?» у человека, который только что объяснил,
+            # что именно поняли не так.
+            #
+            # `restates` этого не спасал и не мог: поправка приносит
+            # содержательные слова («кубических», «сантиметров»), то есть по
+            # словам она новый запрос. Отличает её противопоставление «не X, а
+            # Y», и решает это `corrects`; слияние фактов делает `merge_edit` —
+            # тот же, что у ответа словами, чтобы знание было одно.
+            dialogue = await self._store.revise(
+                dialogue,
+                merge_edit(current.passport, passport),
+                kind=EVENT_USER_MESSAGE,
+                payload={"correction": message},
+            )
+            await self._ask_or_search(dialogue, send)
+            return
         dialogue = await self._store.start(dialogue, passport)
+        await self._ask_or_search(dialogue, send)
+
+    async def repeat(self, client: Client, root: int, send: Send) -> None:
+        """Повторить выбранный запрос без нового разбора и новой версии."""
+        await self._journalled(
+            client,
+            f"повтор запроса {root}",
+            send,
+            lambda _client, _query, recorded: self._repeat(client, root, recorded),
+        )
+
+    async def _repeat(self, client: Client, root: int, send: Send) -> None:
+        dialogue = await self._store.load(client)
+        dialogue = await self._store.select(dialogue, root)
+        if dialogue.passport is None or dialogue.passport.root != root:
+            await send(Reply(NO_REQUEST_YET))
+            return
         await self._ask_or_search(dialogue, send)
 
     async def on_answer(self, client: Client, code: str, value: str, send: Send) -> None:
@@ -338,11 +408,15 @@ class Conversation:
             return
 
         if value == SKIP:
+            if not question.skippable:
+                await self._ask(dialogue, question, send)
+                return
             dialogue = await self._skip(dialogue, question.field)
         else:
-            passport = apply_answer(
-                current.passport, question.field, parse_option(question.field, value)
-            )
+            base = current.passport
+            if question.field == "category":
+                base = merge_edit(base, parse_query(value))
+            passport = apply_answer(base, question.field, parse_option(question.field, value))
             dialogue = await self._store.revise(
                 dialogue,
                 passport,
@@ -379,7 +453,7 @@ class Conversation:
         dialogue = await self._store.revise(
             dialogue, passport, kind=EVENT_FEEDBACK, payload={"feedback": kind.value}
         )
-        await self._search(dialogue, send)
+        await self._ask_or_search(dialogue, send)
 
     async def _answer_in_words(
         self, dialogue: Dialogue, pending: str, text: str, send: Send
@@ -394,7 +468,11 @@ class Conversation:
         # сама кнопка ставит `worn`. Слово и кнопка обязаны означать одно.
         value = interpret(pending, text)
         if value is not None:
-            passport = apply_answer(current.passport, pending, value)
+            fresh = parse_query(text)
+            if fresh.category not in (None, current.passport.category) and pending != "category":
+                return False
+            passport = merge_edit(current.passport, fresh)
+            passport = apply_answer(passport, pending, value)
             dialogue = await self._store.revise(
                 dialogue,
                 passport,
@@ -402,6 +480,10 @@ class Conversation:
                 payload={"field": pending, "text": text},
             )
         elif is_skip(text):
+            question = question_for(pending)
+            if question is not None and not question.skippable:
+                await self._ask(dialogue, question, send)
+                return True
             dialogue = await self._skip(dialogue, pending)
         else:
             return False
@@ -434,6 +516,10 @@ class Conversation:
         if dialogue.passport is None:  # pragma: no cover — сюда приходят с паспортом
             return
         passport = dialogue.passport.passport
+        category_question = blocking_question(passport, dialogue.state.asked)
+        if category_question is not None and category_question.field == "category":
+            await self._ask(dialogue, category_question, send)
+            return
         if not is_served(passport.city):
             # Искать в городе, под который не собран ни реестр чатов, ни
             # параметры досок, нечем. Сказать это прямо — единственный честный
@@ -460,7 +546,13 @@ class Conversation:
         await self._store.note(
             dialogue, kind=EVENT_QUESTION_ASKED, payload={"field": question.field}
         )
-        await send(Reply(question.text, question=question))
+        await send(
+            Reply(
+                question.text,
+                question=question,
+                passport_root=dialogue.passport.root if dialogue.passport else None,
+            )
+        )
 
     async def _search(self, dialogue: Dialogue, send: Send) -> None:
         if dialogue.passport is None:  # pragma: no cover — сюда приходят с паспортом
@@ -470,7 +562,11 @@ class Conversation:
 
         turn = _current_turn.get()
         try:
-            found = await self._finder(passport)
+            found = (
+                await self._scoped_finder(dialogue)
+                if self._scoped_finder is not None
+                else await self._finder(passport)
+            )
         except Exception as exc:
             # Граница запроса: неожиданная ошибка внутри поиска не должна
             # оставлять клиента без ответа. Трейсбек уходит в лог целиком.
@@ -485,15 +581,24 @@ class Conversation:
         if not found.items:
             # Пустая выдача — самый честный повод предложить слежение: искать
             # больше негде, а новое появится.
-            await send(Reply(EMPTY_WITH_OFFER, offer_subscription=True))
+            await send(
+                Reply(
+                    f"{found.status}\n\n{OFFER}" if found.status else EMPTY_WITH_OFFER,
+                    offer_subscription=True,
+                    passport_root=dialogue.passport.root,
+                )
+            )
             return
         shown = min(len(found.items), get_settings().max_cards)
         header = _result_header(passport, len(found.items), shown)
+        if found.status:
+            header = f"{found.status}\n\n{header}"
         await send(
             Reply(
                 f"{header}\n\n{render_cards(found.items)}",
                 feedback=feedback_buttons(passport),
                 offer_subscription=True,
+                passport_root=dialogue.passport.root,
             )
         )
 
@@ -562,15 +667,35 @@ def _accepted(passport: Passport) -> str:
     """Показываем, что поняли, — это дешевле лишнего уточняющего вопроса."""
     parts: list[str] = []
     if passport.category:
-        parts.append(passport.category.value)
+        category = (
+            "скутер"
+            if passport.attributes.get("body_type") == "tay_ga"
+            else {
+                Category.MOTORBIKE: "мотобайк",
+                Category.APARTMENT: "квартира",
+                Category.ROOM: "комната",
+                Category.HOUSE: "дом",
+                Category.BICYCLE: "велосипед",
+                Category.CAR: "автомобиль",
+            }.get(passport.category, passport.category.value)
+        )
+        parts.append(category)
+    for key in ("brand", "model"):
+        if passport.attributes.get(key):
+            parts.append(str(passport.attributes[key]))
     city = city_name(passport.city, "ru")
     if city:
         parts.append(city)
     if passport.budget.max:
         currency = passport.budget.currency.value if passport.budget.currency else ""
-        parts.append(f"до {passport.budget.max:g} {currency}".strip())
+        amount = f"{passport.budget.max:,.2f}".rstrip("0").rstrip(".").replace(",", " ")
+        parts.append(f"до {amount} {currency}".strip())
     transmission = passport.attributes.get("transmission")
     if transmission:
-        parts.append(str(transmission))
+        parts.append(
+            {"automatic": "автомат", "manual": "механика", "semi": "полуавтомат"}.get(
+                str(transmission), str(transmission)
+            )
+        )
     understood = ", ".join(parts) if parts else "запрос как есть"
     return f"Понял: {understood}. Ищу, это занимает до минуты."

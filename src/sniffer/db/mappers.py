@@ -109,6 +109,8 @@ def to_user(row: models.User) -> User:
         username=row.username,
         lang=row.lang,
         is_blocked=row.is_blocked,
+        active_passport_root=row.active_passport_root,
+        editing_passport_root=row.editing_passport_root,
         created_at=row.created_at,
     )
 
