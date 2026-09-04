@@ -60,7 +60,12 @@ class QueryIntake:
 
     async def parse(self, text: str) -> Passport:
         settings = get_settings()
-        rules = parse_query(text)
+        # Город по умолчанию подставляется, а не спрашивается: клиент рынка
+        # Нячанга по умолчанию в Нячанге, и вопрос «в каком городе?» на «нужен
+        # байк» — та самая лишняя ступень допроса, на которую жаловался владелец
+        # (журнал 04.09.2026). Дананг он назовёт словом, необслуживаемый ловит
+        # `is_served`. Search-first: до выдачи спрашиваем только предмет.
+        rules = parse_query(text, default_city=settings.default_city)
 
         if self._broker is None and not settings.broker_project_key.strip():
             # Ключа нет — идти некуда. Молча ждать таймаут на каждом сообщении

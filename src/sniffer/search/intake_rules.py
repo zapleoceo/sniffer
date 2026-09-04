@@ -71,7 +71,7 @@ _CATEGORY_RULES: tuple[tuple[Category, re.Pattern[str]], ...] = (
     (
         Category.MOTORBIKE,
         re.compile(
-            r"\b(?:скутер\w*|байк\w*|мотобайк\w*|мотоцикл\w*|мопед\w*"
+            r"\b(?:скутер\w*|байк\w*|мотобайк\w*|мотоцикл\w*|мопед\w*|мотак\w*"
             # Опечатки в САМОМ слове категории — из журнала бота (03.09.2026):
             # «найди мне моцокил 200 кубиков», «нужен потоцикл 250 кубиков
             # минимум». Не узнав их, бот терял категорию целиком и спрашивал
@@ -234,6 +234,11 @@ _HOUSING_CATEGORIES = (Category.APARTMENT, Category.ROOM, Category.HOUSE)
 
 MAX_QUERY_CHARS = 500
 _SCOOTER_RE = re.compile(r"\b(?:скутер\w*|scooters?|xe\s+(?:tay\s+)?ga)\b", re.IGNORECASE)
+# «не скутер» — отрицание проверяется ПЕРЕД тем, как слово «скутер» выставит
+# кузов. Живой отказ 04.09.2026: «хочу именно мотоцикл, не скутер» → бот ставил
+# body_type=скутер и transmission=automatic (слово «скутер» в тексте есть, а «не»
+# никто не смотрел) и показывал ровно скутеры — обратное просьбе.
+_NOT_SCOOTER_RE = re.compile(r"\bне\s+(?:скутер\w*|scooters?|xe\s+(?:tay\s+)?ga)\b", re.IGNORECASE)
 
 
 def parse_query(text: str, *, default_city: str = "") -> Passport:
@@ -292,7 +297,12 @@ def parse_query(text: str, *, default_city: str = "") -> Passport:
     transmission = detect_transmission(query, category)
     if transmission:
         attributes["transmission"] = transmission
-    if category is Category.MOTORBIKE and _SCOOTER_RE.search(query):
+    if category is Category.MOTORBIKE and _NOT_SCOOTER_RE.search(query):
+        # «Мотоцикл, НЕ скутер» — клиент хочет механику, а не вариатор. Механика
+        # отсекает автоматы, то есть скутеры (полуавтомат-underbone — серая зона,
+        # но «мотоцикл» в разговоре это con tay). Кузов-скутер не ставим.
+        attributes.setdefault("transmission", "manual")
+    elif category is Category.MOTORBIKE and _SCOOTER_RE.search(query):
         # «Скутер» уже называет и кузов, и способ переключения. Спрашивать
         # после этого «автомат или механика?» — заставлять клиента повторяться.
         attributes["body_type"] = BODY_SCOOTER

@@ -349,8 +349,16 @@ async def test_repeat_searches_the_selected_request_without_a_new_version() -> N
     assert len(store.rows) == 2
 
 
-async def test_a_scooter_request_asks_city_and_budget_before_search() -> None:
-    """Живая жалоба: скутер уже автомат, но город и бюджет ещё неизвестны."""
+async def test_a_scooter_request_searches_immediately_without_asking_city_or_budget() -> None:
+    """search-first (владелец, 04.09.2026): «нужен скутер» уже называет
+    категорию (и вместе с ней автомат) — этого достаточно, чтобы искать. Раньше
+    здесь стояла обратная жалоба-заголовок («скутер уже автомат, но город и
+    бюджет ещё неизвестны» — бот всё равно их спрашивал): это и была живая
+    жалоба владельца («Я в Нечанге, нужен мотак» — бот всё равно спросил
+    бюджет), из-за которой воронку откатили. Город берёт `default_city` в бою,
+    здесь (`RulesIntake`, без него) остаётся тем, что было в тексте — ничем;
+    бюджет уточняет обратная связь «дорого» под уже показанными карточками.
+    """
 
     async def found_one(_passport: Passport) -> Found:
         return Found(items=[found("1")])
@@ -360,21 +368,16 @@ async def test_a_scooter_request_asks_city_and_budget_before_search() -> None:
 
     replies = Replies()
     await talker.on_text(CLIENT, "нужен скутер", replies)
-    assert replies.sent[-1].question is not None
-    assert replies.sent[-1].question.field == "city"
 
-    await talker.on_answer(CLIENT, "city", "nha_trang", replies)
-    assert replies.sent[-1].question is not None
-    assert replies.sent[-1].question.field == "budget.max"
-
-    await talker.on_answer(CLIENT, "budget", "500 USD", replies)
-    assert "Понял: скутер, Нячанг, до 500 USD" in replies.texts[-2]
+    assert "Понял: скутер, автомат. Ищу" in replies.texts[0]
     assert "открыть оригинал" in replies.texts[-1]
-    asked = {reply.question.field for reply in replies.sent if reply.question is not None}
-    assert asked == {"city", "budget.max"}
+    assert [reply.question for reply in replies.sent] == [None, None], "ни одного вопроса до выдачи"
     current = await store.load(CLIENT)
     assert current.passport is not None
     assert current.passport.passport.attributes["transmission"] == "automatic"
+    assert current.passport.passport.city is None, (
+        "RulesIntake без default_city — город не подставлен здесь"
+    )
 
 
 async def test_cards_carry_the_feedback_buttons() -> None:
@@ -445,7 +448,12 @@ async def test_empty_message_is_ignored() -> None:
 # ── уточняющие вопросы ──────────────────────────────────────────────────────
 
 
-async def test_a_known_category_does_not_search_without_budget() -> None:
+async def test_a_known_category_searches_immediately_even_without_a_budget() -> None:
+    """search-first: бюджет больше не блокирует выдачу — только категория.
+
+    Раньше этот тест проверял обратное («известная категория ещё не ищет без
+    бюджета») — ровно это поведение и было жалобой владельца 04.09.2026.
+    """
     searched: list[Passport] = []
 
     async def find(passport: Passport) -> Found:
@@ -457,9 +465,9 @@ async def test_a_known_category_does_not_search_without_budget() -> None:
         CLIENT, "ищу скутер", replies
     )
 
-    assert replies.sent[0].question is not None
-    assert replies.sent[0].question.field == "budget.max"
-    assert searched == []
+    assert replies.sent[0].question is None
+    assert len(searched) == 1
+    assert searched[0].budget.max is None
 
 
 async def test_only_optional_questions_offer_a_way_out() -> None:
@@ -597,10 +605,16 @@ async def test_repeating_the_same_words_keeps_what_was_collected() -> None:
     Собранное обратной связью (бюджет и атрибуты) и счётчик вопросов повтор
     фразы обнулять не вправе: начни здесь новая цепочка — лимит уточнений
     обходился бы копипастом собственного сообщения.
+
+    search-first (04.09.2026): бюджет и атрибуты теперь собираются ТОЛЬКО
+    обратной связью «не то» под уже показанными карточками — блокирующих
+    вопросов до выдачи, кроме категории, больше нет, поэтому каждый шаг
+    уточнения предваряет `on_feedback(WRONG)`.
     """
     store = MemoryStore()
     talker = talk(store, bike(budget=Budget()))
     await talker.on_text(CLIENT, "ищу скутер в нячанге", Replies())
+    await talker.on_feedback(CLIENT, Feedback.WRONG, Replies())
     await talker.on_answer(CLIENT, "budget", "500", Replies())
     await talker.on_feedback(CLIENT, Feedback.WRONG, Replies())
     await talker.on_answer(CLIENT, "trans", "automatic", Replies())
@@ -631,10 +645,14 @@ async def test_a_shorter_wording_of_the_same_request_is_not_a_new_one() -> None:
 
     Собранный обратной связью бюджет сохраняется, а висящий вопрос уточнения
     (коробка) просто переспрашивается: короткая формулировка — не новый запрос.
+
+    search-first: бюджет собирается обратной связью «не то», а не вопросом до
+    выдачи — отсюда `on_feedback(WRONG)` перед первым ответом про бюджет.
     """
     store = MemoryStore()
     talker = talk(store, bike(budget=Budget()))
     await talker.on_text(CLIENT, "ищу скутер в нячанге", Replies())
+    await talker.on_feedback(CLIENT, Feedback.WRONG, Replies())
     await talker.on_answer(CLIENT, "budget", "500", Replies())
     await talker.on_feedback(CLIENT, Feedback.WRONG, Replies())
 
@@ -692,6 +710,13 @@ async def test_a_city_outside_the_dictionary_is_not_a_repeat_either() -> None:
     «Куангнгай» не знает ни один наш словарь, город подставляется прежним, и
     решает только половина со словами. Раньше она отвечала «повтор» ровно на
     пороге; теперь порога нет — есть слово, которого в прежней фразе не было.
+
+    search-first: города search-first не спрашивает вовсе (раньше здесь стоял
+    вопрос про город — именно ОН и был знаком того, что это новая цепочка).
+    Отличие от повтора проверяется тем же способом, что раньше решала половина
+    со словами, — новой цепочкой версий, а не правкой старой; город при этом
+    остаётся тем, что смог распознать словарь, то есть никаким (RulesIntake
+    без default_city), а категория уже известна — значит, сразу выдача.
     """
     store = MemoryStore()
     talker = Conversation(store, intake=RulesIntake, finder=nothing, recorder=FakeJournal())
@@ -704,8 +729,11 @@ async def test_a_city_outside_the_dictionary_is_not_a_repeat_either() -> None:
     assert current.passport is not None
     assert current.passport.passport.raw_query == "ищу скутер в куангнгае", "новая цепочка"
     assert current.passport.version == 1, "новая просьба — новая цепочка версий, а не правка старой"
-    assert replies.sent[0].question is not None
-    assert replies.sent[0].question.field == "city"
+    assert current.passport.passport.city is None, "«куангнгае» не в словаре — город не распознан"
+    assert [reply.question for reply in replies.sent] == [
+        None,
+        None,
+    ], "категория уже известна — сразу выдача, вопроса про город больше нет"
 
 
 async def test_a_repeat_while_a_question_hangs_asks_it_again() -> None:
@@ -791,6 +819,7 @@ async def test_stale_button_does_not_answer_twice() -> None:
     store = MemoryStore()
     talker = talk(store, bike(budget=Budget()))
     await talker.on_text(CLIENT, "ищу скутер", Replies())
+    await talker.on_feedback(CLIENT, Feedback.WRONG, Replies())
     await talker.on_answer(CLIENT, "budget", "500", Replies())
 
     replies = Replies()

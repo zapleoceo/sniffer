@@ -152,8 +152,16 @@ def test_an_unserved_city_gets_an_answer_and_not_a_search(runs: dict[str, Metric
 
 
 def test_feedback_starts_only_after_the_search_funnel(runs: dict[str, Metrics]) -> None:
+    """Обратная связь звучит только после выдачи — до неё блокирует одна категория.
+
+    `wrong_after_results` раньше называл город и бюджет кнопкой ПОСЛЕ фразы без
+    них, и кнопка бюджета была тем самым единственным вопросом до выдачи (потолок
+    1). Блокирующего вопроса о бюджете больше нет (search-first, 04.09.2026):
+    сценарий называет бюджет и коробку в самом тексте, и до выдачи не спрашивает
+    вообще ничего — 0, а не 1.
+    """
     assert runs["pricey_after_results"].questions_before_results == 0
-    assert runs["wrong_after_results"].questions_before_results == 1
+    assert runs["wrong_after_results"].questions_before_results == 0
     assert runs["pricey_after_results"].reached_results
     assert runs["wrong_after_results"].reached_results
 

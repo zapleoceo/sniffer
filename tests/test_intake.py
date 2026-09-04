@@ -599,3 +599,31 @@ def test_the_rental_term_becomes_the_price_period() -> None:
         parse_query("снять квартиру на длительный срок", default_city=CITY).budget.period
         is PricePeriod.MONTH
     )
+
+
+def test_slang_motak_is_a_motorbike() -> None:
+    """«мотак» — разговорное «мотоцикл/байк», из живого журнала 04.09.2026.
+
+    На «нужен мотак» правила не знали слова и теряли категорию, спрашивая «что
+    ищем?» у человека, который её назвал. В проде ловил LLM, но правила —
+    фолбэк, и на них бот тоже обязан понимать сленг рынка.
+    """
+    assert parse_query("нужен мотак", default_city=CITY).category is Category.MOTORBIKE
+    assert parse_query("Я в Нечанге, нужен мотак", default_city=CITY).category is Category.MOTORBIKE
+
+
+def test_not_a_scooter_is_not_parsed_as_a_scooter() -> None:
+    """«не скутер» — отрицание, а не заказ скутера. Живой отказ 04.09.2026.
+
+    «хочу именно мотоцикл, не скутер» → бот ставил body_type=скутер и
+    transmission=automatic (слово «скутер» в тексте есть, «не» никто не смотрел)
+    и показывал ровно скутеры — обратное просьбе. Теперь наоборот: механика
+    отсекает автоматы, то есть скутеры; кузов-скутер не ставится.
+    """
+    p = parse_query("хочу именно мотоцикл, не скутер", default_city=CITY)
+    assert p.attributes.get("body_type") != "tay_ga"
+    assert p.attributes.get("transmission") == "manual"
+    # Контроль: без отрицания «скутер» по-прежнему ставит кузов и автомат.
+    s = parse_query("нужен скутер", default_city=CITY)
+    assert s.attributes.get("body_type") == "tay_ga"
+    assert s.attributes.get("transmission") == "automatic"
