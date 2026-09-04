@@ -191,6 +191,23 @@ def test_city_from_text_wins_over_default() -> None:
     assert passport.intent is Intent.RENT_OUT
 
 
+def test_one_phrase_yields_both_city_and_budget() -> None:
+    """«Дананг до 500» одной фразой — это и город, и бюджет сразу.
+
+    Раньше эту склейку двух фактов проверял `test_city_reply_with_budget_
+    finishes_scooter_funnel` в связке с висящим вопросом про город. Search-first
+    (04.09.2026) вопрос убрал, тест воронки отключён — но САМ разбор двух полей из
+    одной фразы никуда не делся и остаётся под охраной здесь. Категории тут нет:
+    названы только город и цена, и до выдачи такой черновик всё равно спросил бы
+    предмет.
+    """
+    passport = parse_query("Дананг до 500", default_city=CITY)
+
+    assert passport.city == "da_nang"
+    assert passport.budget.max == 500
+    assert passport.category is None
+
+
 @pytest.mark.parametrize(
     ("text", "city"),
     [
