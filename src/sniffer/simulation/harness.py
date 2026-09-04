@@ -217,6 +217,10 @@ def _fields(passport: Passport | None) -> dict[str, object]:
             values[f"budget.{name}"] = float(amount)
     if passport.budget.currency is not None:
         values["budget.currency"] = str(passport.budget.currency)
+    # Период цены несёт срок аренды: «посуточно» → day, «длительный срок» → month
+    # (passport.md, «Прокат — аренда»). Всегда задан (по умолчанию month), поэтому
+    # ассертить его стоит там, где он ОТЛИЧАЕТСЯ от умолчания.
+    values["budget.period"] = str(passport.budget.period)
     for key, value in passport.attributes.items():
         values[f"attributes.{key}"] = value
     return values
