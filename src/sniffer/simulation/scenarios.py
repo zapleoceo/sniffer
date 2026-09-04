@@ -380,7 +380,8 @@ SCENARIOS: tuple[Scenario, ...] = (
     Scenario(
         key="studio_no_bare_bike",
         title="сниму студию у моря (в чате байк одной моделью)",
-        steps=(Says("сниму студию у моря"),),
+        steps=(Says("сниму студию у моря"), Taps("nha_trang"), Taps("500 USD")),
+        max_questions_before_results=2,
         # realcheck 03.09.2026: в выдаче студий всплывал байк, названный ТОЛЬКО
         # моделью («Honda Lead 110 2008», в каталоге — «Yamaha R15 2019»): слова
         # категории в нём нет, а модель раньше категорию не выводила, и отсев
@@ -407,7 +408,8 @@ SCENARIOS: tuple[Scenario, ...] = (
     Scenario(
         key="rent_bike_month",
         title="арендовать байк на месяц (прокат, не покупка)",
-        steps=(Says("арендовать байк на месяц"),),
+        steps=(Says("арендовать байк на месяц"), Taps("nha_trang"), Taps("500 USD")),
+        max_questions_before_results=2,
         # «арендовать» — аренда, а не покупка: клиент хочет ВЗЯТЬ байк. Раньше
         # универсальный агент читал это как buy, и отсев проката выбрасывал ровно
         # те лоты, что нужны (passport.md, «Прокат — аренда»). Теперь intent=rent,
@@ -416,8 +418,18 @@ SCENARIOS: tuple[Scenario, ...] = (
     ),
     Scenario(
         key="rent_scooter_daily",
-        title="прокат скутера посуточно",
-        steps=(Says("прокат скутера посуточно"),),
+        title="прокат мопеда посуточно",
+        # «мопед», не «скутер»: слово «скутер» разбор читает как automatic +
+        # tay_ga (см. `scooter_automatic_500`), а оба прокатных лота каталога
+        # (rental-bikes-shop, rental-scooters-daily) заведомо не называют
+        # коробку в тексте — правды о ней у них нет. Структурный отбор доски
+        # (`market._source_accepts`) требует точного совпадения коробки, когда
+        # она названа паспортом, и честно отсеивал бы оба лота с пустой правдой
+        # — не по бюджету и не по числу вопросов, а по коробке, которую клиент
+        # тут вообще не называл. «Мопед» даёт ту же категорию, намерение и
+        # период, не сужая по коробке.
+        steps=(Says("прокат мопеда посуточно"), Taps("nha_trang"), Taps(SKIP)),
+        max_questions_before_results=2,
         # «прокат» → rent, «посуточно» → период day (срок аренды — это период
         # цены, отдельного поля нет: passport.md, «Прокат — аренда»).
         expect={"category": "motorbike", "intent": "rent", "budget.period": "day"},
@@ -425,7 +437,8 @@ SCENARIOS: tuple[Scenario, ...] = (
     Scenario(
         key="buy_scooter_control",
         title="куплю скутер (контроль: прокат отсекается)",
-        steps=(Says("куплю скутер недорого"),),
+        steps=(Says("куплю скутер недорого"), Taps("nha_trang"), Taps("500 USD")),
+        max_questions_before_results=2,
         # Зеркало аренды: тот же прокат на рынке, но клиент ПОКУПАЕТ, и оффер
         # аренды ему «мимо» (`relevance._is_rental_offer`, spec-v2 2.7). Прокатных
         # лотов в выдаче быть НЕ должно — проверяет `test_buy_hides_rental`.
@@ -434,7 +447,8 @@ SCENARIOS: tuple[Scenario, ...] = (
     Scenario(
         key="moto_cbr",
         title="honda cbr (мотоцикл, не скутер)",
-        steps=(Says("honda cbr"),),
+        steps=(Says("honda cbr"), Taps("nha_trang"), Taps(SKIP)),
+        max_questions_before_results=2,
         # Бот был скутеро-заточенным: на «honda cbr» возвращал чужой скутер. Теперь
         # cbr — модель семейства côn tay: марка honda, коробка manual выводятся из
         # неё, категория — тоже. Скутер (чужая модель) в выдаче не появляется —
@@ -449,7 +463,8 @@ SCENARIOS: tuple[Scenario, ...] = (
     Scenario(
         key="moto_z300",
         title="kawasaki z300 (номер в имени — не бюджет)",
-        steps=(Says("kawasaki z300"),),
+        steps=(Says("kawasaki z300"), Taps("nha_trang"), Taps(SKIP)),
+        max_questions_before_results=2,
         # Живой отказ 02.09.2026: «Kawasaki z300» давал бюджет «до 300 USD», и
         # клиент, искавший 300-кубовый мотоцикл, получал 50cc. Теперь z300 — модель
         # (kawasaki, механика), а число в имени бюджетом не читается.
@@ -464,7 +479,8 @@ SCENARIOS: tuple[Scenario, ...] = (
     Scenario(
         key="moto_mt",
         title="yamaha mt (короткое имя семейства по марке)",
-        steps=(Says("yamaha mt"),),
+        steps=(Says("yamaha mt"), Taps("nha_trang"), Taps(SKIP)),
+        max_questions_before_results=2,
         # «mt» двухбуквенное и в чужом слове ловилось бы ложно, поэтому узнаётся
         # только с якорем — по марке («yamaha mt») или по цифре («mt15»). Марка
         # yamaha и коробка manual следуют из модели.
@@ -478,7 +494,8 @@ SCENARIOS: tuple[Scenario, ...] = (
     Scenario(
         key="sell_honda_lead",
         title="продаю honda lead (намерение продать)",
-        steps=(Says("продаю honda lead"),),
+        steps=(Says("продаю honda lead"), Taps("nha_trang"), Taps("500 USD")),
+        max_questions_before_results=2,
         # Продажа: клиент отдаёт свой байк. Разбор обязан не падать и осмысленно
         # ответить; ТОЧНАЯ политика продажи владельцем ещё не решена (показывать ли
         # похожие лоты, оценку, спрос), поэтому `expect_results=None` — сценарий
@@ -495,7 +512,8 @@ SCENARIOS: tuple[Scenario, ...] = (
     Scenario(
         key="rent_two_bedrooms_furnished",
         title="квартиру 2 спальни с мебелью (2 — не бюджет)",
-        steps=(Says("квартиру 2 спальни с мебелью"),),
+        steps=(Says("квартиру 2 спальни с мебелью"), Taps("nha_trang"), Taps(SKIP)),
+        max_questions_before_results=2,
         # Универсализация вскрыла «счётное число — не бюджет»: «2 спальни» давало
         # «до 2 USD». Теперь «2» перед счётной единицей — количество, не сумма
         # (passport.md). rooms=2 жёсткое (студия отсекается), furnished мягкое
@@ -511,7 +529,8 @@ SCENARIOS: tuple[Scenario, ...] = (
     Scenario(
         key="rent_room_cheap_plain",
         title="комнату недорого (без глагола сделки)",
-        steps=(Says("комнату недорого"),),
+        steps=(Says("комнату недорого"), Taps("nha_trang"), Taps("500 USD")),
+        max_questions_before_results=2,
         # «комнату» без «сниму»: намерение из глагола не следует, но жильё в Нячанге
         # снимают — категория ROOM даёт intent=rent (`_RENTED_CATEGORIES`).
         expect={"category": "room", "intent": "rent"},
@@ -519,7 +538,8 @@ SCENARIOS: tuple[Scenario, ...] = (
     Scenario(
         key="rent_house_long_term",
         title="дом на длительный срок",
-        steps=(Says("дом на длительный срок"),),
+        steps=(Says("дом на длительный срок"), Taps("nha_trang"), Taps(SKIP)),
+        max_questions_before_results=2,
         # «дом» → HOUSE, «длительный срок» → период month. Дом снимают так же, как
         # квартиру: intent=rent из категории.
         expect={"category": "house", "intent": "rent"},
@@ -527,7 +547,8 @@ SCENARIOS: tuple[Scenario, ...] = (
     Scenario(
         key="housing_any_15m",
         title="жильё до 15 млн (самый общий вид жилья)",
-        steps=(Says("жильё до 15 млн"),),
+        steps=(Says("жильё до 15 млн"), Taps("nha_trang")),
+        max_questions_before_results=1,
         # «жильё» раньше не имело категории, и бот спрашивал «что ищем?» при
         # названном предмете. Теперь «жильё» → APARTMENT (самый общий вид), а «до 15
         # млн» — бюджет в донгах (passport.md, «Прокат — аренда»).
