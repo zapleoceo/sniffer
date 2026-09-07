@@ -380,6 +380,38 @@ async def test_a_scooter_request_searches_immediately_without_asking_city_or_bud
     )
 
 
+@pytest.mark.parametrize(
+    ("passport", "expected_action"),
+    [
+        (bike(intent=Intent.BUY, raw_query="куплю Honda Lead"), "Ищу подходящие предложения"),
+        (
+            bike(
+                intent=Intent.RENT,
+                category=Category.APARTMENT,
+                raw_query="сниму квартиру в Нячанге",
+            ),
+            "Ищу варианты аренды",
+        ),
+        (bike(intent=Intent.SELL, raw_query="продам Honda Lead"), "Ищу покупателей"),
+        (
+            bike(
+                intent=Intent.RENT_OUT,
+                category=Category.APARTMENT,
+                raw_query="сдам квартиру в Нячанге",
+            ),
+            "Ищу арендаторов",
+        ),
+    ],
+)
+async def test_confirmation_names_the_search_goal(passport: Passport, expected_action: str) -> None:
+    replies = Replies()
+
+    await talk(MemoryStore(), passport, items=[]).on_text(CLIENT, passport.raw_query, replies)
+
+    assert expected_action in replies.texts[0]
+    assert "Ищу, это занимает" not in replies.texts[0]
+
+
 async def test_cards_carry_the_feedback_buttons() -> None:
     """Показанная выдача уточняет запрос лучше вопроса — если есть чем ответить."""
     replies = Replies()
