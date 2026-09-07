@@ -20,6 +20,7 @@ from sniffer.agent_app.contracts import CollectionScope
 from sniffer.agent_app.extraction import Original, extract, observation
 from sniffer.broker.client import BrokerCapError, BrokerResult
 from sniffer.config import Settings
+from sniffer.db.repositories.collection_sources import CollectionSourceRepository
 from sniffer.db.repositories.collection_tasks import CollectionLease, LeaseLost
 
 NOW = datetime.now(UTC)
@@ -85,6 +86,159 @@ def storage(monkeypatch: pytest.MonkeyPatch) -> Storage:
     monkeypatch.setattr(collector, "CollectionTaskRepository", lambda _: repo)
     monkeypatch.setattr(collector_gateway, "CollectionTaskRepository", lambda _: repo)
     return repo, sessions, active
+
+
+async def test_chotot_receives_only_structured_server_owned_criteria(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = SimpleNamespace(degraded=False, search=AsyncMock(return_value=[]), aclose=AsyncMock())
+    monkeypatch.setattr(collector_gateway, "ChototSource", lambda: adapter)
+    scope = CollectionScope.model_validate(
+        {
+            "city": "nha_trang",
+            "category": "motorbike",
+            "deal_type": "sell",
+            "sources": ["chotot"],
+            "criteria": {
+                "key": "a" * 64,
+                "brand": "honda",
+                "model": "lead",
+                "transmission": "automatic",
+                "budget_min": 2_000_000,
+                "budget_max": 10_000_000,
+                "budget_currency": "VND",
+            },
+        }
+    )
+    assert await collector_gateway.fetch_source("chotot", scope, 6) == []
+    query, params = adapter.search.await_args.args
+    assert query == "honda lead"
+    assert params["attributes"] == {
+        "brand": "honda",
+        "model": "lead",
+        "transmission": "automatic",
+    }
+    assert params["budget"] == {"min": 2_000_000, "max": 10_000_000, "currency": "VND"}
+
+
+async def test_usd_budget_is_converted_before_chotot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = SimpleNamespace(degraded=False, search=AsyncMock(return_value=[]), aclose=AsyncMock())
+    monkeypatch.setattr(collector_gateway, "ChototSource", lambda: adapter)
+    monkeypatch.setattr(collector_gateway, "usd_vnd_rate", AsyncMock(return_value=25_000.0))
+    scope = CollectionScope.model_validate(
+        {
+            "city": "da_nang",
+            "category": "motorbike",
+            "deal_type": "sell",
+            "sources": ["chotot"],
+            "criteria": {
+                "key": "b" * 64,
+                "budget_min": 100,
+                "budget_max": 500,
+                "budget_currency": "USD",
+            },
+        }
+    )
+    await collector_gateway.fetch_source("chotot", scope, 6)
+    assert adapter.search.await_args.args[1]["budget"] == {
+        "min": 2_500_000,
+        "max": 12_500_000,
+        "currency": "VND",
+    }
+
+
+async def test_stale_scope_cannot_call_chotot_for_unsupported_market(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = AsyncMock()
+    monkeypatch.setattr(collector_gateway, "ChototSource", adapter)
+    scope = CollectionScope.model_validate(
+        {
+            "city": "nha_trang",
+            "category": "apartment",
+            "deal_type": "rent_out",
+            "sources": ["chotot"],
+        }
+    )
+    with pytest.raises(ValueError, match="source_not_supported"):
+        await collector_gateway.fetch_source("chotot", scope, 6)
+    adapter.assert_not_called()
+
+
+async def test_archive_query_is_narrowed_before_bounded_originals_are_read() -> None:
+    result = SimpleNamespace(mappings=lambda: [])
+    session = SimpleNamespace(execute=AsyncMock(return_value=result))
+    scope = CollectionScope.model_validate(
+        {
+            "city": "nha_trang",
+            "category": "apartment",
+            "deal_type": "rent_out",
+            "sources": ["archive"],
+            "criteria": {
+                "key": "c" * 64,
+                "rooms": 1,
+                "furnished": True,
+                "districts": ["loc_tho"],
+                "must_have": ["sea view"],
+                "deal_breakers": ["broker"],
+                "budget_max": 10_000_000,
+                "budget_currency": "VND",
+            },
+        }
+    )
+    assert (
+        await CollectionSourceRepository(cast(AsyncSession, session)).archive(
+            scope.model_dump(mode="json"), limit=6
+        )
+        == []
+    )
+    statement, params = session.execute.await_args.args
+    sql = str(statement)
+    assert "JOIN listings" in sql and "l.category=:category" in sql
+    assert "l.attributes @>" in sql and "l.district = ANY" in sql
+    assert "r.text ILIKE :must_0" in sql and "r.text NOT ILIKE :break_0" in sql
+    assert params["budget_max"] == 10_000_000
+
+
+async def test_archive_receives_usd_budget_as_live_vnd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class Repo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def archive(self, scope: dict[str, object], *, limit: int) -> list[object]:
+            captured.update(scope)
+            return []
+
+    @asynccontextmanager
+    async def sessions() -> AsyncIterator[AsyncSession]:
+        yield cast(AsyncSession, SimpleNamespace())
+
+    monkeypatch.setattr(collector_gateway, "session_scope", sessions)
+    monkeypatch.setattr(collector_gateway, "CollectionSourceRepository", Repo)
+    monkeypatch.setattr(collector_gateway, "usd_vnd_rate", AsyncMock(return_value=25_000.0))
+    scope = CollectionScope.model_validate(
+        {
+            "city": "nha_trang",
+            "category": "room",
+            "deal_type": "rent_out",
+            "sources": ["archive"],
+            "criteria": {
+                "key": "d" * 64,
+                "budget_min": 100,
+                "budget_max": 500,
+                "budget_currency": "USD",
+            },
+        }
+    )
+    assert await collector_gateway.fetch_source("archive", scope, 6) == []
+    assert captured["criteria"]["budget_min"] == 2_500_000  # type: ignore[index]
+    assert captured["criteria"]["budget_currency"] == "VND"  # type: ignore[index]
 
 
 async def test_empty_queue_never_calls_model(storage: Storage) -> None:

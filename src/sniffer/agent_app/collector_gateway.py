@@ -16,6 +16,7 @@ from sniffer.db.engine import session_scope
 from sniffer.db.repositories.catalog_observations import CatalogObservationRepository
 from sniffer.db.repositories.collection_sources import CollectionSourceRepository
 from sniffer.db.repositories.collection_tasks import CollectionLease, CollectionTaskRepository
+from sniffer.search.currency import usd_vnd_rate
 from sniffer.sources.chotot import ChototSource
 
 Sessions = Callable[[], AbstractAsyncContextManager[AsyncSession]]
@@ -24,8 +25,25 @@ Fetch = Callable[[str, CollectionScope, int], Awaitable[list[Original]]]
 
 async def fetch_source(source: str, scope: CollectionScope, limit: int) -> list[Original]:
     if source == "archive":
+        archive_scope = scope
+        if scope.criteria.budget_currency == "USD":
+            budget = await _budget_vnd(scope)
+            assert budget is not None
+            archive_scope = scope.model_copy(
+                update={
+                    "criteria": scope.criteria.model_copy(
+                        update={
+                            "budget_min": budget["min"],
+                            "budget_max": budget["max"],
+                            "budget_currency": "VND",
+                        }
+                    )
+                }
+            )
         async with session_scope() as session:
-            rows = await CollectionSourceRepository(session).archive(scope.city, limit=limit)
+            rows = await CollectionSourceRepository(session).archive(
+                archive_scope.model_dump(mode="json"), limit=limit
+            )
         return [
             Original(
                 "archive",
@@ -40,10 +58,35 @@ async def fetch_source(source: str, scope: CollectionScope, limit: int) -> list[
         ]
     if source != "chotot":
         raise ValueError("source_not_allowed")
+    if scope.category != "motorbike" or scope.deal_type != "sell":
+        raise ValueError("source_not_supported_for_scope")
     adapter = ChototSource()
     try:
+        criteria = scope.criteria
+        query = " ".join(value for value in (criteria.brand, criteria.model) if value)
+        attributes = {
+            key: value
+            for key, value in {
+                "brand": criteria.brand,
+                "model": criteria.model,
+                "transmission": criteria.transmission,
+                "engine_cc": criteria.engine_cc,
+                "engine_cc_dir": criteria.engine_cc_dir,
+                "rooms": criteria.rooms,
+                "furnished": criteria.furnished,
+            }.items()
+            if value is not None
+        }
+        budget = await _budget_vnd(scope)
         rows_live = await adapter.search(
-            "", {"city": scope.city, "category": scope.category, "limit": limit}
+            query,
+            {
+                "city": scope.city,
+                "category": scope.category,
+                "attributes": attributes,
+                "budget": budget,
+                "limit": limit,
+            },
         )
         if adapter.degraded:
             raise RuntimeError("source_unavailable")
@@ -64,6 +107,28 @@ async def fetch_source(source: str, scope: CollectionScope, limit: int) -> list[
         ]
     finally:
         await adapter.aclose()
+
+
+async def _budget_vnd(scope: CollectionScope) -> dict[str, int | str] | None:
+    criteria = scope.criteria
+    if criteria.budget_min is None and criteria.budget_max is None:
+        return None
+    if criteria.budget_currency == "VND":
+        return {
+            "min": criteria.budget_min or 0,
+            "max": criteria.budget_max or 10**15,
+            "currency": "VND",
+        }
+    if criteria.budget_currency == "USD":
+        rate = await usd_vnd_rate()
+        if rate is None:
+            raise RuntimeError("currency_rate_unavailable")
+        return {
+            "min": int((criteria.budget_min or 0) * rate),
+            "max": int((criteria.budget_max or 10**15) * rate),
+            "currency": "VND",
+        }
+    raise ValueError("budget_currency_not_supported_by_source")
 
 
 def _raw_text(title: str, text: str, raw: dict[str, Any]) -> str:

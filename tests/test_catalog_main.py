@@ -10,7 +10,7 @@ import pytest
 
 from sniffer.agent_app import main, main_gateway
 from sniffer.agent_app.contracts import MainIdentity
-from sniffer.agent_app.main_gateway import MainGateway
+from sniffer.agent_app.main_gateway import MainGateway, collection_scope
 from sniffer.broker.client import BrokerResult
 from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
 from sniffer.domain.records import StoredPassport
@@ -64,6 +64,60 @@ async def test_server_supplies_only_owned_current_request_filters(repos: dict[st
         await gateway.call("execute_sql", {})
 
 
+def test_exact_request_criteria_get_distinct_collection_coverage() -> None:
+    broad = Passport(city="nha_trang", category=Category.MOTORBIKE, intent=Intent.BUY)
+    exact = broad.model_copy(
+        deep=True,
+        update={
+            "attributes": {
+                "brand": "honda",
+                "model": "lead",
+                "transmission": "automatic",
+                "engine_cc": 125,
+                "engine_cc_dir": "max",
+            },
+            "budget": Budget(max=500, currency=Currency.USD),
+        },
+    )
+    first, second = collection_scope(broad), collection_scope(exact)
+    assert first.criteria.key != second.criteria.key
+    assert second.criteria.brand == "honda" and second.criteria.model == "lead"
+    assert second.criteria.engine_cc == 125 and second.criteria.budget_max == 500
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("transmission", "semi"),
+        ("brand", "honda"),
+        ("model", "lead"),
+        ("engine_cc", 125),
+    ],
+)
+def test_each_motorbike_axis_changes_collection_identity(field: str, value: object) -> None:
+    broad = Passport(city="nha_trang", category=Category.MOTORBIKE, intent=Intent.BUY)
+    narrowed = broad.model_copy(update={"attributes": {field: value}})
+    scope = collection_scope(narrowed)
+    assert scope.criteria.key != collection_scope(broad).criteria.key
+    assert getattr(scope.criteria, field) == value
+
+
+@pytest.mark.parametrize(
+    ("category", "intent", "sources"),
+    [
+        (Category.MOTORBIKE, Intent.BUY, ("chotot", "archive")),
+        (Category.MOTORBIKE, Intent.SELL, ("archive",)),
+        (Category.APARTMENT, Intent.RENT, ("archive",)),
+        (Category.ROOM, Intent.RENT, ("archive",)),
+    ],
+)
+def test_only_source_verified_for_category_is_assigned(
+    category: Category, intent: Intent, sources: tuple[str, ...]
+) -> None:
+    passport = Passport(city="da_nang", category=category, intent=intent)
+    assert collection_scope(passport).sources == sources
+
+
 async def test_foreign_or_stale_request_does_not_read_catalogue(repos: dict[str, Any]) -> None:
     repos["owned"].owned.side_effect = PermissionError("stale")
     gateway = MainGateway(MainIdentity(8, 9, 1), repos["sessions"])
@@ -80,6 +134,26 @@ async def test_missing_coverage_queues_sanitized_shared_scope(repos: dict[str, A
     assert args.kwargs["user_id"] == 7 and args.kwargs["request_version"] == 2
     assert "raw_query" not in args.args[0] and "user_id" not in args.args[0]
     repos["session"].commit.assert_awaited_once()
+
+
+async def test_unsupported_budget_currency_fails_closed_without_collection(
+    repos: dict[str, Any],
+) -> None:
+    stored = repos["stored"]
+    repos["owned"].owned.return_value = StoredPassport(
+        id=stored.id,
+        user_id=stored.user_id,
+        version=stored.version,
+        root_id=stored.root_id,
+        passport=stored.passport.model_copy(
+            update={"budget": Budget(max=400, currency=Currency.EUR)}
+        ),
+    )
+    gateway = MainGateway(MainIdentity(7, 9, 2), repos["sessions"])
+    assert await gateway.call("catalog_search", {}) == {"count": 0, "items": []}
+    assert "VND" in (await gateway.queue_if_needed() or "")
+    repos["catalog"].search.assert_not_awaited()
+    repos["tasks"].enqueue.assert_not_awaited()
 
 
 async def test_pending_job_is_not_duplicated_at_next_hour(repos: dict[str, Any]) -> None:
