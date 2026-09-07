@@ -66,6 +66,16 @@ def test_budget_beats_recency_in_card_order() -> None:
     assert [candidate.external_id for candidate in ordered] == ["older but suitable"]
 
 
+def test_budget_floor_excludes_known_cheaper_listing() -> None:
+    wanted = passport(budget=Budget(min=300, max=500, currency=Currency.USD))
+    too_cheap = item("too cheap", price=5_000_000)
+    suitable = item("suitable", price=10_000_000)
+
+    ordered = rank_items(wanted, [too_cheap, suitable], usd_vnd=RATE, now=NOW)
+
+    assert [candidate.external_id for candidate in ordered] == ["suitable"]
+
+
 def test_known_automatic_text_beats_unconfirmed_variant() -> None:
     confirmed = item("automatic", price=12_000_000, text="Xe tay ga Honda", age_hours=12)
     unknown = item("unknown", price=12_000_000, text="Honda 125", age_hours=1)

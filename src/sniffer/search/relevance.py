@@ -131,7 +131,11 @@ def _contradicts(item: RawItem, passport: Passport, usd_vnd: float | None) -> bo
     if _wrong_rooms(text, passport.attributes.get("rooms")):
         return True
     ceiling = _budget_ceiling_vnd(passport.budget, usd_vnd)
-    return ceiling is not None and item.price_vnd is not None and item.price_vnd > ceiling
+    floor = _budget_floor_vnd(passport.budget, usd_vnd)
+    return item.price_vnd is not None and (
+        (ceiling is not None and item.price_vnd > ceiling)
+        or (floor is not None and item.price_vnd < floor)
+    )
 
 
 def _contrary_attribute(passport: Passport, field: str, text: str) -> bool:
@@ -449,6 +453,16 @@ def _budget_ceiling_vnd(budget: Budget, usd_vnd: float | None) -> float | None:
         return budget.max
     if budget.currency is Currency.USD and usd_vnd is not None:
         return budget.max * usd_vnd
+    return None
+
+
+def _budget_floor_vnd(budget: Budget, usd_vnd: float | None) -> float | None:
+    if budget.min is None:
+        return None
+    if budget.currency is Currency.VND:
+        return budget.min
+    if budget.currency is Currency.USD and usd_vnd is not None:
+        return budget.min * usd_vnd
     return None
 
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import UTC, datetime
 from typing import Any
 
@@ -13,7 +15,69 @@ from sniffer.db.engine import session_scope
 from sniffer.db.repositories.agent_requests import AgentRequestRepository
 from sniffer.db.repositories.catalog_observations import CatalogObservationRepository
 from sniffer.db.repositories.collection_tasks import CollectionTaskRepository
-from sniffer.domain.passport import Currency, counterpart_deal_type
+from sniffer.domain.passport import Currency, Passport, counterpart_deal_type
+
+UNSUPPORTED_BUDGET = (
+    "Каталог пока умеет строго проверять бюджет только в VND и USD. "
+    "Укажите бюджет в одной из этих валют."
+)
+
+
+def _unsupported_budget(passport: Passport) -> bool:
+    return passport.budget.currency in {Currency.EUR, Currency.RUB}
+
+
+def collection_scope(passport: Passport) -> CollectionScope:
+    """Build a stable, non-free-form collection identity from the owned passport."""
+    attrs = passport.attributes
+    canonical = {
+        "city": passport.city,
+        "category": passport.category,
+        "deal_type": counterpart_deal_type(passport.intent),
+        "districts": sorted(passport.districts),
+        "budget": passport.budget.model_dump(mode="json"),
+        "attributes": attrs,
+        "must_have": sorted(passport.must_have),
+        "deal_breakers": sorted(passport.deal_breakers),
+    }
+    key = hashlib.sha256(
+        json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    category = passport.category.value if passport.category is not None else None
+    # Chotot has a verified category code only for motorbikes. Other categories
+    # use the city-bound original-message archive instead of a mixed public feed.
+    deal_type = counterpart_deal_type(passport.intent)
+    sources = (
+        ("chotot", "archive")
+        if category == "motorbike"
+        and deal_type == "sell"
+        and passport.budget.currency in (None, Currency.VND, Currency.USD)
+        else ("archive",)
+    )
+    return CollectionScope.model_validate(
+        {
+            "city": passport.city,
+            "category": category,
+            "deal_type": deal_type,
+            "sources": sources,
+            "criteria": {
+                "key": key,
+                "brand": attrs.get("brand"),
+                "model": attrs.get("model"),
+                "transmission": attrs.get("transmission"),
+                "engine_cc": attrs.get("engine_cc"),
+                "engine_cc_dir": attrs.get("engine_cc_dir"),
+                "rooms": attrs.get("rooms"),
+                "furnished": attrs.get("furnished"),
+                "districts": sorted(passport.districts),
+                "must_have": sorted(passport.must_have),
+                "deal_breakers": sorted(passport.deal_breakers),
+                "budget_min": int(passport.budget.min) if passport.budget.min is not None else None,
+                "budget_max": int(passport.budget.max) if passport.budget.max is not None else None,
+                "budget_currency": passport.budget.currency,
+            },
+        }
+    )
 
 
 class MainGateway:
@@ -36,13 +100,12 @@ class MainGateway:
                 self.identity.user_id, self.identity.request_id, self.identity.version
             )
             p = request.passport
-            scope = CollectionScope.model_validate(
-                {
-                    "city": p.city,
-                    "category": p.category,
-                    "deal_type": counterpart_deal_type(p.intent),
-                }
-            )
+            scope = collection_scope(p)
+            if _unsupported_budget(p):
+                self.rows = []
+                if name == "catalog_coverage":
+                    return {"sources": {source: "unsupported" for source in scope.sources}}
+                return {"count": 0, "items": []}
             repo = CatalogObservationRepository(session)
             if name == "catalog_coverage":
                 return await repo.coverage(scope.model_dump(mode="json"))
@@ -81,13 +144,9 @@ class MainGateway:
                 self.identity.user_id, self.identity.request_id, self.identity.version
             )
             p = request.passport
-            scope = CollectionScope.model_validate(
-                {
-                    "city": p.city,
-                    "category": p.category,
-                    "deal_type": counterpart_deal_type(p.intent),
-                }
-            ).model_dump(mode="json")
+            if _unsupported_budget(p):
+                return UNSUPPORTED_BUDGET
+            scope = collection_scope(p).model_dump(mode="json")
             coverage = await CatalogObservationRepository(session).coverage(scope)
             if all(state == "fresh" for state in coverage["sources"].values()):
                 return None
