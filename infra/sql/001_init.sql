@@ -178,6 +178,8 @@ CREATE INDEX IF NOT EXISTS raw_messages_posted_idx   ON raw_messages (posted_at)
 CREATE TABLE IF NOT EXISTS listings (
     id              BIGSERIAL PRIMARY KEY,
     raw_message_id  BIGINT      REFERENCES raw_messages(id) ON DELETE CASCADE,
+    -- FK arrives in 005 after catalog_observations exists.
+    catalog_observation_id BIGINT,
     source          TEXT        NOT NULL DEFAULT 'telegram_archive',
     external_id     TEXT,
     seller_id       BIGINT      REFERENCES sellers(id) ON DELETE SET NULL,

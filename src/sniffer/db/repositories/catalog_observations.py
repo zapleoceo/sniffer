@@ -111,7 +111,17 @@ class CatalogObservationRepository(Repository):
             # Late retries cannot resurrect an old price/deletion or overwrite equal-time conflict.
             where=statement.excluded.fetched_at > publications.c.fetched_at,
         ).returning(publications.c.observation_id)
-        return await self._session.scalar(publish_statement) is not None
+        accepted = await self._session.scalar(publish_statement)
+        if accepted is None:
+            return False
+        # Publication and delivery projection share this transaction. A projection
+        # failure therefore cannot leave an answerable card outside monitoring.
+        from sniffer.db.repositories.catalog_listing_projection import (
+            CatalogListingProjectionRepository,
+        )
+
+        await CatalogListingProjectionRepository(self._session).project(observation_id, observation)
+        return True
 
     async def search(
         self,
