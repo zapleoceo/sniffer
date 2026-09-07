@@ -18,10 +18,39 @@ SOURCE_HOSTS = {
 }
 
 
+FACT_FIELDS = (
+    "city",
+    "category",
+    "deal_type",
+    "price_vnd",
+    "price_period",
+    "active",
+    "brand",
+    "model",
+    "transmission",
+    "engine_cc",
+    "rooms",
+    "furnished",
+)
+
+
 class Evidence(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    field: Literal["city", "category", "deal_type", "price_vnd", "price_period", "active"]
+    field: Literal[
+        "city",
+        "category",
+        "deal_type",
+        "price_vnd",
+        "price_period",
+        "active",
+        "brand",
+        "model",
+        "transmission",
+        "engine_cc",
+        "rooms",
+        "furnished",
+    ]
     quote: str = Field(min_length=1, max_length=2000)
 
 
@@ -34,6 +63,12 @@ class CatalogFacts(BaseModel):
     price_vnd: int | None = Field(default=None, ge=0, le=10**15)
     price_period: PricePeriod | None = None
     active: bool | None = None
+    brand: str | None = Field(default=None, min_length=1, max_length=80)
+    model: str | None = Field(default=None, min_length=1, max_length=80)
+    transmission: Literal["automatic", "manual", "semi"] | None = None
+    engine_cc: int | None = Field(default=None, ge=1, le=5000)
+    rooms: int | None = Field(default=None, ge=0, le=20)
+    furnished: bool | None = None
 
 
 class CatalogObservation(BaseModel):
@@ -48,7 +83,7 @@ class CatalogObservation(BaseModel):
     raw_text: str = Field(min_length=1, max_length=30000)
     extractor_version: str = Field(min_length=1, max_length=100)
     facts: CatalogFacts
-    evidence: tuple[Evidence, ...] = Field(max_length=6)
+    evidence: tuple[Evidence, ...] = Field(max_length=12)
 
     @model_validator(mode="after")
     def grounded(self) -> Self:

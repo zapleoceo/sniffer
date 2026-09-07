@@ -26,7 +26,7 @@ class Original:
 class Extracted(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     facts: CatalogFacts
-    evidence: tuple[Evidence, ...] = Field(max_length=6)
+    evidence: tuple[Evidence, ...] = Field(max_length=12)
 
 
 class StructuredBroker(Protocol):
@@ -68,7 +68,9 @@ async def extract(original: Original, broker: StructuredBroker) -> dict[str, Any
             "evidence. Never use search context as facts. Normalize city to nha_trang or "
             "da_nang only if the source states that location. Active=true needs a current "
             "offer, false needs an explicit sold/removed statement. Price must be VND; do "
-            "not convert other currencies or invent prices. Preserve rent period if stated."
+            "not convert other currencies or invent prices. Preserve rent period if stated. "
+            "Extract brand, model, transmission, engine_cc, rooms and furnished only when "
+            "the source explicitly supports them; every known attribute needs evidence."
         ),
         schema_name="catalog_facts",
         schema=Extracted.model_json_schema(),

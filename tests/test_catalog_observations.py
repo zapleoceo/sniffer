@@ -8,8 +8,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sniffer.db import models
+from sniffer.db.repositories.catalog_listing_projection import (
+    CatalogListingProjectionRepository,
+)
 from sniffer.db.repositories.catalog_observations import (
     CatalogObservationRepository,
     CatalogRejected,
@@ -117,6 +122,33 @@ def test_duplicate_and_unsupported_facts_rejected() -> None:
         CatalogFacts.model_validate({"sql": "DROP TABLE listings"})
 
 
+def test_known_attribute_requires_its_own_source_evidence() -> None:
+    record = observation()
+    modified = record.model_copy(
+        update={"facts": record.facts.model_copy(update={"transmission": "automatic"})}
+    )
+    with pytest.raises(ValidationError, match="every_fact_needs_evidence"):
+        CatalogObservation.model_validate_json(modified.model_dump_json())
+
+
+async def test_archive_projection_gets_new_id_and_copies_only_delivery_markers() -> None:
+    session = AsyncMock(spec=AsyncSession)
+    session.scalar.side_effect = [10, 20]
+    session.scalars.return_value = [33]
+    record = observation(
+        source="archive",
+        external_id="-100:42",
+        url="https://t.me/public_group/42",
+    )
+
+    projected = await CatalogListingProjectionRepository(session).project(7, record)
+
+    assert projected == 20
+    assert session.scalar.await_count == 2
+    assert session.execute.await_count == 2
+    assert "UPDATE outbox" in str(session.execute.await_args_list[0].args[0])
+
+
 async def test_lost_lease_has_zero_catalog_writes(monkeypatch: pytest.MonkeyPatch) -> None:
     require = AsyncMock(side_effect=LeaseLost("lease_lost"))
     monkeypatch.setattr(CollectionTaskRepository, "require_lease", require)
@@ -176,11 +208,27 @@ async def test_database_updates_price_without_duplicate_and_late_replay(
     first = await repo.stage(task_id, lease.token, initial)
     assert await repo.stage(task_id, lease.token, initial) == first
     assert await repo.publish(task_id, lease.token, first)
-    changed = observation(price=200, fetched_at=initial.fetched_at + timedelta(seconds=1))
+    changed_base = observation(price=200, fetched_at=initial.fetched_at + timedelta(seconds=1))
+    changed = changed_base.model_copy(
+        update={
+            "facts": changed_base.facts.model_copy(update={"transmission": "automatic"}),
+            "raw_text": changed_base.raw_text + " automatic",
+            "evidence": (
+                *changed_base.evidence,
+                Evidence(field="transmission", quote="automatic"),
+            ),
+        }
+    )
     second = await repo.stage(task_id, lease.token, changed)
     assert second != first
     assert await repo.publish(task_id, lease.token, second)
     assert not await repo.publish(task_id, lease.token, first)
+    projected = await db_session.scalar(select(models.Listing))
+    assert projected is not None
+    assert projected.catalog_observation_id == second
+    assert projected.price_amount == 200
+    assert projected.attributes == {"transmission": "automatic"}
+    assert await db_session.scalar(select(func.count()).select_from(models.Listing)) == 1
     rows = await repo.search(city="nha_trang", category="motorbike")
     assert len(rows) == 1 and rows[0]["observation"]["facts"]["price_vnd"] == 200
     assert await repo.search(city="nha_trang", category="motorbike", max_price_vnd=150) == []

@@ -61,6 +61,9 @@ class Listing(BigIdMixin, Base):
     raw_message_id: Mapped[int | None] = mapped_column(
         ForeignKey("raw_messages.id", ondelete="CASCADE")
     )
+    catalog_observation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("catalog_observations.id", ondelete="SET NULL"), unique=True
+    )
     source: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=sa_text("'telegram_archive'")
     )
