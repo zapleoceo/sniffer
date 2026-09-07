@@ -46,7 +46,7 @@ from sniffer.domain.dialogue import (
     question_for,
     restates,
 )
-from sniffer.domain.passport import Category, Passport
+from sniffer.domain.passport import Category, Intent, Passport
 from sniffer.search.answers import interpret, is_skip
 from sniffer.search.currency import usd_vnd_rate
 from sniffer.search.intake import QueryIntake
@@ -698,4 +698,11 @@ def _accepted(passport: Passport) -> str:
             )
         )
     understood = ", ".join(parts) if parts else "запрос как есть"
-    return f"Понял: {understood}. Ищу, это занимает до минуты."
+    action = "Ищу подходящие предложения"
+    if passport.intent is Intent.RENT:
+        action = "Ищу варианты аренды"
+    elif passport.intent is Intent.SELL:
+        action = "Ищу покупателей"
+    elif passport.intent is Intent.RENT_OUT:
+        action = "Ищу арендаторов"
+    return f"Понял: {understood}. {action}, это занимает до минуты."
