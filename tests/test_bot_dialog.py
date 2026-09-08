@@ -412,6 +412,30 @@ async def test_confirmation_names_the_search_goal(passport: Passport, expected_a
     assert "Ищу, это занимает" not in replies.texts[0]
 
 
+@pytest.mark.parametrize(
+    ("attributes", "expected"),
+    [
+        ({"engine_cc": 125, "engine_cc_dir": "max"}, "до 125 cc"),
+        ({"engine_cc": 250, "engine_cc_dir": "min"}, "от 250 cc"),
+        ({"engine_cc": 150, "engine_cc_dir": "exact"}, "150 cc"),
+        ({"rooms": 2, "furnished": True}, "2 комн., с мебелью"),
+        ({"rooms": 1, "furnished": False}, "1 комн., без мебели"),
+    ],
+)
+async def test_confirmation_repeats_named_search_criteria(
+    attributes: dict[str, object], expected: str
+) -> None:
+    replies = Replies()
+    passport = bike(
+        category=Category.APARTMENT if "rooms" in attributes else Category.MOTORBIKE,
+        attributes=attributes,
+    )
+
+    await talk(MemoryStore(), passport, items=[]).on_text(CLIENT, passport.raw_query, replies)
+
+    assert expected in replies.texts[0]
+
+
 async def test_cards_carry_the_feedback_buttons() -> None:
     """Показанная выдача уточняет запрос лучше вопроса — если есть чем ответить."""
     replies = Replies()

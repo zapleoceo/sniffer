@@ -101,6 +101,14 @@ CATALOG_LOTS: tuple[CatalogLot, ...] = (
         deal_type="rent_out",
     ),
     _lot(
+        "nt-apartment-two",
+        "Furnished 2 bedroom apartment for rent",
+        10_000_000,
+        city="nha_trang",
+        category="apartment",
+        deal_type="rent_out",
+    ),
+    _lot(
         "dn-room",
         "Room for rent in Da Nang",
         8_000_000,

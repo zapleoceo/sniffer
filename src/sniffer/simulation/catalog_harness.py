@@ -123,6 +123,11 @@ CATALOG_SCENARIOS: tuple[CatalogScenario, ...] = (
         (Says("Cần mua xe Honda ở Nha Trang dưới 10 triệu"),),
     ),
     CatalogScenario("rent_room", "аренда комнаты", (Says("сниму комнату в Дананге до 500 USD"),)),
+    CatalogScenario(
+        "housing_constraints",
+        "двухкомнатная квартира с мебелью",
+        (Says("сниму 2-комнатную квартиру с мебелью в Нячанге до 10 млн"),),
+    ),
     CatalogScenario("sell_bike", "продажа байка", (Says("продаю Honda Vision в Нячанге"),)),
     CatalogScenario("rent_out", "сдача квартиры", (Says("сдам меблированную квартиру в Нячанге"),)),
     CatalogScenario(
