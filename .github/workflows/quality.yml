@@ -53,6 +53,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Проверить Docker Compose
+        shell: bash
+        run: |
+          cp .env.example .env
+          docker compose --profile agent-catalog config --quiet
+          rm -f .env
+
       - name: Python 3.12
         uses: actions/setup-python@v5
         with:
