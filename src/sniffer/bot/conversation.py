@@ -697,6 +697,19 @@ def _accepted(passport: Passport) -> str:
                 str(transmission), str(transmission)
             )
         )
+    engine_cc = passport.attributes.get("engine_cc")
+    if engine_cc is not None:
+        direction = passport.attributes.get("engine_cc_dir")
+        prefix = {"min": "от ", "max": "до "}.get(str(direction), "")
+        parts.append(f"{prefix}{engine_cc} cc")
+    rooms = passport.attributes.get("rooms")
+    if rooms is not None:
+        parts.append(f"{rooms} комн.")
+    furnished = passport.attributes.get("furnished")
+    if furnished is True:
+        parts.append("с мебелью")
+    elif furnished is False:
+        parts.append("без мебели")
     understood = ", ".join(parts) if parts else "запрос как есть"
     action = "Ищу подходящие предложения"
     if passport.intent is Intent.RENT:
