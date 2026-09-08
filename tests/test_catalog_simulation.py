@@ -78,6 +78,9 @@ async def test_refinement_keeps_root_and_advances_exact_version() -> None:
     assert run.calls[1].scope.criteria.budget_max == 700
     assert run.calls[0].external_ids == ("dn-yamaha-budget", "dn-yamaha-pricey")
     assert run.calls[1].external_ids == ("dn-yamaha-budget",)
+    assert any(
+        turn.actor == "client" and turn.text == "[показать до 700 USD]" for turn in run.transcript
+    )
 
 
 async def test_topic_switch_creates_independent_owned_roots() -> None:

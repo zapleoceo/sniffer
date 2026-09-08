@@ -176,6 +176,26 @@ class Feedback(StrEnum):
     AUTOMATIC = "automatic"
 
 
+_FEEDBACK_LABELS: dict[Feedback, str] = {
+    Feedback.PRICEY: "показать дешевле",
+    Feedback.WRONG: "не то",
+    Feedback.AUTOMATIC: "нужен автомат",
+}
+
+
+def feedback_label(kind: Feedback, passport: Passport | None = None) -> str:
+    """The visible promise behind a compact callback value."""
+    if kind is Feedback.PRICEY and passport is not None:
+        maximum = passport.budget.max
+        if maximum is None or maximum <= 0:
+            return "указать бюджет"
+        reduced = round(maximum * PRICEY_FACTOR)
+        amount = f"{reduced:,.0f}".replace(",", " ")
+        currency = passport.budget.currency or Currency.USD
+        return f"показать до {amount} {currency.value}"
+    return _FEEDBACK_LABELS[kind]
+
+
 @dataclass(frozen=True, slots=True)
 class Option:
     """Кнопка ответа. `value` уезжает в callback_data, поэтому короткий."""
@@ -634,9 +654,12 @@ def _keep_floor(current: Budget, top: float | None, currency: Currency | None) -
 
 def feedback_buttons(passport: Passport) -> tuple[Option, ...]:
     """Кнопки под выдачей. Зависят от паспорта: «нужен автомат» под квартирой — мусор."""
-    buttons = [Option("дорого", Feedback.PRICEY.value), Option("не то", Feedback.WRONG.value)]
+    buttons = [
+        Option(feedback_label(Feedback.PRICEY, passport), Feedback.PRICEY.value),
+        Option(feedback_label(Feedback.WRONG), Feedback.WRONG.value),
+    ]
     if passport.category is Category.MOTORBIKE and not passport.attributes.get("transmission"):
-        buttons.append(Option("нужен автомат", Feedback.AUTOMATIC.value))
+        buttons.append(Option(feedback_label(Feedback.AUTOMATIC), Feedback.AUTOMATIC.value))
     return tuple(buttons)
 
 

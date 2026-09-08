@@ -45,6 +45,7 @@ from sniffer.domain.dialogue import (
     DialogueState,
     Feedback,
     advance,
+    feedback_buttons,
     question_for,
     replay,
 )
@@ -444,6 +445,18 @@ async def test_cards_carry_the_feedback_buttons() -> None:
     kinds = {option.value for option in replies.sent[-1].feedback}
     assert {Feedback.PRICEY.value, Feedback.WRONG.value} <= kinds
     assert replies.sent[-1].passport_root == 1
+
+
+def test_price_feedback_markup_discloses_new_ceiling_and_keeps_callback() -> None:
+    """Visible Telegram promise may change; the stored callback contract may not."""
+    passport = bike(budget=Budget(max=1000, currency=Currency.USD))
+
+    rendered = markup(Reply("cards", feedback=feedback_buttons(passport), passport_root=7))
+
+    assert rendered is not None
+    button = rendered.inline_keyboard[0][0]
+    assert button.text == "показать до 700 USD"
+    assert button.callback_data == FeedbackCallback(kind="pricey", root=7).pack()
 
 
 async def test_nothing_found_is_said_out_loud() -> None:

@@ -213,12 +213,31 @@ def test_feedback_ceiling_does_not_grow_with_each_press(monkeypatch: pytest.Monk
 
 
 def test_automatic_button_is_offered_only_where_it_means_something() -> None:
-    values = {option.value for option in feedback_buttons(bike())}
-    apartment = {option.value for option in feedback_buttons(bike(category=Category.APARTMENT))}
+    buttons = feedback_buttons(bike(budget=Budget(max=500, currency=Currency.USD)))
+    values = {option.value for option in buttons}
+    apartment_buttons = feedback_buttons(bike(category=Category.APARTMENT))
+    apartment = {option.value for option in apartment_buttons}
 
+    assert next(option.label for option in buttons if option.value == Feedback.PRICEY.value) == (
+        "показать до 350 USD"
+    )
     assert Feedback.AUTOMATIC.value in values
     assert Feedback.AUTOMATIC.value not in apartment
     assert {Feedback.PRICEY.value, Feedback.WRONG.value} <= apartment
+    assert apartment_buttons[0].label == "указать бюджет"
+
+
+@pytest.mark.parametrize(
+    ("budget", "label"),
+    [
+        (Budget(max=500), "показать до 350 USD"),
+        (Budget(max=0, currency=Currency.VND), "указать бюджет"),
+    ],
+)
+def test_price_feedback_label_matches_effective_budget(budget: Budget, label: str) -> None:
+    button = feedback_buttons(bike(budget=budget))[0]
+
+    assert button.label == label
 
 
 # ── та же просьба или новая ─────────────────────────────────────────────────
