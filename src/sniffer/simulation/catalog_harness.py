@@ -169,8 +169,9 @@ async def run_catalog_scenario(scenario: CatalogScenario) -> CatalogRun:
     transcript: list[TranscriptTurn] = []
     questions: list[str] = []
     last_question_code: str | None = None
+    visible_feedback: dict[Feedback, str] = {}
     for step in scenario.steps:
-        transcript.append(TranscriptTurn("client", _step_text(step)))
+        transcript.append(TranscriptTurn("client", _step_text(step, visible_feedback)))
 
         async def send(reply: Reply) -> None:
             nonlocal last_question_code
@@ -178,6 +179,9 @@ async def run_catalog_scenario(scenario: CatalogScenario) -> CatalogRun:
             if reply.question is not None:
                 questions.append(reply.question.field)
                 last_question_code = reply.question.code
+            visible_feedback.update(
+                (Feedback(option.value), option.label) for option in reply.feedback
+            )
 
         if isinstance(step, Says):
             await talker.on_text(CLIENT, step.text, send)
@@ -243,9 +247,9 @@ def catalog_faults(run: CatalogRun) -> tuple[str, ...]:
     return tuple(faults)
 
 
-def _step_text(step: Step) -> str:
+def _step_text(step: Step, visible_feedback: dict[Feedback, str]) -> str:
     if isinstance(step, Says):
         return step.text
     if isinstance(step, Reacts):
-        return f"[{step.feedback.value}]"
+        return f"[{visible_feedback.get(step.feedback, step.feedback.value)}]"
     return f"[{step.value}]"

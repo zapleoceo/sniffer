@@ -38,7 +38,7 @@ class AnswerCallback(CallbackData, prefix="ans"):
 
 
 class FeedbackCallback(CallbackData, prefix="fb"):
-    """Обратная связь на выдаче: «дорого», «не то», «нужен автомат»."""
+    """Обратная связь на выдаче: дешевле, «не то», «нужен автомат»."""
 
     kind: str
     root: int
@@ -82,7 +82,7 @@ def markup(reply: Reply) -> InlineKeyboardMarkup | None:
         rows = [buttons[start : start + ROW] for start in range(0, len(buttons), ROW)]
         if reply.offer_subscription:
             # Отдельной строкой и во всю ширину: это не ещё один вариант
-            # обратной связи, а действие с деньгами. Рядом с «дорого» и «не то»
+            # обратной связи, а действие с деньгами. Рядом с «дешевле» и «не то»
             # его нажимают, не глядя.
             rows.append(
                 [
