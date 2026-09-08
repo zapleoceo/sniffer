@@ -211,6 +211,24 @@ else
   info "образ актуален, пропускаю"
 fi
 
+# ── 4.25 Конфигурация публичного каталога ───────────────────────────────────
+# `running` недостаточно: runtime намеренно простаивает без обязательного
+# секрета. При публичном rollout это создало бы очередь, которую некому
+# исполнять. Проверяем ЭФФЕКТИВНОЕ окружение compose в одноразовых контейнерах
+# до рестарта клиентского бота; значения секретов наружу не печатаются.
+log "конфигурация публичного каталога"
+if ! docker compose $COMPOSE_PROFILE_ARGS run --rm --no-deps --entrypoint python bot -c \
+  'from sniffer.config import Settings; s=Settings(); raise SystemExit(0 if s.catalog_mode == "catalog" and s.agent_collector_enabled and bool(s.broker_project_key.strip()) else 1)'
+then
+  die "бот не готов к публичному каталогу: проверить CATALOG_MODE, AGENT_COLLECTOR_ENABLED и BROKER_PROJECT_KEY" 40
+fi
+if ! docker compose $COMPOSE_PROFILE_ARGS run --rm --no-deps --entrypoint python agent-collector -c \
+  'from sniffer.config import Settings; s=Settings(); raise SystemExit(0 if s.agent_collector_enabled and bool(s.broker_project_key.strip()) else 1)'
+then
+  die "agent-collector не готов: проверить AGENT_COLLECTOR_ENABLED и BROKER_PROJECT_KEY" 40
+fi
+info "бот и agent-collector получили обязательные настройки"
+
 # ── 4.5 Миграции схемы ──────────────────────────────────────────────────────
 # infra/sql/001_init.sql идемпотентен (CREATE TABLE IF NOT EXISTS + ALTER … IF
 # NOT EXISTS) и ОБЯЗАН применяться на КАЖДОМ деплое. Само по себе это не

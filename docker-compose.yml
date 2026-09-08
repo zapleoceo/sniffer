@@ -10,10 +10,10 @@ name: sniffer
 # всех и уже в свопе; процесс, потёкший здесь, без потолка утащил бы за собой
 # чужие контейнеры, потому что OOM-killer выбирает жертву по всей машине, а не
 # по проекту. Это ПОТОЛКИ, а не резервирование: в норме весь стек живёт в
-# 400–600 МБ. Если памяти станет совсем мало — резать worker, он самый жирный.
+# 500–800 МБ. Если памяти станет совсем мало — резать worker, он самый жирный.
 
-# Пять процессов отличаются только командой, поэтому образ один и собирается
-# один раз: общий якорь с одним image-тегом вместо пяти сборок.
+# Шесть процессов отличаются только командой, поэтому образ один и собирается
+# один раз: общий якорь с одним image-тегом вместо шести сборок.
 x-app: &app
   build: .
   image: sniffer:local
@@ -68,14 +68,18 @@ services:
     command: python -m sniffer.collector
     mem_limit: ${SNIFFER_MEM_COLLECTOR:-320m}
 
-  # Broker/MCP agent that fills the verified catalog. It is deliberately a
-  # profile: normal deploys keep the legacy stack unchanged until the pilot is
-  # explicitly enabled and the host has enough memory.
+  # Broker/MCP agent that fills the verified catalog. The profile keeps manual
+  # compose commands explicit; the production deploy always includes and
+  # health-checks it.
   agent-collector:
     <<: *app
     profiles: ["agent-catalog"]
     container_name: sniffer-agent-collector
     command: python -m sniffer.agent_app.collector
+    # Public rollout is versioned in Git. A stale server-local .env must not
+    # silently leave the hourly collector idle after a successful deploy.
+    environment:
+      AGENT_COLLECTOR_ENABLED: "true"
     mem_limit: ${SNIFFER_MEM_AGENT_COLLECTOR:-256m}
 
   # Воронка: гейт → prefilter → извлечение → матчинг. Перезапускается без
@@ -90,6 +94,11 @@ services:
     <<: *app
     container_name: sniffer-bot
     command: python -m sniffer.bot
+    # The bot both reads the verified catalogue and creates collection tasks
+    # when coverage is missing, so both switches belong to this process.
+    environment:
+      CATALOG_MODE: catalog
+      AGENT_COLLECTOR_ENABLED: "true"
     mem_limit: ${SNIFFER_MEM_BOT:-256m}
 
   # Отдельно от бота: доставка обязана переживать рестарт диалогового
