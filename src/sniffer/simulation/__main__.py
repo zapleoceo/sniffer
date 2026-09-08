@@ -25,7 +25,31 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="sniffer.simulation", description=__doc__)
     parser.add_argument("--scenario", default="", help="прогнать один сценарий по ключу")
     parser.add_argument("--replies", action="store_true", help="показать переписку целиком")
+    parser.add_argument(
+        "--catalog",
+        action="store_true",
+        help="прогнать детерминированные сценарии через request-scoped каталог",
+    )
     args = parser.parse_args(argv)
+
+    if args.catalog:
+        from sniffer.simulation.catalog_harness import (
+            CATALOG_SCENARIOS,
+            catalog_faults,
+            render_catalog_report,
+            run_catalog_all,
+        )
+
+        chosen_catalog = [
+            item for item in CATALOG_SCENARIOS if not args.scenario or item.key == args.scenario
+        ]
+        if not chosen_catalog:
+            keys = ", ".join(item.key for item in CATALOG_SCENARIOS)
+            print(f"нет catalog-сценария {args.scenario!r}. Есть: {keys}")
+            return 2
+        catalog_runs = asyncio.run(run_catalog_all(chosen_catalog))
+        print(render_catalog_report(catalog_runs, replies=args.replies))
+        return 1 if any(catalog_faults(run) for run in catalog_runs) else 0
 
     chosen = [item for item in SCENARIOS if not args.scenario or item.key == args.scenario]
     if not chosen:
