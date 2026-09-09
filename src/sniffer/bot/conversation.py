@@ -66,9 +66,6 @@ NOTHING_FOUND = (
     "По этому запросу ничего не нашлось. Попробуйте иначе: без марки, "
     "с другим бюджетом или другой формулировкой."
 )
-# Пустая выдача — самый честный повод предложить слежение: искать больше
-# негде, а новое появится.
-EMPTY_WITH_OFFER = NOTHING_FOUND + "\n\n" + OFFER
 SEARCH_FAILED = "Не смог доискать: источники не ответили. Попробуйте ещё раз через пару минут."
 NO_REQUEST_YET = "Сначала напишите, что ищете, — а потом уточним."
 NOTHING_TO_REFINE = "Уточнить больше нечего. Переформулируйте запрос, и поищу заново."
@@ -583,7 +580,9 @@ class Conversation:
             # больше негде, а новое появится.
             await send(
                 Reply(
-                    f"{found.status}\n\n{OFFER}" if found.status else EMPTY_WITH_OFFER,
+                    f"{found.status}\n\n{OFFER}"
+                    if found.status
+                    else f"{_nothing_found(passport)}\n\n{OFFER}",
                     offer_subscription=True,
                     passport_root=dialogue.passport.root,
                 )
@@ -643,10 +642,39 @@ def _result_header(passport: Passport, total: int, shown: int) -> str:
         many = f"{noun} нашлось много" if noun else "нашлось много"
         return (
             f"Запрос широкий — {many} ({total}). Показываю {shown} самых свежих.\n"
+            f"{_narrowing_advice(passport)}"
+        )
+    return f"Нашёл {total}, показываю {shown} самых подходящих:"
+
+
+def _narrowing_advice(passport: Passport) -> str:
+    """Подсказка использует свойства предмета, который действительно ищут."""
+    if passport.category in {Category.APARTMENT, Category.ROOM, Category.HOUSE}:
+        return (
+            "Чтобы сузить, допишите бюджет, район или важные условия — "
+            "например «2 спальни с мебелью до 10 млн»."
+        )
+    if passport.category in {Category.MOTORBIKE, Category.CAR, Category.BICYCLE}:
+        return (
             "Чтобы сузить, допишите бюджет, марку или модель — например «yamaha до 500» "
             "или «honda lead»."
         )
-    return f"Нашёл {total}, показываю {shown} самых подходящих:"
+    return "Чтобы сузить, допишите бюджет, район или обязательные условия."
+
+
+def _nothing_found(passport: Passport) -> str:
+    """Пустая выдача предлагает ослабить только уместные для категории критерии."""
+    if passport.category in {Category.APARTMENT, Category.ROOM, Category.HOUSE}:
+        return (
+            "По этому запросу ничего не нашлось. Попробуйте другой бюджет, район, "
+            "количество комнат или условия."
+        )
+    if passport.category in {Category.MOTORBIKE, Category.CAR, Category.BICYCLE}:
+        return NOTHING_FOUND
+    return (
+        "По этому запросу ничего не нашлось. Попробуйте изменить бюджет, место "
+        "или обязательные условия."
+    )
 
 
 def _lap(stage: str) -> None:

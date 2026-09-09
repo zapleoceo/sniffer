@@ -1456,3 +1456,41 @@ async def test_a_specific_query_is_not_called_broad() -> None:
     cards = replies.texts[1]
     assert "широкий" not in cards.lower()
     assert "6" in cards
+
+
+async def test_a_broad_housing_query_gets_housing_narrowing_advice() -> None:
+    replies = Replies()
+    items = [found(str(i)) for i in range(6)]
+    housing = bike(
+        category=Category.APARTMENT,
+        intent=Intent.RENT,
+        budget=Budget(),
+        attributes={},
+        raw_query="сниму квартиру",
+    )
+
+    await talk(MemoryStore(), housing, items=items).on_text(CLIENT, "сниму квартиру", replies)
+
+    cards = replies.texts[-1].casefold()
+    header = cards.split("\n\n<b>", 1)[0]
+    assert "2 спальни с мебелью" in header
+    assert "honda" not in header
+    assert "марку" not in header
+
+
+async def test_empty_housing_result_never_suggests_removing_a_brand() -> None:
+    replies = Replies()
+    housing = bike(
+        category=Category.APARTMENT,
+        intent=Intent.RENT,
+        attributes={"rooms": 2, "furnished": True},
+        raw_query="сниму квартиру с мебелью",
+    )
+
+    await talk(MemoryStore(), housing, items=[]).on_text(
+        CLIENT, "сниму квартиру с мебелью", replies
+    )
+
+    answer = replies.texts[-1].casefold()
+    assert "количество комнат" in answer
+    assert "марки" not in answer

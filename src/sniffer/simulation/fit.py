@@ -13,7 +13,7 @@
 
 from __future__ import annotations
 
-from sniffer.domain.passport import Budget, Currency, Intent, Passport
+from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
 from sniffer.simulation.catalog import Lot
 
 # Курс зафиксирован намеренно: живой `usd_vnd_rate()` ходит в сеть, а отчёт,
@@ -24,6 +24,8 @@ USD_VND = 25_000.0
 # запросом. «200 кубиков» — это про класс мотоцикла, а не про точное число:
 # 175 и 250 клиент назовёт тем же поиском, 700 — уже нет.
 ENGINE_CC_TOLERANCE = 0.25
+
+_RENTABLE_TRANSPORT = frozenset({Category.MOTORBIKE, Category.CAR, Category.BICYCLE})
 
 
 def off_target(lot: Lot, passport: Passport) -> str:
@@ -38,12 +40,19 @@ def off_target(lot: Lot, passport: Passport) -> str:
     # поэтому проверка только у покупателя.
     if passport.intent is Intent.BUY and lot.rental:
         return "оффер аренды покупателю"
+    if (
+        passport.intent is Intent.RENT
+        and passport.category in _RENTABLE_TRANSPORT
+        and not lot.rental
+    ):
+        return "оффер продажи арендатору"
     attributes = passport.attributes
     checks: tuple[tuple[bool, str], ...] = (
         (_mismatch(attributes.get("brand"), lot.brand), "чужая марка"),
         (_mismatch(attributes.get("model"), lot.model), "чужая модель"),
         (_mismatch(attributes.get("transmission"), lot.transmission), "чужая коробка"),
         (_wrong_rooms(lot, attributes.get("rooms")), "чужие комнаты"),
+        (_wrong_furnished(lot, attributes.get("furnished")), "противоположная мебель"),
         (_over_budget(lot, passport.budget), "дороже бюджета"),
         (_wrong_engine(lot, attributes.get("engine_cc")), "не тот объём"),
     )
@@ -91,3 +100,10 @@ def _wrong_rooms(lot: Lot, wanted: object) -> bool:
     if wanted is None or lot.rooms is None:
         return False
     return int(str(wanted)) != lot.rooms
+
+
+def _wrong_furnished(lot: Lot, wanted: object) -> bool:
+    """Неизвестность допустима, явно противоположное значение — нет."""
+    if not isinstance(wanted, bool) or lot.furnished is None:
+        return False
+    return wanted is not lot.furnished

@@ -305,6 +305,18 @@ def test_a_rental_offer_is_kept_for_a_renter() -> None:
     assert [candidate.external_id for candidate in ordered] == [rental.external_id]
 
 
+def test_a_sale_offer_is_dropped_for_a_transport_renter() -> None:
+    """Арендатору байка не показываем обычные объявления о продаже."""
+    rental = item("Прокат скутеров, 150.000đ/сутки", price=150_000)
+    sale = item("Продам Honda Vision 2019, автомат", price=12_000_000)
+
+    ordered = rank_items(
+        passport(intent=Intent.RENT, attributes={}), [sale, rental], usd_vnd=RATE, now=NOW
+    )
+
+    assert [candidate.external_id for candidate in ordered] == [rental.external_id]
+
+
 def test_a_sale_that_only_mentions_rent_is_not_a_rental() -> None:
     """«продам, не для аренды» — это продажа: слово «аренда» под отрицанием/продажей.
 
@@ -592,6 +604,21 @@ def test_a_listing_silent_on_rooms_survives_a_room_request() -> None:
     silent = _item_flat("silent", "Уютная квартира у моря, балкон, свежий ремонт")
 
     assert rank_items(_flat(2), [silent], usd_vnd=RATE, now=NOW) == [silent]
+
+
+def test_explicitly_unfurnished_listing_is_dropped_for_a_furnished_request() -> None:
+    wanted = passport(
+        intent=Intent.RENT,
+        category=Category.APARTMENT,
+        attributes={"furnished": True},
+    )
+    furnished = _item_flat("furnished", "Квартира с мебелью, длительный срок")
+    unfurnished = _item_flat("unfurnished", "Квартира без мебели, длительный срок")
+    silent = _item_flat("silent", "Квартира у моря, длительный срок")
+
+    ordered = rank_items(wanted, [unfurnished, silent, furnished], usd_vnd=RATE, now=NOW)
+
+    assert {candidate.external_id for candidate in ordered} == {"furnished", "silent"}
 
 
 def test_an_agency_menu_word_does_not_keep_the_wrong_room_count() -> None:
