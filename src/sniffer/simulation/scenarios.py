@@ -156,7 +156,11 @@ SCENARIOS: tuple[Scenario, ...] = (
         key="apartment_furnished",
         title="нужна квартира с мебелью на длительный срок",
         steps=(Says("нужна квартира с мебелью на длительный срок"),),
-        expect={"category": "apartment", "intent": "rent"},
+        expect={
+            "category": "apartment",
+            "intent": "rent",
+            "attributes.furnished": True,
+        },
     ),
     Scenario(
         key="scooter_automatic_500",
@@ -536,8 +540,8 @@ SCENARIOS: tuple[Scenario, ...] = (
         steps=(Says("квартиру 2 спальни с мебелью"),),
         # Универсализация вскрыла «счётное число — не бюджет»: «2 спальни» давало
         # «до 2 USD». Теперь «2» перед счётной единицей — количество, не сумма
-        # (passport.md). rooms=2 жёсткое (студия отсекается), furnished мягкое
-        # (квартира без мебели остаётся).
+        # (passport.md). rooms=2 жёсткое (студия отсекается); по мебели молчание
+        # допустимо, но явно противоположное «без мебели» отсекается.
         expect={
             "category": "apartment",
             "intent": "rent",

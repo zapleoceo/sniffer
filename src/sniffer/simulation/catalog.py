@@ -27,12 +27,13 @@ from sniffer.sources.base import RawItem
 class Lot:
     """Находка плюс правда о ней. Боту достаётся только `item`.
 
-    `rooms` и `rental` — правда жилья и проката, добавленная универсализацией.
+    `rooms`, `furnished` и `rental` — правда жилья и проката, добавленная
+    универсализацией.
     Число комнат жёсткое, как модель и объём (`fit._wrong_rooms`); `rental`
     метит оффер аренды — он «мимо» покупателю (`intent=BUY`), но нужен
     арендатору (`intent=RENT`), ровно как в отсеве перед показом (spec-v2 2.7).
-    Мебель и вид на море правдой рядом НЕ лежат: они мягкие сигналы балла, а не
-    отсева, и мерке судить их нечем — их знание остаётся только в тексте лота.
+    `furnished=None` означает, что объявление про мебель молчит: это мягкая
+    неизвестность. Только явное противоположное значение считается конфликтом.
     """
 
     item: RawItem
@@ -42,6 +43,7 @@ class Lot:
     transmission: str = ""
     engine_cc: int | None = None
     rooms: int | None = None
+    furnished: bool | None = None
     rental: bool = False
 
 
@@ -58,6 +60,7 @@ def _lot(
     transmission: str = "",
     engine_cc: int | None = None,
     rooms: int | None = None,
+    furnished: bool | None = None,
     rental: bool = False,
 ) -> Lot:
     url = (
@@ -83,6 +86,7 @@ def _lot(
         transmission=transmission,
         engine_cc=engine_cc,
         rooms=rooms,
+        furnished=furnished,
         rental=rental,
     )
 
@@ -391,6 +395,7 @@ def build_catalog() -> tuple[Lot, ...]:
             age_days=2,
             source="telegram_groups",
             rooms=1,
+            furnished=True,
         ),
         # Двушка с мебелью В БЮДЖЕТ. Прежняя стоит 14 млн, и запрос «до 10 млн»
         # отсекал её правильно — значит рынку не хватало не фильтра, а лота: без
@@ -403,6 +408,7 @@ def build_catalog() -> tuple[Lot, ...]:
             price_vnd=9_000_000,
             age_days=3,
             source="telegram_groups",
+            furnished=True,
         ),
         # Слово «Квартира» в тексте обязательно, иначе категория лота не читается;
         # «стиральной машины» здесь нет намеренно — «машина» ловится паттерном
@@ -415,6 +421,7 @@ def build_catalog() -> tuple[Lot, ...]:
             age_days=4,
             source="telegram_groups",
             rooms=2,
+            furnished=True,
         ),
         # Студия у моря — честная выдача на «студию у моря»: число комнат совпадает
         # (1), а вид на море мягко поднимает балл, но не отсекает. Доска (chotot),
@@ -427,10 +434,8 @@ def build_catalog() -> tuple[Lot, ...]:
             age_days=4,
             rooms=1,
         ),
-        # Квартира БЕЗ мебели на запрос «с мебелью»: мебель — мягкий сигнал, лот
-        # остаётся и показывается (число комнат совпадает), балл лишь ниже. Ради
-        # этого случая furnished и держат мягким: отсекай по мебели — и половина
-        # объявлений, где её просто не упомянули, исчезла бы из выдачи.
+        # Квартира ЯВНО без мебели противоречит запросу «с мебелью». Это не то же
+        # самое, что объявление, которое мебель не упомянуло вовсе (`None`).
         _lot(
             "apt-two-no-furniture",
             "Квартира 2 спальни без мебели, район Лотте",
@@ -439,6 +444,7 @@ def build_catalog() -> tuple[Lot, ...]:
             age_days=5,
             source="telegram_groups",
             rooms=2,
+            furnished=False,
         ),
         _lot(
             "apt-seaview-lux",

@@ -9,7 +9,12 @@ from math import exp
 from sniffer.domain.fingerprint import normalized
 from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
 from sniffer.search.engine_size import listing_cc_values
-from sniffer.search.intake_rules import category_of, detect_brand, detect_transmission
+from sniffer.search.intake_rules import (
+    category_of,
+    detect_brand,
+    detect_housing_attributes,
+    detect_transmission,
+)
 from sniffer.search.market_terms import RENTAL_PRICE_MARKERS, RENTAL_STEMS
 from sniffer.search.plan import SearchPlan, SearchTask
 from sniffer.search.rooms import room_counts
@@ -26,6 +31,8 @@ PRICE_OVER_BUDGET = 1.30
 # Полоса допуска объёма, когда клиент назвал точку, а не границу: «200 кубиков»
 # — это про класс мотоцикла, 175 и 250 клиент назовёт тем же поиском, 700 — нет.
 ENGINE_BAND = 0.25
+
+_RENTABLE_TRANSPORT = frozenset({Category.MOTORBIKE, Category.CAR, Category.BICYCLE})
 
 # Возраст, после которого лот уходит из живой выдачи. Это не тот порог, что в
 # `verifier/liveness` (14 дней): там решается, когда ПРЕДУПРЕДИТЬ, и карточка
@@ -116,7 +123,17 @@ def _contradicts(item: RawItem, passport: Passport, usd_vnd: float | None) -> bo
         return True
     # Прокат — оффер аренды, чужая сторона сделки: клиент с intent=BUY хочет
     # купить. Отсекаем только у покупателя — клиенту с intent=RENT прокат нужен.
-    if passport.intent is Intent.BUY and _is_rental_offer(item.title, item.text):
+    rental_offer = _is_rental_offer(item.title, item.text)
+    if passport.intent is Intent.BUY and rental_offer:
+        return True
+    # Для аренды транспорта обычное объявление о продаже — противоположная
+    # сторона сделки. У жилья это правило неприменимо: краткие объявления часто
+    # не пишут «сдам», а сторону там задаёт специализированный источник.
+    if (
+        passport.intent is Intent.RENT
+        and passport.category in _RENTABLE_TRANSPORT
+        and not rental_offer
+    ):
         return True
     text = f"{item.title} {item.text}"
     wanted_model = str(passport.attributes.get("model") or "")
@@ -125,6 +142,8 @@ def _contradicts(item: RawItem, passport: Passport, usd_vnd: float | None) -> bo
     if _contrary_attribute(passport, "brand", text):
         return True
     if _contrary_attribute(passport, "transmission", text):
+        return True
+    if _contrary_furnished(passport, text):
         return True
     if _wrong_engine(
         text,
@@ -169,6 +188,15 @@ def _contrary_attribute(passport: Passport, field: str, text: str) -> bool:
     else:
         return False
     return found is not None and str(found) != str(wanted)
+
+
+def _contrary_furnished(passport: Passport, text: str) -> bool:
+    """Явное «без мебели» противоречит «с мебелью»; молчание — нет."""
+    wanted = passport.attributes.get("furnished")
+    if not isinstance(wanted, bool):
+        return False
+    found = detect_housing_attributes(text, passport.category).get("furnished")
+    return isinstance(found, bool) and found is not wanted
 
 
 def _wrong_engine(text: str, wanted: object, direction: object, category: Category | None) -> bool:

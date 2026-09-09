@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
+from dataclasses import replace
 
 import pytest
 
@@ -239,21 +240,24 @@ def test_off_target_measures_the_universal_axes() -> None:
     assert rentals, "в каталоге нет прокатного лота, контроль пуст"
     assert all("оффер аренды" in off_target(lot, buyer) for lot in rentals)
     assert all(off_target(lot, renter) == "" for lot in rentals), "арендатору прокат не «мимо»"
+    sales = [lot for lot in CATALOG if lot.category is Category.MOTORBIKE and not lot.rental]
+    assert sales, "в каталоге нет продажи транспорта, контроль пуст"
+    assert all("продажи арендатору" in off_target(lot, renter) for lot in sales)
 
 
-def test_a_furnished_lot_is_soft_not_off_target() -> None:
-    """Мебель — мягкий сигнал: квартира без мебели на запрос «с мебелью» не «мимо».
-
-    Зеркало к комнатам: rooms жёсткие и отсекают, furnished лишь опускает балл
-    (passport.md, spec-v2 2.7). Мерка обязана эту асимметрию соблюдать, иначе
-    отсекла бы половину объявлений, где мебель просто не упомянута.
-    """
+def test_furniture_oracle_distinguishes_silence_from_an_explicit_conflict() -> None:
+    """Молчание про мебель допустимо, явное «без мебели» — уже противоречие."""
     wants_furnished = Passport(
         category=Category.APARTMENT, attributes={"rooms": 2, "furnished": True}
     )
     two_rooms = [lot for lot in CATALOG if lot.category is Category.APARTMENT and lot.rooms == 2]
     assert two_rooms, "нет двухкомнатной, судить нечего"
-    assert all(off_target(lot, wants_furnished) == "" for lot in two_rooms)
+    unfurnished = [lot for lot in two_rooms if lot.furnished is False]
+
+    assert unfurnished, "нет явно немеблированной квартиры, контроль пуст"
+    assert all("мебель" in off_target(lot, wants_furnished) for lot in unfurnished)
+    silent = replace(unfurnished[0], furnished=None)
+    assert off_target(silent, wants_furnished) == ""
 
 
 def test_the_report_names_every_scenario(runs: dict[str, Metrics]) -> None:
