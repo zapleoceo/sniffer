@@ -119,6 +119,8 @@ class MainGateway:
                 category=scope.category,
                 deal_type=scope.deal_type,
                 max_price_vnd=maximum,
+                brand=scope.criteria.brand,
+                model=scope.criteria.model,
                 limit=20,
             )
             # A compact tool result; full source payload never enters the model context.

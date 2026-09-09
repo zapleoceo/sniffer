@@ -13,7 +13,12 @@ from sniffer.search.intake_rules import category_of, detect_brand, detect_transm
 from sniffer.search.market_terms import RENTAL_PRICE_MARKERS, RENTAL_STEMS
 from sniffer.search.plan import SearchPlan, SearchTask
 from sniffer.search.rooms import room_counts
-from sniffer.search.vocabulary import attribute_phrases, model_engine_cc, models_named_in
+from sniffer.search.vocabulary import (
+    attribute_phrases,
+    model_brand,
+    model_engine_cc,
+    models_named_in,
+)
 from sniffer.sources.base import RawItem
 
 PRICE_OVER_BUDGET = 1.30
@@ -115,7 +120,7 @@ def _contradicts(item: RawItem, passport: Passport, usd_vnd: float | None) -> bo
         return True
     text = f"{item.title} {item.text}"
     wanted_model = str(passport.attributes.get("model") or "")
-    if wanted_model and wanted_model not in models_named_in(passport.category, text):
+    if wanted_model and not _requested_model_in(wanted_model, passport.category, text):
         return True
     if _contrary_attribute(passport, "brand", text):
         return True
@@ -372,8 +377,20 @@ def _other_model(item: RawItem, passport: Passport) -> bool:
     wanted = str(passport.attributes.get("model") or "")
     if not wanted:
         return False
-    named = models_named_in(passport.category, f"{item.title} {item.text}")
+    text = f"{item.title} {item.text}"
+    if _requested_model_in(wanted, passport.category, text):
+        return False
+    named = models_named_in(passport.category, text)
     return bool(named) and wanted not in named
+
+
+def _requested_model_in(model: str, category: Category | None, text: str) -> bool:
+    """Match known slugs and grounded open-ended model names symmetrically."""
+    if model_brand(model) is not None:
+        return model in models_named_in(category, text)
+    wanted = normalized(model.replace("_", " "))
+    haystack = normalized(text)
+    return bool(wanted and re.search(rf"(?<!\w){re.escape(wanted)}(?!\w)", haystack))
 
 
 def _too_old(item: RawItem, now: datetime) -> bool:
@@ -487,7 +504,7 @@ def _mentions(passport: Passport, field: str, value: object, haystack: str) -> b
     добавление модели в паспорт молча роняло бы балл КАЖДОГО лота.
     """
     if field == "model":
-        return str(value) in models_named_in(passport.category, haystack)
+        return _requested_model_in(str(value), passport.category, haystack)
     # Число комнат — тоже не слово-значение, а число: у него нет фраз в
     # `ATTRIBUTE_TERMS`. Ищется тем же знанием, что и в запросе (`rooms`), иначе
     # «rooms» попадала бы в знаменатель доли атрибутов, никогда не попадая в

@@ -121,6 +121,26 @@ async def test_chotot_receives_only_structured_server_owned_criteria(
     assert params["budget"] == {"min": 2_000_000, "max": 10_000_000, "currency": "VND"}
 
 
+async def test_collector_searches_the_complete_normalized_model_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = SimpleNamespace(degraded=False, search=AsyncMock(return_value=[]), aclose=AsyncMock())
+    monkeypatch.setattr(collector_gateway, "ChototSource", lambda: adapter)
+    scope = CollectionScope.model_validate(
+        {
+            "city": "nha_trang",
+            "category": "motorbike",
+            "deal_type": "sell",
+            "sources": ["chotot"],
+            "criteria": {"key": "d" * 64, "brand": "honda", "model": "air_blade"},
+        }
+    )
+
+    await collector_gateway.fetch_source("chotot", scope, 6)
+
+    assert adapter.search.await_args.args[0] == "honda air blade"
+
+
 async def test_usd_budget_is_converted_before_chotot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

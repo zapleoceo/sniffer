@@ -6,7 +6,6 @@ catalogue publication/search, MCP transport and card rendering stay real.
 
 from __future__ import annotations
 
-import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from copy import deepcopy
@@ -147,7 +146,7 @@ def _observation(
 
 
 @pytest.mark.asyncio
-async def test_catalogue_request_reaches_postgres_through_agent_mcp_and_renders_card(
+async def test_exact_catalogue_request_reaches_postgres_without_redundant_llm_and_renders_card(
     db_engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -302,22 +301,8 @@ async def test_catalogue_request_reaches_postgres_through_agent_mcp_and_renders_
     assert dialogue.passport is not None
     assert seeded_identity == (dialogue.user_id, dialogue.passport.root, 1)
     assert dialogue.passport.version == 1 and legacy_calls == 0
-    assert len(broker.calls) == 2 and broker.closed
-    assert all(options["capability"] == "chat:sales" for options in broker.options)
-    tool_messages = [item for item in broker.calls[1] if item["role"] == "tool"]
-    assert {item["tool_call_id"] for item in tool_messages} == {"catalog", "coverage"}
-    tool_payloads = {item["tool_call_id"]: json.loads(item["content"]) for item in tool_messages}
-    assert tool_payloads["catalog"]["count"] == len(observations)
-    assert {item["title"] for item in tool_payloads["catalog"]["items"]} == {
-        observation.title for observation in observations
-    }
-    assert unpublished.title not in {item["title"] for item in tool_payloads["catalog"]["items"]}
-    assert set(tool_payloads["coverage"]["sources"].values()) == {"fresh"}
-    assert [name for name, _, _ in gateway_trace] == [
-        "catalog_search",
-        "catalog_coverage",
-        "catalog_search",
-    ]
+    assert broker.calls == [] and not broker.closed
+    assert [name for name, _, _ in gateway_trace] == ["catalog_search"]
     rendered = replies.sent[-1]
     assert rendered.feedback and rendered.offer_subscription
     assert "<b>Honda Lead 125 automatic</b>" in rendered.text

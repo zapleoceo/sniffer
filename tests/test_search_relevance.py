@@ -66,6 +66,16 @@ def test_budget_beats_recency_in_card_order() -> None:
     assert [candidate.external_id for candidate in ordered] == ["older but suitable"]
 
 
+def test_an_unknown_requested_model_never_broadens_to_the_brand() -> None:
+    exact = item("Honda Zoomer 2020", price=12_000_000)
+    other = item("Honda Lead 2022", price=12_000_000)
+    wanted = passport(attributes={"brand": "honda", "model": "zoomer"})
+
+    ordered = rank_items(wanted, [other, exact], usd_vnd=RATE, now=NOW)
+
+    assert [candidate.external_id for candidate in ordered] == ["Honda Zoomer 2020"]
+
+
 def test_budget_floor_excludes_known_cheaper_listing() -> None:
     wanted = passport(budget=Budget(min=300, max=500, currency=Currency.USD))
     too_cheap = item("too cheap", price=5_000_000)

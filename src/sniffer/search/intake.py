@@ -30,7 +30,7 @@ from sniffer.domain.passport import (
     PricePeriod,
 )
 from sniffer.search.engine_size import MAX_CC, MIN_CC
-from sniffer.search.intake_rules import detect_model, parse_query, with_model_facts
+from sniffer.search.intake_rules import grounded_model, parse_query, with_model_facts
 from sniffer.search.market_terms import ALL_CITY_NAMES
 from sniffer.search.planner import StructuredCaller
 
@@ -48,8 +48,11 @@ city — латинский слаг города из перечисления 
 budget_max — число без пробелов и валюты; «10 млн донгов» → 10000000.
 currency — валюта суммы; «млн» без валюты во Вьетнаме означает донги.
 brand — производитель, если назван: Honda, Yamaha, Suzuki, Piaggio, SYM.
-model — модель, если названа: Lead, Air Blade, Vision, Wave, Exciter, Vespa.
-Марка и модель — РАЗНЫЕ поля: «honda lead» это brand=honda и model=lead."""
+model — модель, если названа: Lead, Air Blade, Vision, Wave, Exciter, Vespa,
+Zoomer или другая. Список примеров не закрытый: верни точное имя клиента,
+даже если раньше его не встречал. Не додумывай модель, которой нет в запросе.
+Марка и модель — РАЗНЫЕ поля: «honda lead» это brand=honda и model=lead.
+Не отбрасывай часть названия и не расширяй точный запрос до одной марки."""
 
 
 class QueryIntake:
@@ -66,6 +69,13 @@ class QueryIntake:
         # (журнал 04.09.2026). Дананг он назовёт словом, необслуживаемый ловит
         # `is_served`. Search-first: до выдачи спрашиваем только предмет.
         rules = parse_query(text, default_city=settings.default_city)
+
+        if rules.is_ready() and rules.attributes.get("model"):
+            # The exact named item is already executable. A paid semantic pass
+            # cannot add a question here, but can add seconds and overwrite a
+            # correct model, so agent reasoning is reserved for ambiguity.
+            log.info("intake.rules_only", reason="точная модель уже разобрана")
+            return rules
 
         if self._broker is None and not settings.broker_project_key.strip():
             # Ключа нет — идти некуда. Молча ждать таймаут на каждом сообщении
@@ -143,8 +153,8 @@ def intake_schema() -> dict[str, Any]:
             # модель физически не может назвать несуществующий. Модельный ряд
             # рынка закрытым списком не бывает: закрепи в `enum` четырнадцать
             # имён — и на «Honda SH» модель выберет ближайшее из них, то есть
-            # соврёт увереннее, чем промолчала бы. Незнакомое имя мы отбрасываем
-            # сами при разборе: пустая модель — прежнее поведение, чужая — брак.
+            # соврёт увереннее, чем промолчала бы. Незнакомое имя принимается
+            # только при буквальном подтверждении в исходной фразе клиента.
             "model": {
                 "type": "string",
                 "description": "модель техники, если названа; пусто если нет",
@@ -181,10 +191,10 @@ def merge(rules: Passport, payload: Any) -> Passport:
     # Ответ модели проходит через тот же разбор написаний, что и текст клиента:
     # она пишет то «Honda Lead», то «air blade», то «SH» — а в паспорте обязан
     # лежать слаг из таблицы, иначе фильтр выдачи не с чем сверять. Незнакомое
-    # имя молча исчезает: искать по марке — прежнее поведение, искать по чужой
-    # модели — брак. Категория здесь по той же причине, что и в правилах: у
-    # жилья моделей нет, и «квартира Vision» — это название дома.
-    model = detect_model(str(payload.get("model") or ""), category)
+    # Незнакомое имя сохраняется только если оно буквально присутствует в
+    # запросе. Так открытый модельный ряд не становится whitelist, а выдуманная
+    # модель из ответа провайдера по-прежнему не может сузить поиск.
+    model = grounded_model(payload.get("model"), rules.raw_query, category)
     if model:
         attributes["model"] = model
     # Правила уже могли вынуть объём регулярным выражением — и это точнее

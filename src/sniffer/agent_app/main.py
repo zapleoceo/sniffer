@@ -39,31 +39,38 @@ async def search_request(
     allow_collection: bool = True,
 ) -> CatalogAnswer:
     gateway = MainGateway(MainIdentity(user_id, request_id, version, allow_collection))
-    broker = BrokerClient(usage=default_usage_sink)
+    async with gateway.sessions() as db:
+        request = await AgentRequestRepository(db).owned(user_id, request_id, version)
+    # A named model is already an exact executable request. Asking a second
+    # model merely to read the same bound rows added latency and could not alter
+    # server-owned criteria. The agent loop remains for broad requests where a
+    # coverage summary is useful.
+    broker = (
+        None if request.passport.attributes.get("model") else BrokerClient(usage=default_usage_sink)
+    )
     try:
         async with asyncio.timeout(25), connect(gateway) as session:
-            tools = frozenset(spec.name for spec in gateway.specs)
-            runtime = ReadAgent(
-                BrokerModel(broker),
-                McpReadTools(session, allowed_read_tools=tools),
-                gateway.specs,
-                allowed_read_tools=tools,
-                deadline_s=18,
-            )
-            try:
-                await runtime.run(
-                    "Read catalog_search and catalog_coverage for the bound request. "
-                    "Do not invent or modify search conditions. Summarize availability."
+            if broker is not None:
+                tools = frozenset(spec.name for spec in gateway.specs)
+                runtime = ReadAgent(
+                    BrokerModel(broker),
+                    McpReadTools(session, allowed_read_tools=tools),
+                    gateway.specs,
+                    allowed_read_tools=tools,
+                    deadline_s=18,
                 )
-            except Exception as exc:
-                # Broker failure never enables external sources or a different model.
-                log.warning("catalog.agent_fallback", kind=type(exc).__name__)
+                try:
+                    await runtime.run(
+                        "Read catalog_search and catalog_coverage for the bound request. "
+                        "Do not invent or modify search conditions. Summarize availability."
+                    )
+                except Exception as exc:
+                    # Broker failure never enables external sources or a different model.
+                    log.warning("catalog.agent_fallback", kind=type(exc).__name__)
             # The deterministic read also covers a model which chose no tool at all.
             result = await session.call_tool("catalog_search", {})
             if result.isError:
                 raise PermissionError("catalog_unavailable")
-            async with gateway.sessions() as db:
-                request = await AgentRequestRepository(db).owned(user_id, request_id, version)
             items = [_item(row["observation"]) for row in gateway.rows]
             rate = await usd_vnd_rate() if request.passport.budget.currency == "USD" else None
             items = rank_items(request.passport, items, usd_vnd=rate)
@@ -76,7 +83,8 @@ async def search_request(
                 )
             return CatalogAnswer(items, status)
     finally:
-        await broker.aclose()
+        if broker is not None:
+            await broker.aclose()
 
 
 def _item(data: dict[str, object]) -> RawItem:

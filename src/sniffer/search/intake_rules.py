@@ -128,6 +128,37 @@ _BRAND_ALIASES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("yamaha", re.compile(r"\bямах(?:а|у|и|е|ой)?\b", re.IGNORECASE)),
 )
 
+# An unfamiliar model is still a model when the client writes it immediately
+# after a known manufacturer.  The market catalogue is open-ended; the table in
+# motorbike_models enriches known names, it must not erase names it has not seen.
+_MODEL_WORD_RE = re.compile(r"[a-z][a-z0-9-]+", re.IGNORECASE)
+_MODEL_TAIL_STOP = frozenset(
+    {
+        "at",
+        "automatic",
+        "bike",
+        "black",
+        "blue",
+        "cc",
+        "for",
+        "in",
+        "manual",
+        "motorbike",
+        "nha",
+        "da",
+        "hoi",
+        "scooter",
+        "green",
+        "red",
+        "to",
+        "usd",
+        "vnd",
+        "white",
+        "with",
+        "without",
+    }
+)
+
 # Буквы, которыми кончается русское слово в именительном падеже и не кончается в
 # косвенном: «механика» → «механику». Прибавляемое окончание добирает `\w*`, а
 # ЗАМЕНЯЕМОЕ — нет, поэтому у кириллического слова хвост отбрасывается. Тот же
@@ -256,6 +287,8 @@ def parse_query(text: str, *, default_city: str = "") -> Passport:
     # таблице прочитать саму себя. Для мотобайка это одно и то же (все модели
     # мотобайковые), но порядок обязан быть честным.
     brand = detect_brand(query, said)
+    if model is None:
+        model = detect_unlisted_model(query, said, brand)
     # Категория следует из модели ИЛИ марки, но ложится только на пустое место —
     # та же дисциплина, что у коробки: сказанное клиентом главнее выведенного.
     # Модель точнее марки, поэтому раньше неё; все марки рынка мотобайковые, и
@@ -357,6 +390,70 @@ def detect_brand(text: str, category: Category | None = None) -> str | None:
         if pattern.search(text):
             return brand
     return model_brand(detect_model(text, category))
+
+
+def detect_unlisted_model(text: str, category: Category | None, brand: str | None) -> str | None:
+    """Return a grounded model written after an explicit motorbike brand.
+
+    This is deliberately narrower than free-form entity extraction: it covers
+    the common market form ``Honda Zoomer`` without turning a year, city or
+    property name into a vehicle model.  The semantic intake handles other word
+    orders; both paths retain only words which are present in the client text.
+    """
+    if brand is None or category not in (None, Category.MOTORBIKE):
+        return None
+    match = _BRAND_RE.search(text)
+    if match is None:
+        alias = next(
+            (
+                found
+                for name, pattern in _BRAND_ALIASES
+                if name == brand and (found := pattern.search(text))
+            ),
+            None,
+        )
+        match = alias
+    if match is None:
+        return None
+    tail = text[match.end() :].lstrip(" ,:-/\t")
+    words: list[str] = []
+    position = 0
+    for found in _MODEL_WORD_RE.finditer(tail):
+        # Punctuation/whitespace is fine, but another language word or number
+        # between model tokens ends the model phrase.
+        between = tail[position : found.start()]
+        if not words and found.start() != 0:
+            break
+        if position and between.strip(" -_/\t"):
+            break
+        word = found.group(0).casefold()
+        if word in _MODEL_TAIL_STOP or word.isdigit():
+            break
+        words.append(word)
+        position = found.end()
+        if len(words) == 3:
+            break
+    return "_".join(words) or None
+
+
+def grounded_model(value: object, text: str, category: Category | None) -> str | None:
+    """Normalise a model answer only when the client actually named it."""
+    raw = " ".join(str(value or "").split()).casefold()
+    known = detect_model(raw, category)
+    if known is not None:
+        return known
+    if category is not Category.MOTORBIKE or not raw:
+        return None
+    brand = detect_brand(text, category)
+    if brand and raw.startswith(f"{brand} "):
+        raw = raw[len(brand) + 1 :]
+    words = _MODEL_WORD_RE.findall(raw)
+    if not 1 <= len(words) <= 3 or " ".join(words) != raw:
+        return None
+    candidate = "_".join(word.casefold() for word in words)
+    haystack = re.sub(r"[^\w]+", " ", text.casefold()).strip()
+    phrase = candidate.replace("_", " ")
+    return candidate if re.search(rf"(?<!\w){re.escape(phrase)}(?!\w)", haystack) else None
 
 
 def detect_model(text: str, category: Category | None = None) -> str | None:

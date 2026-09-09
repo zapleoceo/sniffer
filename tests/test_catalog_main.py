@@ -64,6 +64,26 @@ async def test_server_supplies_only_owned_current_request_filters(repos: dict[st
         await gateway.call("execute_sql", {})
 
 
+async def test_exact_model_reaches_database_before_catalog_limit(repos: dict[str, Any]) -> None:
+    stored = repos["stored"]
+    repos["owned"].owned.return_value = StoredPassport(
+        id=stored.id,
+        user_id=stored.user_id,
+        version=stored.version,
+        root_id=stored.root_id,
+        passport=stored.passport.model_copy(
+            update={"attributes": {"brand": "honda", "model": "zoomer"}}
+        ),
+    )
+
+    gateway = MainGateway(MainIdentity(7, 9, 2), repos["sessions"])
+    await gateway.call("catalog_search", {})
+
+    criteria = repos["catalog"].search.call_args.kwargs
+    assert criteria["brand"] == "honda"
+    assert criteria["model"] == "zoomer"
+
+
 def test_exact_request_criteria_get_distinct_collection_coverage() -> None:
     broad = Passport(city="nha_trang", category=Category.MOTORBIKE, intent=Intent.BUY)
     exact = broad.model_copy(
@@ -191,6 +211,33 @@ async def test_broker_prose_is_not_a_card_and_failure_still_reads_catalogue(
     assert answer.items == [] and answer.status is None
     repos["catalog"].search.assert_awaited_once()
     broker.aclose.assert_awaited_once()
+
+
+async def test_exact_model_skips_the_redundant_catalog_agent(
+    repos: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stored = repos["stored"]
+    repos["owned"].owned.return_value = StoredPassport(
+        id=stored.id,
+        user_id=stored.user_id,
+        version=stored.version,
+        root_id=stored.root_id,
+        passport=stored.passport.model_copy(
+            update={"attributes": {"brand": "honda", "model": "zoomer"}}
+        ),
+    )
+    gateway = MainGateway(MainIdentity(7, 9, 2, False), repos["sessions"])
+    monkeypatch.setattr(main, "MainGateway", lambda identity: gateway)
+
+    def unexpected_broker(**kwargs: object) -> object:
+        raise AssertionError("an exact request needs no second model call")
+
+    monkeypatch.setattr(main, "BrokerClient", unexpected_broker)
+
+    answer = await main.search_request(7, 9, 2, allow_collection=False)
+
+    assert answer.items == []
+    repos["catalog"].search.assert_awaited_once()
 
 
 async def test_missing_usd_rate_is_not_silently_ignored(

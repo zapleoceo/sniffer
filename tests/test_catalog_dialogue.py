@@ -168,6 +168,25 @@ async def test_scoped_dialogue_asks_only_for_category_and_reports_empty_status()
     assert current.state.asked == ("category",)
 
 
+async def test_exact_unlisted_model_is_searched_without_redundant_questions() -> None:
+    class Parser:
+        async def parse(self, text: str) -> Passport:
+            return parse_query(text, default_city="nha_trang")
+
+    store = MemoryStore()
+    finder = AsyncMock(return_value=Found([]))
+    talk = Conversation(store, intake=Parser, scoped_finder=finder, recorder=FakeJournal())
+    replies = Replies()
+
+    await talk.on_text(CLIENT, "нужен Honda Zoomer", replies)
+
+    assert all(reply.question is None for reply in replies.sent)
+    assert "honda, zoomer" in replies.texts[0].casefold()
+    assert finder.await_args is not None
+    searched = finder.await_args.args[0].passport.passport
+    assert searched.attributes == {"brand": "honda", "model": "zoomer"}
+
+
 async def test_selected_old_request_and_revised_version_reach_catalog() -> None:
     from tests.test_bot_dialog import RulesIntake
 
