@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from math import exp
@@ -67,9 +68,25 @@ def score(listing: Listing, passport: Passport, *, now: datetime | None = None) 
 
 
 def worth_sending(listing: Listing, passport: Passport, *, now: datetime | None = None) -> bool:
+    wanted_model = str(passport.attributes.get("model") or "")
+    if wanted_model and not _listing_has_model(listing, wanted_model):
+        return False
     if _known_attribute_conflicts(listing, passport):
         return False
     return score(listing, passport, now=now) >= MATCH_MIN_SCORE
+
+
+def _listing_has_model(listing: Listing, wanted: str) -> bool:
+    actual = str(listing.attributes.get("model") or "")
+    wanted_words = _model_words(wanted)
+    if actual and _model_words(actual) == wanted_words:
+        return True
+    haystack = _model_words(f"{listing.title} {listing.summary}")
+    return bool(wanted_words and re.search(rf"(?<!\w){re.escape(wanted_words)}(?!\w)", haystack))
+
+
+def _model_words(value: str) -> str:
+    return re.sub(r"[^\w]+", " ", value.casefold().replace("_", " ")).strip()
 
 
 def _known_attribute_conflicts(listing: Listing, passport: Passport) -> bool:

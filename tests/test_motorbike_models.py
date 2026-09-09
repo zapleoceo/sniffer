@@ -152,15 +152,11 @@ def test_a_model_without_a_category_is_still_read() -> None:
     assert passport.category is Category.MOTORBIKE
 
 
-def test_an_unknown_model_leaves_the_search_as_it_was() -> None:
-    """Таблица короткая намеренно: незнакомое имя — прежнее поведение, а не брак.
-
-    Ложная модель отрезала бы верную выдачу, поэтому «SH» остаётся неузнанным, и
-    искать бот будет по марке — ровно как раньше.
-    """
+def test_an_unknown_model_after_a_known_brand_is_an_exact_request() -> None:
+    """Открытый рынок нельзя превратить в whitelist коротким справочником."""
     passport = parse_query("куплю honda sh до 500", default_city=CITY)
 
-    assert "model" not in passport.attributes
+    assert passport.attributes["model"] == "sh"
     assert passport.attributes["brand"] == "honda"
 
 
@@ -224,7 +220,7 @@ def test_an_unknown_name_derives_no_category() -> None:
     """Неизвестная МОДЕЛЬ категории не выдумывает: «sh» сама по себе — ничто.
 
     Категорию теперь выводит и марка (все марки рынка мотобайковые), поэтому
-    «honda sh» — мотобайк ПО МАРКЕ «honda», а не по неизвестной модели «sh».
+    «honda sh» — мотобайк по марке Honda и сохраняет точную модель `sh`.
     Проверяем обе стороны: имя неизвестной модели без марки категории не даёт,
     а известная марка — даёт (defect 02.09.2026: «yamaha» оставалась без категории).
     """
@@ -425,6 +421,37 @@ def test_an_unknown_model_from_the_answer_is_dropped() -> None:
 
     assert "model" not in merged.attributes
     assert merged.attributes["brand"] == "honda"
+
+
+def test_an_unknown_model_named_by_the_client_is_preserved() -> None:
+    passport = parse_query("нужен Honda Zoomer", default_city=CITY)
+
+    assert passport.attributes["brand"] == "honda"
+    assert passport.attributes["model"] == "zoomer"
+
+
+@pytest.mark.parametrize(
+    "query",
+    ["нужен Honda в Нячанге", "Honda in Nha Trang", "Honda до 500 USD", "Honda 2020"],
+)
+def test_location_budget_and_year_after_a_brand_are_not_models(query: str) -> None:
+    assert "model" not in parse_query(query, default_city=CITY).attributes
+
+
+def test_a_grounded_unknown_model_from_the_agent_is_preserved() -> None:
+    rules = parse_query("нужен скутер Zoomer", default_city=CITY)
+
+    merged = merge(rules, {"category": "motorbike", "brand": "Honda", "model": "Zoomer"})
+
+    assert merged.attributes["model"] == "zoomer"
+
+
+def test_an_ungrounded_unknown_model_from_the_agent_is_still_dropped() -> None:
+    rules = parse_query("нужен скутер", default_city=CITY)
+
+    merged = merge(rules, {"category": "motorbike", "brand": "Honda", "model": "Zoomer"})
+
+    assert "model" not in merged.attributes
 
 
 def test_pcx_is_read_in_cyrillic() -> None:

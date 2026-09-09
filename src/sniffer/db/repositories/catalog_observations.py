@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import timedelta
 from typing import Any, Literal
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 
-from sniffer.db.models.catalog import coverage, observations, publications
+from sniffer.db.models.catalog import coverage as catalog_coverage
+from sniffer.db.models.catalog import observations, publications
 from sniffer.db.repositories.base import Repository
 from sniffer.db.repositories.collection_tasks import CollectionTaskRepository
 from sniffer.domain.catalog import CatalogObservation
@@ -130,6 +132,8 @@ class CatalogObservationRepository(Repository):
         category: str,
         deal_type: str | None = None,
         max_price_vnd: int | None = None,
+        brand: str | None = None,
+        model: str | None = None,
         limit: int = 20,
         fresh_seconds: int = 86400,
     ) -> list[dict[str, Any]]:
@@ -166,6 +170,27 @@ class CatalogObservationRepository(Repository):
         if max_price_vnd is not None:
             # Unknown prices are not quietly advertised as inside a hard budget.
             statement = statement.where(publications.c.price_vnd <= max_price_vnd)
+        facts = observations.c.payload["facts"]
+        text = func.lower(
+            observations.c.payload["title"].astext + " " + observations.c.payload["raw_text"].astext
+        )
+        if brand:
+            pattern = _word_pattern(brand)
+            statement = statement.where(
+                or_(
+                    func.lower(facts["brand"].astext) == brand.casefold(),
+                    text.op("~")(pattern),
+                )
+            )
+        if model:
+            words = model.replace("_", " ").casefold()
+            pattern = _word_pattern(words)
+            statement = statement.where(
+                or_(
+                    func.replace(func.lower(facts["model"].astext), "_", " ") == words,
+                    text.op("~")(pattern),
+                )
+            )
         rows = (
             await self._session.execute(
                 statement.order_by(
@@ -191,7 +216,7 @@ class CatalogObservationRepository(Repository):
             raise CatalogRejected("invalid_coverage_outcome")
         lease = await CollectionTaskRepository(self._session).require_lease(task_id, token)
         self._source_scope(lease.scope, source)
-        statement = insert(coverage).values(
+        statement = insert(catalog_coverage).values(
             scope_key=self._scope_key(lease.scope),
             source=source,
             task_id=task_id,
@@ -218,9 +243,9 @@ class CatalogObservationRepository(Repository):
             raise CatalogRejected("invalid_sources")
         rows = (
             await self._session.execute(
-                select(coverage).where(
-                    coverage.c.scope_key == self._scope_key(scope),
-                    coverage.c.source.in_(sources),
+                select(catalog_coverage).where(
+                    catalog_coverage.c.scope_key == self._scope_key(scope),
+                    catalog_coverage.c.source.in_(sources),
                 )
             )
         ).mappings()
@@ -247,3 +272,8 @@ class CatalogObservationRepository(Repository):
         # Budget/query/attribute coverage must not be borrowed from an unrelated search.
         canonical = {key: value for key, value in scope.items() if key != "sources"}
         return hashlib.sha256(json.dumps(canonical, sort_keys=True).encode()).hexdigest()
+
+
+def _word_pattern(value: str) -> str:
+    words = re.escape(value.casefold()).replace(r"\ ", "[[:space:]]+")
+    return rf"(^|[^[:alnum:]_]){words}([^[:alnum:]_]|$)"

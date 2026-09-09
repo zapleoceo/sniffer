@@ -324,6 +324,15 @@ async def test_without_broker_key_model_is_not_called(offline: None) -> None:
     assert passport.category is Category.MOTORBIKE
 
 
+async def test_exact_model_does_not_wait_for_redundant_semantic_intake(offline: None) -> None:
+    broker = FakeBroker(error=AssertionError("exact request must not call the model"))
+
+    passport = await QueryIntake(broker).parse("нужен Honda Zoomer")
+
+    assert not broker.calls
+    assert passport.attributes == {"model": "zoomer", "brand": "honda"}
+
+
 async def test_model_answer_refines_rules(offline: None) -> None:
     broker = FakeBroker(
         {
@@ -344,6 +353,28 @@ async def test_model_answer_refines_rules(offline: None) -> None:
     assert passport.budget.max == 450
     assert passport.attributes["brand"] == "honda"
     assert passport.confidence == 0.8
+
+
+async def test_semantic_intake_preserves_a_grounded_unlisted_model(offline: None) -> None:
+    broker = FakeBroker(
+        {
+            "intent": "buy",
+            "category": "motorbike",
+            "city": "",
+            "budget_max": "",
+            "currency": "",
+            "period": "",
+            "brand": "Honda",
+            "model": "Zoomer",
+            "engine_cc": "",
+        }
+    )
+
+    passport = await QueryIntake(broker).parse("Zoomer от Honda")
+
+    assert passport.category is Category.MOTORBIKE
+    assert passport.attributes["brand"] == "honda"
+    assert passport.attributes["model"] == "zoomer"
 
 
 async def test_model_silence_does_not_erase_rules(offline: None) -> None:

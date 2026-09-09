@@ -239,6 +239,60 @@ async def test_database_updates_price_without_duplicate_and_late_replay(
     assert len(await repo.search(city="nha_trang", category="motorbike")) == 1
 
 
+async def test_exact_model_is_filtered_before_the_catalog_limit(db_session: AsyncSession) -> None:
+    tasks = CollectionTaskRepository(db_session)
+    task_id = await tasks.enqueue(
+        {
+            "city": "nha_trang",
+            "category": "motorbike",
+            "deal_type": "sell",
+            "sources": ["chotot"],
+        },
+        user_id=1,
+        request_id=2,
+        request_version=1,
+        window_key="exact-model",
+    )
+    lease = await tasks.claim()
+    assert lease is not None and lease.id == task_id
+    repo = CatalogObservationRepository(db_session)
+
+    async def publish_model(external_id: str, model: str, age: timedelta) -> None:
+        title = f"Honda {model}"
+        base = observation(
+            external_id=external_id,
+            title=title,
+            raw_text=f"Нячанг. Продам скутер. {title}. Цена 100 VND. В наличии.",
+            fetched_at=datetime.now(UTC) - age,
+        )
+        record = base.model_copy(
+            update={
+                "facts": base.facts.model_copy(update={"brand": "honda", "model": model}),
+                "evidence": (
+                    *base.evidence,
+                    Evidence(field="brand", quote="Honda"),
+                    Evidence(field="model", quote=model),
+                ),
+            }
+        )
+        identifier = await repo.stage(task_id, lease.token, record)
+        assert await repo.publish(task_id, lease.token, identifier)
+
+    for number in range(20):
+        await publish_model(f"lead-{number}", "Lead", timedelta(seconds=number + 1))
+    await publish_model("zoomer", "Zoomer", timedelta(minutes=30))
+
+    rows = await repo.search(
+        city="nha_trang",
+        category="motorbike",
+        brand="honda",
+        model="zoomer",
+        limit=20,
+    )
+
+    assert [row["observation"]["external_id"] for row in rows] == ["zoomer"]
+
+
 async def test_unknown_city_foreign_task_and_scope_cannot_publish(db_session: AsyncSession) -> None:
     tasks = CollectionTaskRepository(db_session)
     task_id = await tasks.enqueue(

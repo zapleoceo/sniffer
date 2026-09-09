@@ -63,7 +63,9 @@ async def fetch_source(source: str, scope: CollectionScope, limit: int) -> list[
     adapter = ChototSource()
     try:
         criteria = scope.criteria
-        query = " ".join(value for value in (criteria.brand, criteria.model) if value)
+        query = " ".join(
+            value.replace("_", " ") for value in (criteria.brand, criteria.model) if value
+        )
         attributes = {
             key: value
             for key, value in {

@@ -55,6 +55,21 @@ def test_a_buyer_is_matched_with_a_seller_not_another_buyer() -> None:
     assert renter is not None and renter.deal_type == "rent_out"
 
 
+def test_subscription_requires_the_unknown_model_named_by_the_client() -> None:
+    wanted = passport(attributes={"brand": "honda", "model": "zoomer"})
+    exact = listing(
+        title="Honda Zoomer 2020",
+        attributes={"brand": "honda", "model": "zoomer"},
+    )
+    other = listing(
+        title="Honda Lead 2022",
+        attributes={"brand": "honda", "model": "lead"},
+    )
+
+    assert worth_sending(exact, wanted, now=NOW)
+    assert not worth_sending(other, wanted, now=NOW)
+
+
 def subscription(**overrides: object) -> SubscriptionState:
     fields: dict[str, object] = {
         "id": 1,
