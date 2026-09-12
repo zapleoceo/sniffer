@@ -114,6 +114,16 @@ class Collector:
             raise
         except Exception as exc:
             delay = _cap_delay() if _has_cap(exc) else 3600
+            # Причина обязана попасть в лог: в базе остаётся только код
+            # `collection_failed`, и три упавшие задачи подряд (09.09.2026)
+            # нельзя было объяснить ничем — ни в БД, ни в логе контейнера.
+            log.warning(
+                "collector.task_failed",
+                task_id=lease.id,
+                kind=type(exc).__name__,
+                error=str(exc)[:300],
+                retry_in_s=delay,
+            )
             if _has_cap(exc):
                 self._capped_until = datetime.now(UTC) + timedelta(seconds=delay)
             async with self._sessions() as session:

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from sniffer.domain.passport import Category, Intent, default_deal_type
 from sniffer.domain.prices import price_hint
 from sniffer.domain.records import Chat, Listing, RawMessage
 from sniffer.pipeline.gate import CategoryDetector, GateResult, gate
@@ -30,6 +31,19 @@ def classify(raw: RawMessage, *, category_hints: CategoryDetector | None = None)
     берётся здесь: воронка про поиск не знает — это обратная зависимость слоёв.
     """
     return gate(raw.text, category_hints=category_hints)
+
+
+def deal_type_for(intent: Intent | None, category: Category) -> str:
+    """Сторона объявления: глагол сделки, если он есть, иначе умолчание категории.
+
+    Умолчание — знание домена (`default_deal_type`): жильё в Нячанге сдают,
+    технику продают. Пока умолчанием для всего была продажа, 2707 из 3714
+    карточек жилья за 28 дней (замер 12.09.2026) числились продажей при тексте
+    про аренду, и арендатор по стороне сделки не находил ничего.
+    """
+    if intent in {Intent.SELL, Intent.RENT_OUT}:
+        return intent.value
+    return default_deal_type(category)
 
 
 def listing_from(
@@ -74,7 +88,12 @@ def listing_from(
         seller_id=raw.seller_id,
         price_amount=Decimal(price_vnd) if price_vnd is not None else None,
         price_currency="VND" if price_vnd is not None else None,
-        price_period="once" if price_vnd is not None else None,
+        # Период цены следует за стороной сделки: сдают помесячно, продают
+        # разово. Раньше «13 млн» у сдаваемой квартиры значились разовой
+        # ценой, и помесячный бюджет арендатора сравнивать было не с чем.
+        price_period=(
+            ("month" if deal_type == "rent_out" else "once") if price_vnd is not None else None
+        ),
         attributes=dict(attributes or {}),
         confidence=0.55 if price_raw else 0.4,
         lang=None,

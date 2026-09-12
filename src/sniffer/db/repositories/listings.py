@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from typing import cast
+from typing import Any, cast
 
-from sqlalchemy import Table, func, or_, select
+from sqlalchemy import Integer, Select, Table, case, func, or_, select
+from sqlalchemy import cast as sql_cast
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from sniffer.db import models
@@ -117,7 +118,14 @@ class ListingRepository(Repository):
         return [to_listing(row) for row in rows]
 
     async def search_catalog(self, spec: MatchFilter, *, limit: int = 100) -> list[Listing]:
-        """Свежая страница собственного каталога для разового поиска."""
+        """Свежая страница собственного каталога для разового поиска.
+
+        Свойства паспорта отбираются здесь, а не только после `LIMIT`: иначе
+        Lead трёхнедельной давности не попадал бы в сотню свежайших мотобайков
+        и для клиента не существовал бы. Дисциплина та же, что у отбора выдачи
+        (`search/relevance.py`): известное свойство обязано совпасть,
+        неизвестное — не мешает, модель требует положительного совпадения.
+        """
         statement = select(models.Listing).where(
             models.Listing.city == spec.city,
             models.Listing.is_active.is_(True),
@@ -126,6 +134,8 @@ class ListingRepository(Repository):
             statement = statement.where(models.Listing.category == spec.category)
         if spec.deal_type is not None:
             statement = statement.where(models.Listing.deal_type == spec.deal_type)
+        if spec.since is not None:
+            statement = statement.where(models.Listing.posted_at >= spec.since)
         if spec.max_price_vnd is not None:
             statement = statement.where(
                 or_(
@@ -133,6 +143,7 @@ class ListingRepository(Repository):
                     models.Listing.price_amount <= spec.max_price_vnd,
                 )
             )
+        statement = _with_attributes(statement, spec)
         rows = await self._session.scalars(
             statement.order_by(models.Listing.posted_at.desc(), models.Listing.id.desc()).limit(
                 limit
@@ -154,3 +165,43 @@ class ListingRepository(Repository):
             select(models.Listing).where(models.Listing.raw_message_id == raw_message_id)
         )
         return to_listing(row) if row is not None else None
+
+
+def _with_attributes(statement: Select[Any], spec: MatchFilter) -> Select[Any]:
+    """Свойства паспорта → условия по JSONB `attributes` и тексту карточки.
+
+    «Известное ≠ несовпадение»: карточка без извлечённого свойства остаётся —
+    половина объявлений марку не пишет, и выбросить их значит опустошить
+    выдачу; карточка с ЯВНО другим значением уходит. Объём хранится числом в
+    строке JSON, поэтому сравнивается через `CASE`: нечисловое значение — это
+    «неизвестно», а не ошибка приведения на весь запрос.
+    """
+    attrs = models.Listing.attributes
+    for key, value in spec.attributes.items():
+        if value in (None, ""):
+            continue
+        statement = statement.where(or_(~attrs.has_key(key), attrs[key].astext == str(value)))
+    if spec.model:
+        # Модель — самый узкий критерий: её имя обязано быть в карточке (слаг в
+        # атрибутах либо слова в тексте, слитно и раздельно — «air blade» и
+        # «airblade» одно имя). Окончательно судит `rank_items` тем же
+        # знанием о написаниях, что читает запрос клиента.
+        phrase = spec.model.replace("_", " ").casefold()
+        haystack = func.lower(models.Listing.title + " " + models.Listing.summary)
+        statement = statement.where(
+            or_(
+                attrs["model"].astext == spec.model,
+                haystack.contains(phrase),
+                haystack.contains(phrase.replace(" ", "")),
+            )
+        )
+    if spec.engine_cc_min is not None or spec.engine_cc_max is not None:
+        numeric = attrs["engine_cc"].astext
+        known = case((numeric.op("~")("^[0-9]+$"), sql_cast(numeric, Integer)), else_=None)
+        bounds = []
+        if spec.engine_cc_min is not None:
+            bounds.append(known >= spec.engine_cc_min)
+        if spec.engine_cc_max is not None:
+            bounds.append(known <= spec.engine_cc_max)
+        statement = statement.where(or_(known.is_(None), *bounds))
+    return statement

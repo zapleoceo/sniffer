@@ -43,6 +43,43 @@ class Category(StrEnum):
     OTHER = "other"
 
 
+# Жильё в Нячанге снимают, а не покупают: иностранцу с туристической визой
+# купить квартиру нельзя в принципе. Знание одно на обе стороны рынка, поэтому
+# лежит в домене, а не в двух списках: клиент, написавший «квартиру» без
+# глагола, хочет снять (разбор запроса), а объявление о квартире без глагола
+# сделки — предложение сдать (конвейер архива). Пока конвейер держал своё
+# умолчание «продажа», 2707 из 3714 карточек жилья за 28 дней (замер
+# 12.09.2026) значились продажей при тексте про аренду, и арендатор по стороне
+# сделки не находил ничего.
+RENTED_CATEGORIES: frozenset[Category] = frozenset(
+    {Category.APARTMENT, Category.ROOM, Category.HOUSE}
+)
+
+
+def default_deal_type(category: Category | None) -> str:
+    """Сторона объявления, когда глагола сделки в его тексте нет."""
+    return "rent_out" if category in RENTED_CATEGORIES else "sell"
+
+
+# Полоса допуска объёма двигателя, когда клиент назвал точку, а не границу:
+# «200 кубиков» — это про класс мотоцикла, 175 и 250 клиент назовёт тем же
+# поиском, 700 — нет. Одно число на отбор выдачи (`search/relevance.py`) и на
+# отбор в каталоге (`sources/chat_directory.py` → SQL): разойдись они, карточка
+# проходила бы одну границу и отсекалась другой.
+ENGINE_CC_BAND = 0.25
+
+
+def engine_cc_bounds(engine_cc: object, direction: object) -> tuple[int | None, int | None]:
+    """Границы объёма по названному числу и направлению: «от 250», «до 125», «200»."""
+    if isinstance(engine_cc, bool) or not isinstance(engine_cc, int) or engine_cc <= 0:
+        return None, None
+    if direction == "min":
+        return engine_cc, None
+    if direction == "max":
+        return None, engine_cc
+    return int(engine_cc * (1 - ENGINE_CC_BAND)), int(engine_cc * (1 + ENGINE_CC_BAND))
+
+
 class Currency(StrEnum):
     USD = "USD"
     VND = "VND"

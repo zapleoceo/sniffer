@@ -385,6 +385,15 @@ class MatchFilter:
     deal_type: str | None = None
     max_price_vnd: Decimal | None = None
     since: datetime | None = None
+    # Свойства, у которых известное значение обязано совпасть, а неизвестное не
+    # мешает («известное ≠ несовпадение», как в отборе выдачи): марка, коробка,
+    # число комнат. Модель — отдельно: ей нужно положительное совпадение, без
+    # имени модели карточка соответствия не доказывает. Объём — границами, уже
+    # посчитанными из направления («от 250», «до 125», «200» ± полоса).
+    attributes: dict[str, Any] = field(default_factory=dict)
+    model: str | None = None
+    engine_cc_min: int | None = None
+    engine_cc_max: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -4,9 +4,10 @@ from datetime import UTC, datetime
 
 import pytest
 
+from sniffer.domain.passport import Category, Intent
 from sniffer.domain.prices import MAX_PLAUSIBLE_VND, price_hint
 from sniffer.domain.records import Chat, RawMessage
-from sniffer.pipeline.archive import STAGE_REJECTED, classify, listing_from
+from sniffer.pipeline.archive import STAGE_REJECTED, classify, deal_type_for, listing_from
 from sniffer.search import vocabulary
 from sniffer.search.intake_rules import parse_query
 
@@ -178,3 +179,61 @@ def test_a_multi_city_chat_does_not_stamp_its_own_city_on_everything() -> None:
             city=parsed.city or "",
         )
         assert listing.city == expected, f"{text!r} → {listing.city}, ждали {expected}"
+
+
+@pytest.mark.parametrize(
+    ("intent", "category", "deal_type"),
+    [
+        (None, Category.APARTMENT, "rent_out"),
+        (None, Category.ROOM, "rent_out"),
+        (None, Category.HOUSE, "rent_out"),
+        (None, Category.MOTORBIKE, "sell"),
+        (Intent.RENT, Category.APARTMENT, "rent_out"),
+        (Intent.SELL, Category.APARTMENT, "sell"),
+        (Intent.RENT_OUT, Category.MOTORBIKE, "rent_out"),
+        (Intent.BUY, Category.MOTORBIKE, "sell"),
+    ],
+)
+def test_deal_side_comes_from_the_verb_or_from_the_category(
+    intent: Intent | None, category: Category, deal_type: str
+) -> None:
+    """Жильё в Нячанге сдают, технику продают; названный глагол главнее умолчания.
+
+    Замер 12.09.2026: 2707 из 3714 карточек жилья со стороной «sell» за 28 дней
+    были про аренду — умолчание «продажа для всего» врало на большинстве.
+    """
+    assert deal_type_for(intent, category) == deal_type
+
+
+def test_housing_without_a_deal_verb_is_rented_out_monthly(chat: Chat) -> None:
+    # «Цена» в тексте обязательна: число без явной метки ценой не считается
+    # (`domain/prices.price_hint`), иначе год и «125cc» станут ложными донгами.
+    message = raw("Студия у моря, Хон Шен, цена 10 млн ₫, длительно, с мебелью")
+    result = classify(message, category_hints=DETECTOR)
+    parsed = parse_query(message.text, default_city=chat.city)
+
+    listing = listing_from(
+        message,
+        chat,
+        result,
+        deal_type=deal_type_for(parsed.intent, result.categories[0]),
+        attributes=dict(parsed.attributes),
+    )
+
+    assert listing.category == "apartment"
+    assert listing.deal_type == "rent_out"
+    assert listing.price_amount == 10_000_000
+    assert listing.price_period == "month"
+
+
+def test_a_sale_of_housing_named_by_its_verb_stays_a_sale(chat: Chat) -> None:
+    message = raw("Продам квартиру 2 спальни в центре, цена 2500 млн VND, документы")
+    result = classify(message, category_hints=DETECTOR)
+    parsed = parse_query(message.text, default_city=chat.city)
+
+    listing = listing_from(
+        message, chat, result, deal_type=deal_type_for(parsed.intent, result.categories[0])
+    )
+
+    assert listing.deal_type == "sell"
+    assert listing.price_period == "once"

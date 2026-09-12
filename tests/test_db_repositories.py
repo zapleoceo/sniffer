@@ -11,6 +11,7 @@ import asyncio
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -1307,3 +1308,74 @@ def _card(raw_message_id: int, title: str) -> Listing:
         tg_link="https://t.me/c/1/1",
         posted_at=NOW,
     )
+
+
+def _catalog_card(external_id: str, **overrides: object) -> Listing:
+    values: dict[str, object] = {
+        "raw_message_id": None,
+        "source": "telegram_archive",
+        "external_id": external_id,
+        "deal_type": "sell",
+        "category": "motorbike",
+        "city": "nha_trang",
+        "title": f"Байк {external_id}",
+        "summary": "продам, документы",
+        "tg_link": f"https://t.me/c/1/{external_id}",
+        "posted_at": NOW,
+        "attributes": {},
+    }
+    values.update(overrides)
+    return Listing(**values)  # type: ignore[arg-type]
+
+
+async def test_catalog_search_filters_by_known_attributes_and_keeps_the_unknown(
+    db_session: AsyncSession,
+) -> None:
+    """Известное ≠ несовпадение: марка не извлечена — карточка остаётся; марка
+    другая — уходит. Модель требует положительного совпадения, объём —
+    границ, свежесть — окна `since`."""
+    from sniffer.domain.records import MatchFilter
+
+    repo = ListingRepository(db_session)
+    cards = [
+        _catalog_card("honda-lead", attributes={"brand": "honda", "model": "lead"}),
+        _catalog_card(
+            "lead-in-text",
+            title="Продам Хонда Лид 2019",
+            summary="Honda Lead 125, автомат",
+            attributes={},
+        ),
+        _catalog_card("yamaha", attributes={"brand": "yamaha", "model": "nvx"}),
+        _catalog_card("unlabeled", attributes={}),
+        _catalog_card("small-cc", attributes={"brand": "honda", "engine_cc": 110}),
+        _catalog_card("big-cc", attributes={"brand": "honda", "engine_cc": 300}),
+        _catalog_card("odd-cc", attributes={"brand": "honda", "engine_cc": "много"}),
+        _catalog_card("old", attributes={"brand": "honda"}, posted_at=NOW - timedelta(days=90)),
+    ]
+    for card in cards:
+        assert await repo.upsert_external(card)
+    await db_session.commit()
+
+    def ids(rows: list[Listing]) -> set[str]:
+        return {str(row.external_id) for row in rows}
+
+    base = MatchFilter(city="nha_trang", category="motorbike", deal_type="sell")
+
+    honda = await repo.search_catalog(replace(base, attributes={"brand": "honda"}))
+    assert "yamaha" not in ids(honda)
+    assert {"honda-lead", "unlabeled", "lead-in-text"} <= ids(honda)
+
+    lead = await repo.search_catalog(replace(base, model="lead"))
+    assert ids(lead) == {"honda-lead", "lead-in-text"}
+
+    at_least_250 = await repo.search_catalog(replace(base, engine_cc_min=250))
+    assert "small-cc" not in ids(at_least_250)
+    assert {"big-cc", "odd-cc", "unlabeled"} <= ids(at_least_250)
+
+    around_125 = await repo.search_catalog(replace(base, engine_cc_min=93, engine_cc_max=156))
+    assert "big-cc" not in ids(around_125)
+    assert "small-cc" in ids(around_125)
+
+    fresh = await repo.search_catalog(replace(base, since=NOW - timedelta(days=60)))
+    assert "old" not in ids(fresh)
+    assert "honda-lead" in ids(fresh)

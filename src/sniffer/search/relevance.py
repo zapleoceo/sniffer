@@ -7,7 +7,14 @@ from datetime import UTC, datetime
 from math import exp
 
 from sniffer.domain.fingerprint import normalized
-from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
+from sniffer.domain.passport import (
+    ENGINE_CC_BAND,
+    Budget,
+    Category,
+    Currency,
+    Intent,
+    Passport,
+)
 from sniffer.search.engine_size import listing_cc_values
 from sniffer.search.intake_rules import (
     category_of,
@@ -30,7 +37,9 @@ PRICE_OVER_BUDGET = 1.30
 
 # Полоса допуска объёма, когда клиент назвал точку, а не границу: «200 кубиков»
 # — это про класс мотоцикла, 175 и 250 клиент назовёт тем же поиском, 700 — нет.
-ENGINE_BAND = 0.25
+# Число живёт в домене: тем же допуском отбирает каталог в SQL, и две копии
+# однажды разошлись бы.
+ENGINE_BAND = ENGINE_CC_BAND
 
 _RENTABLE_TRANSPORT = frozenset({Category.MOTORBIKE, Category.CAR, Category.BICYCLE})
 

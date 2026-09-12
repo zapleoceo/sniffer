@@ -218,7 +218,7 @@ fi
 # до рестарта клиентского бота; значения секретов наружу не печатаются.
 log "конфигурация публичного каталога"
 if ! docker compose $COMPOSE_PROFILE_ARGS run --rm --no-deps --entrypoint python bot -c \
-  'from sniffer.config import Settings; s=Settings(); raise SystemExit(0 if s.catalog_mode == "catalog" and s.agent_collector_enabled and bool(s.broker_project_key.strip()) else 1)'
+  'from sniffer.config import Settings; s=Settings(); raise SystemExit(0 if s.catalog_mode in ("catalog", "listings") and s.agent_collector_enabled and bool(s.broker_project_key.strip()) else 1)'
 then
   die "бот не готов к публичному каталогу: проверить CATALOG_MODE, AGENT_COLLECTOR_ENABLED и BROKER_PROJECT_KEY" 40
 fi

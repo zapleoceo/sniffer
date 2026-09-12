@@ -16,11 +16,19 @@ import structlog
 
 from sniffer.domain.fingerprint import fingerprint
 from sniffer.domain.records import Chat, RawMessage
-from sniffer.sources.telegram_discover_reference import MessageLike
+from sniffer.sources.telegram_discover_reference import MAX_TRACKED_CHATS, MessageLike
 
 log = structlog.get_logger(__name__)
 
-HISTORY_CHATS_PER_TICK = 10
+# За проход читаются ВСЕ отслеживаемые чаты, а не первая десятка по рангу.
+# Десятка — потолок живого поиска (architecture.md, раздел 10), и сюда она
+# попала по ошибке: замер 12.09.2026 — из 50 чатов реестра, в которые аккаунт
+# вступил, сырьё приходило из 10, остальные 40 не читались ни разу, потому что
+# `list_active` каждый раз отдавал те же десять первых по рангу. Чтение с
+# курсором — один запрос истории на чат, к лимитам вступлений отношения не
+# имеет, и число здесь то же, что у потолка реестра: чат, который мы держим,
+# мы обязаны и читать.
+HISTORY_CHATS_PER_TICK = MAX_TRACKED_CHATS
 HISTORY_MESSAGES_PER_CHAT = 200
 
 
@@ -51,11 +59,7 @@ class HistorySyncer:
         inserted = 0
         for chat in await self.store.active_chats(limit=HISTORY_CHATS_PER_TICK):
             try:
-                messages = await self.reader.history(
-                    chat.username or chat.tg_id,
-                    limit=HISTORY_MESSAGES_PER_CHAT,
-                    min_id=chat.last_msg_id,
-                )
+                messages = await self._read(chat)
                 cursor = max((message.id for message in messages), default=chat.last_msg_id)
                 inserted += await self.store.store(chat, to_raw(chat, messages), cursor)
                 discovered = await self.discover(messages, chat.username or str(chat.tg_id))
@@ -75,6 +79,33 @@ class HistorySyncer:
                     error=f"{type(exc).__name__}: {exc}",
                 )
         return inserted
+
+    async def _read(self, chat: Chat) -> Sequence[MessageLike]:
+        """История чата: по имени, а если имя протухло — по tg_id.
+
+        Чат переименовывают, и реестр об этом не узнаёт: живой отказ
+        12.09.2026 — `arenda_nychang` отвечал «No user has … as username» на
+        каждом проходе, хотя аккаунт в чате состоит и по tg_id читает его
+        свободно. Имя — удобство для ссылки, идентичность чата — число.
+        """
+        if not chat.username:
+            return await self.reader.history(
+                chat.tg_id, limit=HISTORY_MESSAGES_PER_CHAT, min_id=chat.last_msg_id
+            )
+        try:
+            return await self.reader.history(
+                chat.username, limit=HISTORY_MESSAGES_PER_CHAT, min_id=chat.last_msg_id
+            )
+        except Exception as exc:
+            log.info(
+                "collector.username_stale",
+                chat=chat.tg_id,
+                username=chat.username,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return await self.reader.history(
+                chat.tg_id, limit=HISTORY_MESSAGES_PER_CHAT, min_id=chat.last_msg_id
+            )
 
 
 def to_raw(chat: Chat, messages: Sequence[MessageLike]) -> list[RawMessage]:

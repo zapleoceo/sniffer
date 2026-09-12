@@ -21,13 +21,13 @@ from sniffer.db.repositories.chats import ChatRepository
 from sniffer.db.repositories.listings import ListingRepository
 from sniffer.db.repositories.raw_messages import RawMessageRepository
 from sniffer.domain.fingerprint import fingerprint
-from sniffer.domain.passport import Intent
 from sniffer.domain.records import RawMessage
 from sniffer.pipeline.archive import (
     STAGE_DUPLICATE,
     STAGE_EXTRACTED,
     STAGE_REJECTED,
     classify,
+    deal_type_for,
     listing_from,
 )
 from sniffer.search import vocabulary
@@ -109,17 +109,14 @@ class ArchivePipeline:
             return 1
 
         parsed = parse_query(raw.text, default_city=chat.city)
-        deal_type = (
-            parsed.intent.value
-            if parsed.intent in {Intent.SELL, Intent.RENT_OUT}
-            else Intent.SELL.value
-        )
         await ListingRepository(session).add(
             listing_from(
                 raw,
                 chat,
                 result,
-                deal_type=deal_type,
+                # Глагол сделки из текста, иначе умолчание категории: жильё
+                # сдают, технику продают (`pipeline.archive.deal_type_for`).
+                deal_type=deal_type_for(parsed.intent, result.categories[0]),
                 attributes=dict(parsed.attributes),
                 # Город из текста лота. `parse_query` уже получил его выше с
                 # городом чата по умолчанию — оставалось только донести до

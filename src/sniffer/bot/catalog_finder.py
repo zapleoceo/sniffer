@@ -8,6 +8,7 @@ from typing import Protocol
 
 import structlog
 
+from sniffer.bot.catalog_search import find_catalog
 from sniffer.bot.conversation import Finder, Found, find_live
 from sniffer.bot.store import Dialogue
 from sniffer.config import Settings, get_settings
@@ -45,10 +46,12 @@ class CatalogFinder:
         *,
         legacy: Finder = find_live,
         catalog: CatalogSearch = _catalog,
+        listings: Finder = find_catalog,
         settings: Callable[[], Settings] = get_settings,
     ) -> None:
         self._legacy = legacy
         self._catalog = catalog
+        self._listings = listings
         self._settings = settings
 
     async def __call__(self, dialogue: Dialogue) -> Found:
@@ -57,6 +60,11 @@ class CatalogFinder:
             raise ValueError("invalid_request_scope")
         settings = self._settings()
         mode = settings.catalog_mode
+        if mode == "listings":
+            # Собственный каталог: SQL по `listings` без модели, без обхода
+            # источников и без очереди сбора. Паспорт берётся из загруженного
+            # `Dialogue` — та же серверная идентичность, что и у других путей.
+            return await self._listings(current.passport)
         enabled = mode == "catalog" or (
             mode == "pilot" and dialogue.user_id in settings.catalog_pilot_user_ids
         )
