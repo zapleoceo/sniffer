@@ -94,10 +94,13 @@ services:
     <<: *app
     container_name: sniffer-bot
     command: python -m sniffer.bot
-    # The bot both reads the verified catalogue and creates collection tasks
-    # when coverage is missing, so both switches belong to this process.
+    # Ответ — из собственного каталога `listings` (bot/catalog_search.py): базу
+    # непрерывно наполняют MTProto-коллектор, воркер и обход Chotot, а клиент
+    # получает карточки SQL-запросом без модели и без обхода источников
+    # (владелец, 12.09.2026). Проверенный каталог агента (`catalog`) остаётся
+    # режимом на выбор, но публичный путь на нём больше не держится.
     environment:
-      CATALOG_MODE: catalog
+      CATALOG_MODE: listings
       AGENT_COLLECTOR_ENABLED: "true"
     mem_limit: ${SNIFFER_MEM_BOT:-256m}
 

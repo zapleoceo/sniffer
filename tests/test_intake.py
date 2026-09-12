@@ -675,3 +675,11 @@ def test_not_a_scooter_is_not_parsed_as_a_scooter() -> None:
     s = parse_query("нужен скутер", default_city=CITY)
     assert s.attributes.get("body_type") == "tay_ga"
     assert s.attributes.get("transmission") == "automatic"
+
+
+def test_an_offer_written_as_sdaetsya_is_a_rent_out_intent() -> None:
+    """«Сдаётся» пишут объявления, не клиенты; конвейер архива берёт сторону
+    сделки из этого же разбора, и без формы на «-ётся» половина офферов жилья
+    оставалась без глагола."""
+    assert parse_query("сдаётся студия у моря 8 млн", default_city=CITY).intent is Intent.RENT_OUT
+    assert parse_query("сдается комната в центре", default_city=CITY).intent is Intent.RENT_OUT

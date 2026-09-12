@@ -73,11 +73,20 @@ class Settings(BaseSettings):
     # но число правится конфигом, а не правкой кода: платный тариф отличается
     # от бесплатного значением, а не веткой в рендере.
     max_cards: int = 5
-    catalog_mode: Literal["legacy", "shadow", "pilot", "catalog"] = "legacy"
+    # `listings` — ответ из собственного каталога (`bot/catalog_search.py`):
+    # детерминированный SQL по `listings`, без модели и без обхода источников.
+    # `catalog` — проверенный каталог агента (`agent_app`), `legacy` — живой
+    # поиск по источникам (docs/catalog-dialogue.md).
+    catalog_mode: Literal["legacy", "shadow", "pilot", "catalog", "listings"] = "legacy"
     # Internal users.id, NOT Telegram IDs. Empty pilot list enables nobody.
     catalog_pilot_user_ids: tuple[int, ...] = ()
     agent_collector_enabled: bool = False
     agent_collector_interval_s: int = Field(default=3600, ge=3600, le=86400)
+    # Периодический обход доски Chotot в общий каталог `listings`
+    # (`worker/chotot_sync.py`): доска событий не шлёт, свежее там появляется
+    # только по опросу. Не чаще раза в пять минут — мы гости на
+    # недокументированном API.
+    chotot_sync_interval_s: int = Field(default=1800, ge=300, le=86400)
     live_search_max_chats: int = 10
     live_search_cache_ttl_s: int = 300
     # Архив нужен, чтобы догонять объявления, пришедшие до вступления в чат.

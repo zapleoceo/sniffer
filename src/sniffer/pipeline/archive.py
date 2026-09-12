@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from sniffer.domain.passport import Intent
+from sniffer.domain.passport import Category, Intent, default_deal_type
 from sniffer.domain.prices import price_hint
 from sniffer.domain.records import Chat, Listing, RawMessage
 from sniffer.pipeline.gate import CategoryDetector, GateResult, gate
@@ -24,17 +24,23 @@ STAGE_REJECTED = "rejected"
 STAGE_DUPLICATE = "duplicate"
 
 
-def offer_deal_type(intent: Intent | None) -> str:
-    """Convert customer-side intent into the direction of an offer card.
+def offer_deal_type(intent: Intent | None, category: Category | None = None) -> str:
+    """Сторона объявления: глагол сделки, если он есть, иначе умолчание категории.
 
-    ``rent`` describes a customer looking to rent, but in an advertisement
-    that passed the offer gate the same vocabulary means that the owner rents
-    the item out.  Treating it as an unknown intent used to turn bare headings
-    such as ``АРЕНДА БАЙКОВ`` into sale cards.
+    Глагол аренды в тексте ОБЪЯВЛЕНИЯ, прошедшего гейт предложения, означает,
+    что владелец сдаёт: клиентское «аренда» и «сдам» здесь одно и то же. Без
+    этого голые заголовки вроде «АРЕНДА БАЙКОВ» становились карточками продажи.
+
+    Без глагола решает категория (`domain.passport.default_deal_type`): жильё в
+    Нячанге сдают, технику продают. Пока умолчанием для всего была продажа, 2707
+    из 3714 карточек жилья за 28 дней (замер 12.09.2026) числились продажей при
+    тексте про аренду, и арендатор по стороне сделки не находил ничего.
     """
     if intent in {Intent.RENT, Intent.RENT_OUT}:
         return Intent.RENT_OUT.value
-    return Intent.SELL.value
+    if intent is Intent.SELL:
+        return Intent.SELL.value
+    return default_deal_type(category)
 
 
 def classify(raw: RawMessage, *, category_hints: CategoryDetector | None = None) -> GateResult:
@@ -88,7 +94,12 @@ def listing_from(
         seller_id=raw.seller_id,
         price_amount=Decimal(price_vnd) if price_vnd is not None else None,
         price_currency="VND" if price_vnd is not None else None,
-        price_period="once" if price_vnd is not None else None,
+        # Период цены следует за стороной сделки: сдают помесячно, продают
+        # разово. Раньше «13 млн» у сдаваемой квартиры значились разовой
+        # ценой, и помесячный бюджет арендатора сравнивать было не с чем.
+        price_period=(
+            ("month" if deal_type == "rent_out" else "once") if price_vnd is not None else None
+        ),
         attributes=dict(attributes or {}),
         confidence=0.55 if price_raw else 0.4,
         lang=None,
