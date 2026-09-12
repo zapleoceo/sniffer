@@ -39,13 +39,17 @@
   харнеса, см. `harness._play`.
 * `max_questions_before_results` почти везде стал 0 (категория читается из
   фразы) или 1 (когда предмет неизвестен и категория — единственный вопрос).
-* `city` в `expect` остаётся ТОЛЬКО там, где город назван в САМОМ запросе.
-  `default_city` подставляет Нячанг в бою (`search.intake.QueryIntake.parse`),
-  но харнес (`simulation/harness.py:_RulesIntake`) гоняет диалог через
-  `intake_rules.parse_query` БЕЗ `default_city` — этот путь не входит в
-  владение этого файла, расхождение с боем названо отдельно в отчёте задачи.
-  Практически: подставленный город здесь никогда не появляется, только
-  сказанный.
+* `city` в `expect` стоит у каждого сценария, чей паспорт вообще доходит до
+  поиска, — и у тех, где город НЕ назван словом: его подставляет `default_city`,
+  ровно как в бою. Харнес зовёт `parse_query` с тем же `default_city`, что
+  `search.intake.QueryIntake.parse` (`simulation/harness.py:_RulesIntake`), и
+  утверждать подставленный Нячанг здесь честно.
+
+  Факт этот несущий, а не косметический: пустой город в бою означает пустую
+  выдачу — `chat_directory.search_listings` без города возвращает ноль, потому
+  что искать по всем городам сразу бессмысленно. Убери `default_city`, и
+  search-first молча превратится в «ничего не нашлось» на каждом запросе без
+  названного города; сценарии обязаны краснеть на этом, а не пожимать плечами.
 * `budget.max`/`budget.currency` в `expect` остаются только там, где в тексте
   есть число — кнопка, которая раньше ставила сумму без слов клиента, исчезла
   вместе с вопросом.
@@ -78,6 +82,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         # своим полем, а коробка — следовать из неё: Lead всегда автомат, и
         # спрашивать про неё незачем (passport.md, «Марка и модель»).
         expect={
+            "city": "nha_trang",
             "category": "motorbike",
             "attributes.brand": "honda",
             "attributes.model": "lead",
@@ -96,6 +101,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         # правильно — иначе улучшение прошло бы незамеченным.
         steps=(Says("найди мне моцокил 200 кубиков"),),
         expect={
+            "city": "nha_trang",
             "attributes.engine_cc": 200,
             "category": "motorbike",
             "intent": "buy",
@@ -113,6 +119,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         title="квартиру снять до 10 млн",
         steps=(Says("квартиру снять до 10 млн"),),
         expect={
+            "city": "nha_trang",
             "category": "apartment",
             "intent": "rent",
             "budget.max": 10_000_000.0,
@@ -142,7 +149,12 @@ SCENARIOS: tuple[Scenario, ...] = (
         title="honda до 300 (марка без категории)",
         steps=(Says("honda до 300"),),
         expect_results=None,
-        expect={"attributes.brand": "honda", "budget.max": 300.0, "budget.currency": "USD"},
+        expect={
+            "city": "nha_trang",
+            "attributes.brand": "honda",
+            "budget.max": 300.0,
+            "budget.currency": "USD",
+        },
     ),
     Scenario(
         key="unserved_city",
@@ -157,6 +169,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         title="нужна квартира с мебелью на длительный срок",
         steps=(Says("нужна квартира с мебелью на длительный срок"),),
         expect={
+            "city": "nha_trang",
             "category": "apartment",
             "intent": "rent",
             "attributes.furnished": True,
@@ -170,6 +183,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         # бот предлагал под карточками кнопку «нужен автомат» — то есть
         # переспрашивал то, что клиент уже сказал.
         expect={
+            "city": "nha_trang",
             "category": "motorbike",
             "budget.max": 500.0,
             "budget.currency": "USD",
@@ -190,6 +204,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         # бюджета тоже нет — лот честно доезжает до выдачи, это поведение
         # search-first, а не повод держать сценарий в споре с каталогом.
         expect={
+            "city": "nha_trang",
             "category": "motorbike",
             "attributes.brand": "yamaha",
             "attributes.model": "exciter",
@@ -212,20 +227,25 @@ SCENARIOS: tuple[Scenario, ...] = (
             Says("ищу скутер в нячанге до 500 долларов"),
             Says("ладно, тогда квартиру в нячанге до 10 млн"),
         ),
-        expect={"category": "apartment", "budget.max": 10_000_000.0, "intent": "rent"},
+        expect={
+            "city": "nha_trang",
+            "category": "apartment",
+            "budget.max": 10_000_000.0,
+            "intent": "rent",
+        },
     ),
     Scenario(
         key="words_instead_of_button",
         title="ответ словами вместо кнопки",
         steps=(Says("привет"), Says("скутер")),
         max_questions_before_results=1,
-        expect={"category": "motorbike"},
+        expect={"city": "nha_trang", "category": "motorbike"},
     ),
     Scenario(
         key="pricey_after_results",
         title="«дорого» после выдачи",
         steps=(Says("скутер honda в нячанге до 500"), Reacts(Feedback.PRICEY)),
-        expect={"category": "motorbike", "budget.max": 350.0},
+        expect={"city": "nha_trang", "category": "motorbike", "budget.max": 350.0},
     ),
     Scenario(
         key="wrong_after_results",
@@ -238,7 +258,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         # по-прежнему упиралось в «Состояние», а не заново в бюджет, бюджет и
         # коробка названы в запросе явно.
         steps=(Says("ищу скутер в нячанге до 500 долларов"), Reacts(Feedback.WRONG)),
-        expect={"category": "motorbike"},
+        expect={"city": "nha_trang", "category": "motorbike"},
         expect_text="Состояние",
     ),
     Scenario(
@@ -247,7 +267,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         steps=(Says("до 400"),),
         max_questions_before_results=1,
         expect_results=None,
-        expect={"budget.max": 400.0, "budget.currency": "USD"},
+        expect={"city": "nha_trang", "budget.max": 400.0, "budget.currency": "USD"},
     ),
     Scenario(
         key="scooter_da_nang",
@@ -259,7 +279,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         key="room_cheap",
         title="сниму комнату недорого",
         steps=(Says("сниму комнату недорого"),),
-        expect={"category": "room", "intent": "rent"},
+        expect={"city": "nha_trang", "category": "room", "intent": "rent"},
     ),
     Scenario(
         key="english_scooter",
@@ -281,6 +301,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         # выводилась, бот спрашивал «что ищем?» у клиента, который уже ответил, —
         # это и есть та «тупизна», на которую жаловался владелец.
         expect={
+            "city": "nha_trang",
             "category": "motorbike",
             "budget.max": 400.0,
             # Русскоязычный Нячанг пишет марку кириллицей — «хонда», «вижн», —
@@ -297,7 +318,7 @@ SCENARIOS: tuple[Scenario, ...] = (
             Taps("motorbike"),
         ),
         max_questions_before_results=1,
-        expect={"category": "motorbike"},
+        expect={"city": "nha_trang", "category": "motorbike"},
     ),
     Scenario(
         key="vague_rental",
@@ -322,7 +343,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         # над карточками (`_result_header`, широкий запрос) — обе формы
         # допустимы, лишь бы категория и марка распознались.
         expect_results=None,
-        expect={"category": "motorbike", "attributes.brand": "honda"},
+        expect={"city": "nha_trang", "category": "motorbike", "attributes.brand": "honda"},
     ),
     Scenario(
         key="bare_engine",
@@ -332,13 +353,17 @@ SCENARIOS: tuple[Scenario, ...] = (
             Taps("motorbike"),
         ),
         max_questions_before_results=1,
-        expect={"category": "motorbike", "attributes.engine_cc": 125},
+        expect={"city": "nha_trang", "category": "motorbike", "attributes.engine_cc": 125},
     ),
     Scenario(
         key="broad_automatic_bike",
         title="байк или скутер — главное автомат",
         steps=(Says("байк или скутер — главное автомат"),),
-        expect={"category": "motorbike", "attributes.transmission": "automatic"},
+        expect={
+            "city": "nha_trang",
+            "category": "motorbike",
+            "attributes.transmission": "automatic",
+        },
     ),
     Scenario(
         key="plain_scooter_automatic_funnel",
@@ -350,6 +375,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         # неоткуда, и `expect` про них теперь молчит.
         steps=(Says("скутер автомат"),),
         expect={
+            "city": "nha_trang",
             "intent": "buy",
             "category": "motorbike",
             "attributes.transmission": "automatic",
@@ -383,7 +409,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         # чата нет, а живой отсев марку не читал (словарь фраз, где марок нет
         # вовсе). Ямаха в выдаче остаться ОБЯЗАНА, иначе лечение хуже болезни;
         # чужое — уйти. Мимо запроса судит `fit.py` правдой о лоте, не баллом.
-        expect={"category": "motorbike", "attributes.brand": "yamaha"},
+        expect={"city": "nha_trang", "category": "motorbike", "attributes.brand": "yamaha"},
     ),
     Scenario(
         key="automatic_not_manual",
@@ -393,6 +419,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         # Winner). Механика в чате дешёвая — проходит бюджет и обязана уйти
         # отсевом по коробке, а не отсеяться ценой, оставив ось непроверенной.
         expect={
+            "city": "nha_trang",
             "category": "motorbike",
             "attributes.transmission": "automatic",
             "budget.max": 700.0,
@@ -411,6 +438,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         # Заодно сторожит разбор атрибутов жилья: «студию» → rooms=1, «у моря» →
         # sea_view. Чужое число комнат (2 спальни) в выдаче студий — «мимо».
         expect={
+            "city": "nha_trang",
             "category": "apartment",
             "intent": "rent",
             "attributes.rooms": 1,
@@ -434,7 +462,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         # универсальный агент читал это как buy, и отсев проката выбрасывал ровно
         # те лоты, что нужны (passport.md, «Прокат — аренда»). Теперь intent=rent,
         # и прокатные лоты в выдаче ОСТАЮТСЯ — проверяет `test_rent_shows_rental`.
-        expect={"category": "motorbike", "intent": "rent"},
+        expect={"city": "nha_trang", "category": "motorbike", "intent": "rent"},
     ),
     Scenario(
         key="rent_scooter_daily",
@@ -451,7 +479,12 @@ SCENARIOS: tuple[Scenario, ...] = (
         steps=(Says("прокат мопеда посуточно"),),
         # «прокат» → rent, «посуточно» → период day (срок аренды — это период
         # цены, отдельного поля нет: passport.md, «Прокат — аренда»).
-        expect={"category": "motorbike", "intent": "rent", "budget.period": "day"},
+        expect={
+            "city": "nha_trang",
+            "category": "motorbike",
+            "intent": "rent",
+            "budget.period": "day",
+        },
     ),
     Scenario(
         key="buy_scooter_control",
@@ -471,7 +504,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         # нет, и кнопки, которая раньше его скипала, тоже больше нет: цену
         # прокатных лотов не знаем, и потолок отсёк бы их мимо сути — а так
         # взяться ему попросту неоткуда.
-        expect={"category": "motorbike", "intent": "buy"},
+        expect={"city": "nha_trang", "category": "motorbike", "intent": "buy"},
     ),
     Scenario(
         key="moto_cbr",
@@ -482,6 +515,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         # неё, категория — тоже. Скутер (чужая модель) в выдаче не появляется —
         # это сторожит отсев модели плюс мерка `off_target` («чужая модель»).
         expect={
+            "city": "nha_trang",
             "category": "motorbike",
             "attributes.brand": "honda",
             "attributes.model": "cbr",
@@ -496,6 +530,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         # клиент, искавший 300-кубовый мотоцикл, получал 50cc. Теперь z300 — модель
         # (kawasaki, механика), а число в имени бюджетом не читается.
         expect={
+            "city": "nha_trang",
             "category": "motorbike",
             "attributes.brand": "kawasaki",
             "attributes.model": "z",
@@ -511,6 +546,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         # только с якорем — по марке («yamaha mt») или по цифре («mt15»). Марка
         # yamaha и коробка manual следуют из модели.
         expect={
+            "city": "nha_trang",
             "category": "motorbike",
             "attributes.brand": "yamaha",
             "attributes.model": "mt",
@@ -527,6 +563,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         # терпим к выдаче и сторожит лишь разбор намерения и предмета.
         expect_results=None,
         expect={
+            "city": "nha_trang",
             "category": "motorbike",
             "intent": "sell",
             "attributes.brand": "honda",
@@ -543,6 +580,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         # (passport.md). rooms=2 жёсткое (студия отсекается); по мебели молчание
         # допустимо, но явно противоположное «без мебели» отсекается.
         expect={
+            "city": "nha_trang",
             "category": "apartment",
             "intent": "rent",
             "attributes.rooms": 2,
@@ -555,8 +593,8 @@ SCENARIOS: tuple[Scenario, ...] = (
         title="комнату недорого (без глагола сделки)",
         steps=(Says("комнату недорого"),),
         # «комнату» без «сниму»: намерение из глагола не следует, но жильё в Нячанге
-        # снимают — категория ROOM даёт intent=rent (`_RENTED_CATEGORIES`).
-        expect={"category": "room", "intent": "rent"},
+        # снимают — категория ROOM даёт intent=rent (`RENTED_CATEGORIES`).
+        expect={"city": "nha_trang", "category": "room", "intent": "rent"},
     ),
     Scenario(
         key="rent_house_long_term",
@@ -564,7 +602,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         steps=(Says("дом на длительный срок"),),
         # «дом» → HOUSE, «длительный срок» → период month. Дом снимают так же, как
         # квартиру: intent=rent из категории.
-        expect={"category": "house", "intent": "rent"},
+        expect={"city": "nha_trang", "category": "house", "intent": "rent"},
     ),
     Scenario(
         key="housing_any_15m",
@@ -574,6 +612,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         # названном предмете. Теперь «жильё» → APARTMENT (самый общий вид), а «до 15
         # млн» — бюджет в донгах (passport.md, «Прокат — аренда»).
         expect={
+            "city": "nha_trang",
             "category": "apartment",
             "intent": "rent",
             "budget.max": 15_000_000.0,
@@ -598,7 +637,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         # Живой отказ: «не скутер» разбиралось КАК скутер (body_type=tay_ga), и
         # клиент, просивший мотоцикл, получал скутеры. Теперь отрицание ставит
         # transmission=manual — автоматы (скутеры) отсекаются.
-        expect={"category": "motorbike", "attributes.transmission": "manual"},
+        expect={"city": "nha_trang", "category": "motorbike", "attributes.transmission": "manual"},
     ),
     Scenario(
         key="journal_bike_for_14_lyamov",
