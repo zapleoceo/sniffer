@@ -25,6 +25,7 @@ async def test_personas_use_owned_identity_and_never_over_question() -> None:
         "en_buy",
         "vi_buy",
         "rent_room",
+        "rent_bike",
         "housing_constraints",
         "sell_bike",
         "rent_out",
@@ -44,6 +45,7 @@ async def test_personas_use_owned_identity_and_never_over_question() -> None:
     calls = {run.scenario.key: run.calls[-1] for run in runs}
     assert calls["ru_buy"].scope.sources == ("chotot", "archive")
     assert calls["rent_room"].scope.sources == ("archive",)
+    assert calls["rent_bike"].scope.sources == ("archive",)
     assert calls["sell_bike"].scope.sources == ("archive",)
 
 
@@ -54,6 +56,7 @@ async def test_personas_use_owned_identity_and_never_over_question() -> None:
         ("en_buy", "sell", "dn-vision"),
         ("vi_buy", "sell", "nt-vision-budget"),
         ("rent_room", "rent_out", "dn-room"),
+        ("rent_bike", "rent_out", "nt-pcx-rental"),
         ("housing_constraints", "rent_out", "nt-apartment-two"),
         ("sell_bike", "wanted", "nt-wanted-vision"),
         ("rent_out", "wanted", "nt-wanted-apartment"),

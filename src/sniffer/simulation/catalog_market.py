@@ -93,6 +93,14 @@ CATALOG_LOTS: tuple[CatalogLot, ...] = (
         deal_type="sell",
     ),
     _lot(
+        "nt-pcx-rental",
+        "Honda PCX 125 for rent in Nha Trang",
+        3_000_000,
+        city="nha_trang",
+        category="motorbike",
+        deal_type="rent_out",
+    ),
+    _lot(
         "nt-apartment",
         "Furnished studio apartment for rent",
         9_000_000,
