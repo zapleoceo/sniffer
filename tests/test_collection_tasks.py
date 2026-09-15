@@ -9,12 +9,16 @@ import pytest
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from sniffer.db import models
 from sniffer.db.collection_models import CollectionAction, CollectionTask
+from sniffer.db.repositories import PassportRepository, UserRepository
 from sniffer.db.repositories.collection_tasks import (
+    CollectionRecipient,
     CollectionTaskRepository,
     LeaseLost,
     fingerprint,
 )
+from sniffer.domain.passport import Category, Intent, Passport
 
 SCOPE = {"city": "nha_trang", "category": "motorbike", "sources": ["chotot"]}
 
@@ -167,3 +171,29 @@ async def test_fail_retries_are_finite(db_session: AsyncSession) -> None:
     await repo.fail(lease.id, lease.token, "source_unavailable")
     assert (await repo.status_for(1, 1, 1))[0]["status"] == "failed"
     assert await repo.claim() is None
+
+
+async def test_deferred_reply_is_current_owned_and_exactly_once(db_session: AsyncSession) -> None:
+    user = await UserRepository(db_session).get_or_create(919191)
+    assert user.id is not None
+    passport = await PassportRepository(db_session).save_new(
+        user.id,
+        Passport(intent=Intent.RENT, category=Category.MOTORBIKE, city="nha_trang"),
+    )
+    repo = CollectionTaskRepository(db_session)
+    task = await repo.enqueue(
+        SCOPE,
+        user_id=user.id,
+        request_id=passport.root,
+        request_version=passport.version,
+        window_key="reply",
+    )
+    lease = await repo.claim()
+    assert lease is not None and lease.id == task
+    recipient = CollectionRecipient(user.id, passport.root, passport.version)
+
+    assert await repo.pending_recipients(task, lease.token) == [recipient]
+    assert await repo.queue_reply(task, lease.token, recipient, {"kind": "collection_result"})
+    assert not await repo.queue_reply(task, lease.token, recipient, {"kind": "collection_result"})
+    assert await repo.pending_recipients(task, lease.token) == []
+    assert len((await db_session.scalars(select(models.Outbox))).all()) == 1

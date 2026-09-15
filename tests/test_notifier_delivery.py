@@ -46,7 +46,9 @@ class FakeRepo:
 
 
 def message(identifier: int = 1, *, attempts: int = 0) -> OutboxMessage:
-    return OutboxMessage(id=identifier, user_id=42, payload=PAYLOAD, attempts=attempts)
+    return OutboxMessage(
+        id=identifier, user_id=7, recipient_id=42, payload=PAYLOAD, attempts=attempts
+    )
 
 
 async def deliver(repo: FakeRepo, send: object, monkeypatch: pytest.MonkeyPatch) -> int:
@@ -126,7 +128,7 @@ async def test_one_broken_message_does_not_stop_the_rest(
         if user_id == 0:
             raise ValueError("нельзя")
 
-    broken = OutboxMessage(id=1, user_id=0, payload=PAYLOAD)
+    broken = OutboxMessage(id=1, user_id=7, recipient_id=0, payload=PAYLOAD)
     repo = FakeRepo(pending=[broken, message(2)])
 
     assert await deliver(repo, send, monkeypatch) == 1
@@ -140,10 +142,16 @@ async def test_digest_cards_are_sent_as_one_message(monkeypatch: pytest.MonkeyPa
         seen.append(text)
 
     first = OutboxMessage(
-        id=1, user_id=42, payload={**PAYLOAD, "delivery_mode": "digest", "title": "First"}
+        id=1,
+        user_id=7,
+        recipient_id=42,
+        payload={**PAYLOAD, "delivery_mode": "digest", "title": "First"},
     )
     second = OutboxMessage(
-        id=2, user_id=42, payload={**PAYLOAD, "delivery_mode": "digest", "title": "Second"}
+        id=2,
+        user_id=7,
+        recipient_id=42,
+        payload={**PAYLOAD, "delivery_mode": "digest", "title": "Second"},
     )
     repo = FakeRepo(pending=[first, second])
 
@@ -171,3 +179,17 @@ def test_a_listing_without_a_price_says_so_plainly() -> None:
 
 def test_the_price_is_readable() -> None:
     assert "15 000 000 VND" in render(PAYLOAD)
+
+
+def test_collection_result_is_structured_and_escapes_every_field() -> None:
+    result = render(
+        {
+            "kind": "collection_result",
+            "intro": "Нашлось <одно>",
+            "items": [{**PAYLOAD, "title": "<Honda>", "price_display": "7 < 8 млн"}],
+        }
+    )
+
+    assert "Нашлось &lt;одно&gt;" in result
+    assert "<Honda>" not in result and "&lt;Honda&gt;" in result
+    assert "7 &lt; 8 млн" in result

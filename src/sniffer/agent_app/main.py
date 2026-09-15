@@ -29,6 +29,7 @@ log = structlog.get_logger(__name__)
 class CatalogAnswer:
     items: list[RawItem]
     status: str | None = None
+    deferred: bool = False
 
 
 async def search_request(
@@ -81,7 +82,7 @@ async def search_request(
                     "Не удалось проверить курс для бюджета в долларах. "
                     "Попробуйте позже или укажите бюджет в донгах."
                 )
-            return CatalogAnswer(items, status)
+            return CatalogAnswer(items, status, gateway.waiting)
     finally:
         if broker is not None:
             await broker.aclose()

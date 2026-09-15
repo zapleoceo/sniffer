@@ -111,6 +111,7 @@ class Found:
     sources: tuple[str, ...] = ()
     stages: dict[str, int] = field(default_factory=dict)
     status: str | None = None
+    deferred: bool = False
 
 
 class Recorder(Protocol):
@@ -576,6 +577,9 @@ class Conversation:
         if turn is not None:
             turn.found = found
         if not found.items:
+            if found.deferred:
+                await send(Reply(found.status or SEARCH_FAILED))
+                return
             # Пустая выдача — самый честный повод предложить слежение: искать
             # больше негде, а новое появится.
             await send(

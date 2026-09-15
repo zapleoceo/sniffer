@@ -887,6 +887,7 @@ async def test_the_same_listing_is_never_queued_twice(db_session: AsyncSession) 
     assert await repo.sent_since(sub_id, since=NOW) == 0
     assert await repo.used_since(sub_id, since=NOW) == 1
     (pending,) = await repo.take_pending()
+    assert pending.recipient_id == 555
     await repo.mark_sent(pending.id, now=NOW + timedelta(minutes=1))
     await db_session.commit()
     assert await repo.sent_since(sub_id, since=NOW) == 1
@@ -948,6 +949,7 @@ async def test_a_new_listing_reaches_the_subscriber_queue(
     repo = DeliveryRepository(db_session)
     (message,) = await repo.take_pending(now=NOW)
     assert message.user_id == user_id
+    assert message.recipient_id == 555
     assert message.payload["title"] == "Honda Vision 2021"
     assert await repo.sent_since(sub_id, since=NOW.replace(hour=0)) == 0
     assert await repo.used_since(sub_id, since=NOW.replace(hour=0)) == 1

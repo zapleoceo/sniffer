@@ -175,6 +175,10 @@ async def test_exact_catalogue_request_reaches_postgres_without_redundant_llm_an
             rows: list[dict[str, Any]] = self._gateway.rows
             return rows
 
+        @property
+        def waiting(self) -> bool:
+            return self._gateway.waiting
+
         async def call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
             result: dict[str, Any] = await self._gateway.call(name, arguments)
             gateway_trace.append((name, deepcopy(arguments), deepcopy(result)))

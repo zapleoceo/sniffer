@@ -85,6 +85,7 @@ def storage(monkeypatch: pytest.MonkeyPatch) -> Storage:
 
     monkeypatch.setattr(collector, "CollectionTaskRepository", lambda _: repo)
     monkeypatch.setattr(collector_gateway, "CollectionTaskRepository", lambda _: repo)
+    monkeypatch.setattr(collector, "queue_answers", AsyncMock(return_value=0))
     return repo, sessions, active
 
 
@@ -279,8 +280,30 @@ async def test_work_runs_outside_transaction_and_fenced_completion(storage: Stor
         return {"published": 1}
 
     assert await collector.Collector(sessions=sessions, work=work).tick() == 1
-    repo.complete.assert_awaited_once_with(11, "trusted", {"published": 1})
+    repo.complete.assert_awaited_once_with(11, "trusted", {"published": 1, "answers_queued": 0})
     repo.fail.assert_not_awaited()
+
+
+async def test_answer_is_queued_before_task_is_completed(storage: Storage) -> None:
+    repo, sessions, _ = storage
+    events: list[str] = []
+
+    async def work(_lease: CollectionLease) -> dict[str, int]:
+        events.append("collected")
+        return {"published": 1}
+
+    async def reply(_lease: CollectionLease) -> int:
+        events.append("answer_queued")
+        return 1
+
+    async def complete(*_args: object) -> None:
+        events.append("completed")
+
+    repo.complete.side_effect = complete
+    await collector.Collector(sessions=sessions, work=work, reply=reply).tick()
+
+    assert events == ["collected", "answer_queued", "completed"]
+    assert repo.complete.await_args.args[2]["answers_queued"] == 1
 
 
 @pytest.mark.parametrize("error", [RuntimeError("private"), BrokerCapError("cap")])

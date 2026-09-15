@@ -12,6 +12,7 @@ import structlog
 
 from sniffer.agent_app.collector_gateway import CollectorGateway, Sessions
 from sniffer.agent_app.extraction import extract
+from sniffer.agent_app.followup import queue_answers
 from sniffer.agent_app.mcp_server import connect
 from sniffer.agents.broker_model import BrokerModel
 from sniffer.agents.contracts import AgentError
@@ -31,6 +32,7 @@ from sniffer.runtime.service import Service, run_service, sleep_or_stop
 
 log = structlog.get_logger(__name__)
 Process = Callable[[CollectionLease], Awaitable[dict[str, int]]]
+Reply = Callable[[CollectionLease], Awaitable[int]]
 
 
 async def process(lease: CollectionLease) -> dict[str, int]:
@@ -89,8 +91,15 @@ async def process(lease: CollectionLease) -> dict[str, int]:
 
 
 class Collector:
-    def __init__(self, *, sessions: Sessions = session_scope, work: Process = process) -> None:
+    def __init__(
+        self,
+        *,
+        sessions: Sessions = session_scope,
+        work: Process = process,
+        reply: Reply | None = None,
+    ) -> None:
         self._sessions, self._work = sessions, work
+        self._reply = reply or queue_answers
         self._capped_until: datetime | None = None
 
     async def tick(self) -> int:
@@ -131,7 +140,9 @@ class Collector:
 
     async def _with_heartbeat(self, lease: CollectionLease) -> dict[str, int]:
         async def execute() -> dict[str, int]:
-            return await self._work(lease)
+            result = await self._work(lease)
+            result["answers_queued"] = await self._reply(lease)
+            return result
 
         async def heartbeat() -> None:
             while True:

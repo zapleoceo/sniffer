@@ -91,6 +91,7 @@ class MainGateway:
     def __init__(self, identity: MainIdentity, sessions: Sessions = session_scope) -> None:
         self.identity, self.sessions = identity, sessions
         self.rows: list[dict[str, Any]] = []
+        self.waiting = False
 
     async def call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if arguments or name not in {spec.name for spec in self.specs}:
@@ -160,6 +161,7 @@ class MainGateway:
                 (row for row in current if row["status"] in {"pending", "running"}), None
             )
             if pending:
+                self.waiting = True
                 state = "выполняется" if pending["status"] == "running" else "в очереди"
                 return f"Обновление №{pending['id']}: {state}."
             now = datetime.now(UTC)
@@ -171,8 +173,9 @@ class MainGateway:
                 window_key=now.strftime("%Y-%m-%dT%H"),
             )
             await session.commit()
+            self.waiting = True
             return (
                 f"Обновление каталога поставлено в очередь (№{task_id}). "
-                "Сборщик проверяет очередь раз в час. Повторите этот запрос после обновления; "
-                "запуск не гарантирует новых вариантов."
+                "Сборщик проверяет очередь раз в час. После проверки я сам пришлю "
+                "подходящие варианты или сообщу, что их пока нет."
             )

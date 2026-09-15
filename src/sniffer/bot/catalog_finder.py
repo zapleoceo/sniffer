@@ -23,6 +23,9 @@ class Answer(Protocol):
     @property
     def status(self) -> str | None: ...
 
+    @property
+    def deferred(self) -> bool: ...
+
 
 class CatalogSearch(Protocol):
     async def __call__(
@@ -87,4 +90,5 @@ class CatalogFinder:
             items=answer.items,
             sources=tuple(sorted({item.source for item in answer.items})),
             status=answer.status,
+            deferred=answer.deferred,
         )
