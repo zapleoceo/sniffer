@@ -10,6 +10,12 @@ from sqlalchemy import text
 
 from sniffer.db.repositories.base import Repository
 
+RENTAL_OFFER_PATTERN = (
+    r"аренд[[:alpha:]]*|(^|[^[:alpha:]])прокат(а|е|ом|у)?([^[:alpha:]]|$)|"
+    r"сдам|сдаю|сда[её]тся|"
+    r"for[[:space:]]+rent|renting|to[[:space:]]+let|cho[[:space:]]*thuê"
+)
+
 
 class CollectionSourceRepository(Repository):
     async def archive(self, scope: dict[str, Any], *, limit: int = 6) -> list[dict[str, Any]]:
@@ -43,22 +49,31 @@ class CollectionSourceRepository(Repository):
             "c.username ~ '^[A-Za-z0-9_]{5,32}$'",
             "r.text<>''",
             "r.posted_at>clock_timestamp()-interval '30 days'",
-            "l.category=:category",
-            "l.deal_type=:deal_type",
-            "l.is_active",
+            "r.stage IN ('extracted','duplicate')",
+            "(l.category=:category OR r.gate_signals @> CAST(:category_signal AS jsonb))",
         ]
         params: dict[str, Any] = {
             "city": city,
             "category": category,
             "deal_type": deal_type,
+            "category_signal": json.dumps({"categories": [category]}),
             "limit": limit,
         }
+        if deal_type == "rent_out":
+            clauses.append("(l.deal_type=:deal_type OR r.text ~* :rental_pattern)")
+            params["rental_pattern"] = RENTAL_OFFER_PATTERN
+        elif deal_type == "sell":
+            clauses.append("l.deal_type=:deal_type AND r.text !~* :rental_pattern")
+            params["rental_pattern"] = RENTAL_OFFER_PATTERN
+        else:
+            clauses.append("l.deal_type=:deal_type")
         for index, (key, value) in enumerate(attributes.items()):
             # Unknown legacy values remain candidates; each known value is checked
             # independently so a missing second attribute cannot reject the row.
             key_name, value_name = f"attribute_key_{index}", f"attribute_value_{index}"
             clauses.append(
-                f"(NOT l.attributes ? :{key_name} OR l.attributes @> CAST(:{value_name} AS jsonb))"
+                f"(l.id IS NULL OR NOT l.attributes ? :{key_name} "
+                f"OR l.attributes @> CAST(:{value_name} AS jsonb))"
             )
             params[key_name] = key
             params[value_name] = json.dumps({key: value}, ensure_ascii=False)
@@ -103,12 +118,22 @@ class CollectionSourceRepository(Repository):
         # Every clause is an application-owned literal above; customer values
         # remain bound parameters. Only the min/max operator is chosen locally.
         statement = f"""  # noqa: S608
-            SELECT r.chat_tg_id,r.msg_id,r.text,r.posted_at,r.ingested_at,c.username
-            FROM raw_messages r
-            JOIN chats c ON c.tg_id=r.chat_tg_id
-            JOIN listings l ON l.raw_message_id=r.id
-            WHERE {" AND ".join(clauses)}
-            ORDER BY r.posted_at DESC,r.id DESC LIMIT :limit
+            WITH candidates AS (
+                SELECT r.chat_tg_id,r.msg_id,r.text,r.posted_at,r.ingested_at,
+                       c.username,
+                       row_number() OVER (
+                           PARTITION BY r.text_hash
+                           ORDER BY r.posted_at DESC,r.id DESC
+                       ) AS duplicate_rank
+                FROM raw_messages r
+                JOIN chats c ON c.tg_id=r.chat_tg_id
+                LEFT JOIN listings l ON l.raw_message_id=r.id AND l.is_active
+                WHERE {" AND ".join(clauses)}
+            )
+            SELECT chat_tg_id,msg_id,text,posted_at,ingested_at,username
+            FROM candidates
+            WHERE duplicate_rank=1
+            ORDER BY posted_at DESC,msg_id DESC LIMIT :limit
         """
         result = await self._session.execute(text(statement), params)
         return [dict(row) for row in result.mappings()]

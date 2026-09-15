@@ -221,8 +221,10 @@ async def test_archive_query_is_narrowed_before_bounded_originals_are_read() -> 
     )
     statement, params = session.execute.await_args.args
     sql = str(statement)
-    assert "JOIN listings" in sql and "l.category=:category" in sql
+    assert "LEFT JOIN listings" in sql
+    assert "r.gate_signals @>" in sql and "r.text ~* :rental_pattern" in sql
     assert "l.attributes @>" in sql and "l.district = ANY" in sql
+    assert "PARTITION BY r.text_hash" in sql
     assert "r.text ILIKE :must_0" in sql and "r.text NOT ILIKE :break_0" in sql
     assert params["budget_max"] == 10_000_000
 
@@ -443,6 +445,40 @@ async def test_stage_is_source_indexed_fenced_and_rejects_bad_evidence_before_wr
     with pytest.raises(ValueError):
         await gateway.call("catalog_stage", {"index": 0, "extracted": FACTS})
     assert repo.stage.await_count == 1
+
+
+async def test_stage_keeps_opposite_deal_out_of_requested_catalog(
+    storage: Storage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, sessions, _ = storage
+    rental_lease = CollectionLease(
+        11,
+        "trusted",
+        {**LEASE.scope, "deal_type": "rent_out", "sources": ["archive"]},
+        1,
+        LEASE.deadline_at,
+    )
+    repo = SimpleNamespace(stage=AsyncMock(return_value=20), publish=AsyncMock())
+    monkeypatch.setattr(collector_gateway, "CatalogObservationRepository", lambda _: repo)
+    rental_source = Original(
+        "archive",
+        "-1001:1",
+        "https://t.me/bikes/1",
+        SOURCE.title,
+        SOURCE.text,
+        SOURCE.fetched_at,
+        SOURCE.posted_at,
+    )
+    gateway = CollectorGateway(
+        rental_lease, sessions=sessions, fetch=AsyncMock(return_value=[rental_source])
+    )
+    await gateway.call("sources_collect", {"source": "archive"})
+
+    result = await gateway.call("catalog_stage", {"index": 0, "extracted": FACTS})
+
+    assert result == {"observation_id": 20, "published": False}
+    repo.stage.assert_awaited_once()
+    repo.publish.assert_not_awaited()
 
 
 def test_collector_disabled_by_default_and_interval_cannot_be_aggressive() -> None:
