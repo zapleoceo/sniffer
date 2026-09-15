@@ -33,6 +33,7 @@ def inventory_page(view: data.Inventory) -> str:
     body = (
         "<main>"
         + _filling(view)
+        + _collection_deliveries(view)
         + _chats(view)
         + _queue(view)
         + _joins(view)
@@ -41,6 +42,47 @@ def inventory_page(view: data.Inventory) -> str:
         + "</main>"
     )
     return page("SnifferBot — база", body)
+
+
+def _collection_deliveries(view: data.Inventory) -> str:
+    rows = []
+    for state in view.collection_deliveries:
+        delivery = state.delivery_status or ("в очереди" if state.reply_queued_at else "не создан")
+        rows.append(
+            [
+                num(state.task_id),
+                cell(moment(state.created_at)),
+                cell(state.tg_user_id),
+                num(state.request_id),
+                cell(state.task_status, css="bad" if state.task_status == "failed" else ""),
+                cell(f"{state.attempts}/{state.max_attempts}"),
+                cell(state.error_code or "—", css="bad" if state.error_code else "mute"),
+                cell(delivery, css="good" if delivery == "sent" else "bad"),
+                cell(state.delivery_attempts if state.delivery_attempts is not None else "—"),
+                cell(moment(state.sent_at)),
+            ]
+        )
+    return (
+        "<section><h2>Ответы после сбора</h2>"
+        "<p class='mute'>Задание завершено только тогда, когда ответ создан; "
+        "доставка подтверждена статусом sent и временем отправки.</p>"
+        + table(
+            [
+                "задание",
+                "создано",
+                "telegram id",
+                "запрос",
+                "сбор",
+                "попыток",
+                "ошибка",
+                "доставка",
+                "повторов доставки",
+                "отправлен",
+            ],
+            rows,
+        )
+        + "</section>"
+    )
 
 
 def _filling(view: data.Inventory) -> str:

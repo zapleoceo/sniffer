@@ -193,7 +193,170 @@ async def test_deferred_reply_is_current_owned_and_exactly_once(db_session: Asyn
     recipient = CollectionRecipient(user.id, passport.root, passport.version)
 
     assert await repo.pending_recipients(task, lease.token) == [recipient]
-    assert await repo.queue_reply(task, lease.token, recipient, {"kind": "collection_result"})
-    assert not await repo.queue_reply(task, lease.token, recipient, {"kind": "collection_result"})
+    payload = {"kind": "collection_result", "collection_task_id": task}
+    assert await repo.queue_reply(task, lease.token, recipient, payload)
+    assert not await repo.queue_reply(task, lease.token, recipient, payload)
     assert await repo.pending_recipients(task, lease.token) == []
     assert len((await db_session.scalars(select(models.Outbox))).all()) == 1
+    delivery = (await repo.recent_deliveries())[0]
+    assert delivery.task_id == task
+    assert delivery.tg_user_id == 919191
+    assert delivery.delivery_status == "pending"
+
+
+async def test_late_subscriber_keeps_completed_task_runnable(db_session: AsyncSession) -> None:
+    first = await UserRepository(db_session).get_or_create(111001)
+    second = await UserRepository(db_session).get_or_create(111002)
+    assert first.id is not None and second.id is not None
+    first_passport = await PassportRepository(db_session).save_new(
+        first.id, Passport(intent=Intent.RENT, category=Category.MOTORBIKE, city="nha_trang")
+    )
+    second_passport = await PassportRepository(db_session).save_new(
+        second.id, Passport(intent=Intent.RENT, category=Category.MOTORBIKE, city="nha_trang")
+    )
+    repo = CollectionTaskRepository(db_session)
+    task = await repo.enqueue(
+        SCOPE,
+        user_id=first.id,
+        request_id=first_passport.root,
+        request_version=1,
+        window_key="late",
+    )
+    lease = await repo.claim()
+    assert lease is not None
+    first_recipient = CollectionRecipient(first.id, first_passport.root, 1)
+    assert await repo.queue_reply(
+        task,
+        lease.token,
+        first_recipient,
+        {"kind": "collection_result", "collection_task_id": task},
+    )
+
+    assert (
+        await repo.enqueue(
+            SCOPE,
+            user_id=second.id,
+            request_id=second_passport.root,
+            request_version=1,
+            window_key="late",
+        )
+        == task
+    )
+    await repo.complete(task, lease.token, {"answers_queued": 1})
+
+    state = (await repo.status_for(second.id, second_passport.root, 1))[0]
+    assert state["status"] == "pending"
+    next_lease = await repo.claim()
+    assert next_lease is not None and next_lease.id == task and next_lease.attempts == 1
+
+
+async def test_new_request_reopens_terminal_shared_task(db_session: AsyncSession) -> None:
+    first = await UserRepository(db_session).get_or_create(112001)
+    second = await UserRepository(db_session).get_or_create(112002)
+    assert first.id is not None and second.id is not None
+    first_passport = await PassportRepository(db_session).save_new(
+        first.id, Passport(intent=Intent.RENT, category=Category.MOTORBIKE, city="nha_trang")
+    )
+    second_passport = await PassportRepository(db_session).save_new(
+        second.id, Passport(intent=Intent.RENT, category=Category.MOTORBIKE, city="nha_trang")
+    )
+    repo = CollectionTaskRepository(db_session)
+    task = await repo.enqueue(
+        SCOPE,
+        user_id=first.id,
+        request_id=first_passport.root,
+        request_version=1,
+        window_key="reopen",
+    )
+    lease = await repo.claim()
+    assert lease is not None
+    await repo.queue_reply(
+        task,
+        lease.token,
+        CollectionRecipient(first.id, first_passport.root, 1),
+        {"kind": "collection_result", "collection_task_id": task},
+    )
+    await repo.complete(task, lease.token, {})
+    assert (await repo.status_for(first.id, first_passport.root, 1))[0]["status"] == "done"
+
+    reopened = await repo.enqueue(
+        SCOPE,
+        user_id=second.id,
+        request_id=second_passport.root,
+        request_version=1,
+        window_key="reopen",
+    )
+    assert reopened == task
+    assert (await repo.status_for(second.id, second_passport.root, 1))[0]["status"] == "pending"
+
+
+async def test_exhausted_task_cannot_fail_while_current_reply_is_missing(
+    db_session: AsyncSession,
+) -> None:
+    user = await UserRepository(db_session).get_or_create(113001)
+    assert user.id is not None
+    passport = await PassportRepository(db_session).save_new(
+        user.id, Passport(intent=Intent.RENT, category=Category.MOTORBIKE, city="nha_trang")
+    )
+    repo = CollectionTaskRepository(db_session)
+    await repo.enqueue(
+        SCOPE,
+        user_id=user.id,
+        request_id=passport.root,
+        request_version=1,
+        window_key="unanswered",
+        max_attempts=1,
+    )
+    lease = await repo.claim()
+    assert lease is not None
+    await repo.fail(lease.id, lease.token, "source_unavailable", retry_seconds=1)
+
+    state = (await repo.status_for(user.id, passport.root, 1))[0]
+    assert state["status"] == "pending" and state["attempts"] == 0
+
+
+async def test_reply_only_recovery_does_not_repeat_or_consume_collection_attempt(
+    db_session: AsyncSession,
+) -> None:
+    user = await UserRepository(db_session).get_or_create(114001)
+    assert user.id is not None
+    passport = await PassportRepository(db_session).save_new(
+        user.id, Passport(intent=Intent.RENT, category=Category.MOTORBIKE, city="nha_trang")
+    )
+    repo = CollectionTaskRepository(db_session)
+    task = await repo.enqueue(
+        SCOPE,
+        user_id=user.id,
+        request_id=passport.root,
+        request_version=1,
+        window_key="reply-only",
+        max_attempts=1,
+    )
+    lease = await repo.claim()
+    assert lease is not None and lease.attempts == 1
+    await repo.fail(
+        task,
+        lease.token,
+        "reply_failed_budget_cap",
+        retry_seconds=1,
+    )
+    await db_session.execute(
+        update(CollectionTask)
+        .where(CollectionTask.id == task)
+        .values(run_after=datetime.now(UTC) - timedelta(seconds=1))
+    )
+
+    reply_lease = await repo.claim_reply()
+    assert reply_lease is not None
+    assert reply_lease.id == task and reply_lease.attempts == 1
+    assert reply_lease.error_code == "reply_failed_budget_cap"
+    recipient = CollectionRecipient(user.id, passport.root, 1)
+    assert await repo.queue_reply(
+        task,
+        reply_lease.token,
+        recipient,
+        {"kind": "collection_result", "collection_task_id": task},
+    )
+    await repo.release_after_reply(task, reply_lease.token, "budget_cap", retry_seconds=1)
+    state = (await repo.status_for(user.id, passport.root, 1))[0]
+    assert state["status"] == "failed" and state["attempts"] == 1

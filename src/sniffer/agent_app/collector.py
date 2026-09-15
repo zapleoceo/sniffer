@@ -12,7 +12,7 @@ import structlog
 
 from sniffer.agent_app.collector_gateway import CollectorGateway, Sessions
 from sniffer.agent_app.extraction import extract
-from sniffer.agent_app.followup import queue_answers
+from sniffer.agent_app.followup import queue_answers, queue_cap_answers, queue_failure_answers
 from sniffer.agent_app.mcp_server import connect
 from sniffer.agents.broker_model import BrokerModel
 from sniffer.agents.contracts import AgentError
@@ -97,21 +97,29 @@ class Collector:
         sessions: Sessions = session_scope,
         work: Process = process,
         reply: Reply | None = None,
+        failure_reply: Reply | None = None,
+        cap_reply: Reply | None = None,
     ) -> None:
         self._sessions, self._work = sessions, work
         self._reply = reply or queue_answers
+        self._failure_reply = failure_reply or queue_failure_answers
+        self._cap_reply = cap_reply or queue_cap_answers
         self._capped_until: datetime | None = None
 
     async def tick(self) -> int:
-        if self._capped_until is not None and datetime.now(UTC) < self._capped_until:
-            return 0
+        capped = self._capped_until is not None and datetime.now(UTC) < self._capped_until
         async with self._sessions() as session:
-            lease = await CollectionTaskRepository(session).claim(
-                lease_seconds=90, max_run_seconds=180
-            )
+            repo = CollectionTaskRepository(session)
+            lease = await repo.claim_reply(lease_seconds=90, max_run_seconds=180)
+            reply_only = lease is not None
+            if lease is None and not capped:
+                lease = await repo.claim(lease_seconds=90, max_run_seconds=180)
             await session.commit()
         if lease is None:
             return 0
+        if reply_only:
+            await self.retry_failure_reply(lease)
+            return 1
         try:
             async with asyncio.timeout(180):
                 result = await self._with_heartbeat(lease)
@@ -122,21 +130,67 @@ class Collector:
             # Shutdown never finishes an unknown outcome. Lease recovery owns retry.
             raise
         except Exception as exc:
-            delay = _cap_delay() if _has_cap(exc) else 3600
+            try:
+                async with asyncio.timeout(70):
+                    reply = self._cap_reply if _has_cap(exc) else self._failure_reply
+                    await reply(lease)
+            except Exception as reply_exc:
+                log.exception(
+                    "collector.failure_reply_failed",
+                    task_id=lease.id,
+                    kind=type(reply_exc).__name__,
+                )
+                error_code = (
+                    "reply_failed_budget_cap" if _has_cap(exc) else "reply_failed_collection_failed"
+                )
+                delay = 300
+            else:
+                error_code = "budget_cap" if _has_cap(exc) else "collection_failed"
+                delay = _cap_delay() if _has_cap(exc) else 3600
             if _has_cap(exc):
-                self._capped_until = datetime.now(UTC) + timedelta(seconds=delay)
+                self._capped_until = datetime.now(UTC) + timedelta(seconds=_cap_delay())
             async with self._sessions() as session:
                 try:
                     await CollectionTaskRepository(session).fail(
                         lease.id,
                         lease.token,
-                        "budget_cap" if _has_cap(exc) else "collection_failed",
+                        error_code,
                         retry_seconds=delay,
                     )
                     await session.commit()
                 except LeaseLost:
                     log.info("collector.lease_lost", task_id=lease.id)
         return 1
+
+    async def retry_failure_reply(self, lease: CollectionLease) -> None:
+        error_code = lease.error_code or "reply_failed_collection_failed"
+        original_error = "budget_cap" if error_code.endswith("budget_cap") else "collection_failed"
+        try:
+            async with asyncio.timeout(70):
+                reply = self._cap_reply if original_error == "budget_cap" else self._failure_reply
+                await reply(lease)
+        except Exception as exc:
+            log.exception(
+                "collector.failure_reply_failed", task_id=lease.id, kind=type(exc).__name__
+            )
+            async with self._sessions() as session:
+                try:
+                    await CollectionTaskRepository(session).fail(
+                        lease.id, lease.token, error_code, retry_seconds=300
+                    )
+                    await session.commit()
+                except LeaseLost:
+                    log.info("collector.lease_lost", task_id=lease.id)
+            return
+        delay = _cap_delay() if original_error == "budget_cap" else 3600
+        async with self._sessions() as session:
+            try:
+                await CollectionTaskRepository(session).release_after_reply(
+                    lease.id, lease.token, original_error, retry_seconds=delay
+                )
+                await session.commit()
+            except LeaseLost:
+                log.info("collector.lease_lost", task_id=lease.id)
 
     async def _with_heartbeat(self, lease: CollectionLease) -> dict[str, int]:
         async def execute() -> dict[str, int]:
