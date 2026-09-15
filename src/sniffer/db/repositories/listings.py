@@ -211,7 +211,5 @@ class ListingRepository(Repository):
 
     async def deactivate(self, listing_id: int) -> None:
         await self._session.execute(
-            update(models.Listing)
-            .where(models.Listing.id == listing_id)
-            .values(is_active=False)
+            update(models.Listing).where(models.Listing.id == listing_id).values(is_active=False)
         )
