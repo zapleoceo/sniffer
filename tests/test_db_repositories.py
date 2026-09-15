@@ -31,6 +31,7 @@ from sniffer.db.repositories import (
     RejectRepository,
     UserRepository,
 )
+from sniffer.db.repositories.collection_sources import CollectionSourceRepository
 from sniffer.db.repositories.delivery import DeliveryRepository
 from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
 from sniffer.domain.records import Chat, DiscoveryCandidate, Listing, Payment, RawMessage
@@ -807,6 +808,148 @@ async def test_the_stage_pass_can_refresh_a_stale_fingerprint(db_session: AsyncS
     stored = await repo.get_by_key(-100123, 1)
     assert stored is not None
     assert (stored.stage, stored.text_hash) == ("extracted", "свежий-отпечаток")
+
+
+async def test_a_fresh_rental_repost_replaces_a_misclassified_sale(
+    db_session: AsyncSession,
+) -> None:
+    """A duplicate must repair old facts instead of preserving a known lie."""
+    from sniffer.domain.fingerprint import fingerprint
+    from sniffer.worker.archive import ArchivePipeline
+
+    chat = Chat(tg_id=-100123, title="Байки", city="nha_trang", username="bikes")
+    await ChatRepository(db_session).add(chat)
+    text = "D1 MOTO — АРЕНДА БАЙКОВ в Нячанге, цена от 100.000 VND в день"
+    old_id, fresh_id = await RawMessageRepository(db_session).add_many(
+        [
+            RawMessage(
+                chat_tg_id=chat.tg_id,
+                msg_id=1,
+                text=text,
+                text_hash=fingerprint(text),
+                posted_at=NOW,
+            ),
+            RawMessage(
+                chat_tg_id=chat.tg_id,
+                msg_id=2,
+                text=text,
+                text_hash="legacy-byte-hash",
+                posted_at=NOW + timedelta(days=1),
+            ),
+        ]
+    )
+    old = await ListingRepository(db_session).add(
+        Listing(
+            raw_message_id=old_id,
+            deal_type="sell",
+            category="motorbike",
+            city="nha_trang",
+            title="D1 MOTO",
+            summary=text,
+            tg_link="https://t.me/bikes/1",
+            posted_at=NOW,
+        )
+    )
+    await db_session.commit()
+    fresh = await RawMessageRepository(db_session).get_by_key(chat.tg_id, 2)
+    assert fresh is not None
+
+    assert await ArchivePipeline()._one(fresh, db_session) == 1
+    await db_session.commit()
+
+    stale = await ListingRepository(db_session).get(old.id or 0)
+    repaired = await ListingRepository(db_session).get_by_raw_message(fresh_id)
+    stored_raw = await RawMessageRepository(db_session).get_by_key(chat.tg_id, 2)
+    assert stale is not None and stale.is_active is False
+    assert repaired is not None and repaired.deal_type == "rent_out"
+    assert repaired.tg_link == "https://t.me/bikes/2"
+    assert stored_raw is not None and stored_raw.stage == "extracted"
+
+
+async def test_archive_source_recovers_rental_hidden_behind_a_sale_card(
+    db_session: AsyncSession,
+) -> None:
+    """The repair path must work before another Telegram repost arrives."""
+    chat = Chat(tg_id=-100123, title="Байки", city="nha_trang", username="bikes_nha")
+    await ChatRepository(db_session).add(chat)
+    text = "АРЕНДА БАЙКОВ в Нячанге, Honda PCX от 150.000 VND в день"
+    raw_id, sale_id = await RawMessageRepository(db_session).add_many(
+        [
+            RawMessage(
+                chat_tg_id=chat.tg_id,
+                msg_id=7,
+                text=text,
+                text_hash="rental-fingerprint",
+                posted_at=NOW,
+            ),
+            RawMessage(
+                chat_tg_id=chat.tg_id,
+                msg_id=8,
+                text="Продам Honda PCX, отличный способ прокатиться по Нячангу, 20 млн VND",
+                text_hash="sale-fingerprint",
+                posted_at=NOW + timedelta(hours=1),
+            ),
+        ]
+    )
+    await RawMessageRepository(db_session).set_stage(
+        [raw_id],
+        "duplicate",
+        gate_signals={
+            "has_price": True,
+            "is_offer": True,
+            "is_demand": False,
+            "categories": ["motorbike"],
+            "reason": "ok",
+        },
+    )
+    await RawMessageRepository(db_session).set_stage(
+        [sale_id],
+        "extracted",
+        gate_signals={
+            "has_price": True,
+            "is_offer": True,
+            "is_demand": False,
+            "categories": ["motorbike"],
+            "reason": "ok",
+        },
+    )
+    await ListingRepository(db_session).add(
+        Listing(
+            raw_message_id=raw_id,
+            deal_type="sell",
+            category="motorbike",
+            city="nha_trang",
+            title="АРЕНДА БАЙКОВ",
+            summary=text,
+            tg_link="https://t.me/bikes_nha/7",
+            posted_at=NOW,
+        )
+    )
+    await ListingRepository(db_session).add(
+        Listing(
+            raw_message_id=sale_id,
+            deal_type="sell",
+            category="motorbike",
+            city="nha_trang",
+            title="Продам Honda PCX",
+            summary="Отличный способ прокатиться по Нячангу",
+            tg_link="https://t.me/bikes_nha/8",
+            posted_at=NOW + timedelta(hours=1),
+        )
+    )
+    await db_session.commit()
+
+    rows = await CollectionSourceRepository(db_session).archive(
+        {
+            "city": "nha_trang",
+            "category": "motorbike",
+            "deal_type": "rent_out",
+            "criteria": {"key": "a" * 64},
+        },
+        limit=6,
+    )
+
+    assert [row["msg_id"] for row in rows] == [7]
 
 
 # ── подписки и доставка ─────────────────────────────────────────────────────

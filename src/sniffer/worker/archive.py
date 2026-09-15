@@ -21,7 +21,6 @@ from sniffer.db.repositories.chats import ChatRepository
 from sniffer.db.repositories.listings import ListingRepository
 from sniffer.db.repositories.raw_messages import RawMessageRepository
 from sniffer.domain.fingerprint import fingerprint
-from sniffer.domain.passport import Intent
 from sniffer.domain.records import RawMessage
 from sniffer.pipeline.archive import (
     STAGE_DUPLICATE,
@@ -29,6 +28,7 @@ from sniffer.pipeline.archive import (
     STAGE_REJECTED,
     classify,
     listing_from,
+    offer_deal_type,
 )
 from sniffer.search import vocabulary
 from sniffer.search.intake_rules import parse_query
@@ -101,32 +101,42 @@ class ArchivePipeline:
         # Заодно освежаем его в базе.
         digest = fingerprint(raw.text)
         await repo.lock_fingerprint(digest)
-        if await repo.has_listing_for(digest, besides=raw.id):
-            # Кросспост: то же объявление уже стало карточкой из другой группы.
-            await repo.set_stage(
-                [raw.id], STAGE_DUPLICATE, gate_signals=result.as_signals(), text_hash=digest
-            )
-            return 1
-
         parsed = parse_query(raw.text, default_city=chat.city)
-        deal_type = (
-            parsed.intent.value
-            if parsed.intent in {Intent.SELL, Intent.RENT_OUT}
-            else Intent.SELL.value
+        candidate = listing_from(
+            raw,
+            chat,
+            result,
+            deal_type=offer_deal_type(parsed.intent),
+            attributes=dict(parsed.attributes),
+            # Город из текста лота. `parse_query` уже получил его выше с
+            # городом чата по умолчанию — оставалось только донести до
+            # карточки, а она брала город чата напрямую.
+            city=parsed.city or "",
         )
-        await ListingRepository(session).add(
-            listing_from(
-                raw,
-                chat,
-                result,
-                deal_type=deal_type,
-                attributes=dict(parsed.attributes),
-                # Город из текста лота. `parse_query` уже получил его выше с
-                # городом чата по умолчанию — оставалось только донести до
-                # карточки, а она брала город чата напрямую.
-                city=parsed.city or "",
-            )
-        )
+        listings = ListingRepository(session)
+        existing = await listings.get_by_fingerprint(digest, besides=raw.id)
+        if existing is not None:
+            assert existing.id is not None
+            identity_changed = (
+                existing.deal_type,
+                existing.category,
+                existing.city,
+            ) != (candidate.deal_type, candidate.category, candidate.city)
+            if identity_changed:
+                # A newly detected direction/category is a real correction, not
+                # another notification-free repost.  Give it a new cursor id so
+                # existing subscriptions can see the repaired offer.
+                await listings.deactivate(existing.id)
+                await listings.add(candidate)
+            elif raw.posted_at > existing.posted_at:
+                await listings.refresh(existing.id, candidate)
+            else:
+                await repo.set_stage(
+                    [raw.id], STAGE_DUPLICATE, gate_signals=result.as_signals(), text_hash=digest
+                )
+                return 1
+        else:
+            await listings.add(candidate)
         await repo.set_stage(
             [raw.id], STAGE_EXTRACTED, gate_signals=result.as_signals(), text_hash=digest
         )

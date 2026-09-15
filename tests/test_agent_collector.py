@@ -18,7 +18,7 @@ from sniffer.agent_app import collector, collector_gateway
 from sniffer.agent_app.collector_gateway import CollectorGateway, Sessions
 from sniffer.agent_app.contracts import CollectionScope
 from sniffer.agent_app.extraction import Original, extract, observation
-from sniffer.broker.client import BrokerCapError, BrokerResult
+from sniffer.broker.client import BrokerCapError
 from sniffer.config import Settings
 from sniffer.db.repositories.collection_sources import CollectionSourceRepository
 from sniffer.db.repositories.collection_tasks import CollectionLease, LeaseLost
@@ -221,8 +221,11 @@ async def test_archive_query_is_narrowed_before_bounded_originals_are_read() -> 
     )
     statement, params = session.execute.await_args.args
     sql = str(statement)
-    assert "JOIN listings" in sql and "l.category=:category" in sql
+    assert not sql.lstrip().startswith("#"), "Python lint comments are not SQL"
+    assert "LEFT JOIN listings" in sql
+    assert "r.gate_signals @>" in sql and "r.text ~* :rental_pattern" in sql
     assert "l.attributes @>" in sql and "l.district = ANY" in sql
+    assert "PARTITION BY r.text_hash" in sql
     assert "r.text ILIKE :must_0" in sql and "r.text NOT ILIKE :break_0" in sql
     assert params["budget_max"] == 10_000_000
 
@@ -445,6 +448,40 @@ async def test_stage_is_source_indexed_fenced_and_rejects_bad_evidence_before_wr
     assert repo.stage.await_count == 1
 
 
+async def test_stage_keeps_opposite_deal_out_of_requested_catalog(
+    storage: Storage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, sessions, _ = storage
+    rental_lease = CollectionLease(
+        11,
+        "trusted",
+        {**LEASE.scope, "deal_type": "rent_out", "sources": ["archive"]},
+        1,
+        LEASE.deadline_at,
+    )
+    repo = SimpleNamespace(stage=AsyncMock(return_value=20), publish=AsyncMock())
+    monkeypatch.setattr(collector_gateway, "CatalogObservationRepository", lambda _: repo)
+    rental_source = Original(
+        "archive",
+        "-1001:1",
+        "https://t.me/bikes/1",
+        SOURCE.title,
+        SOURCE.text,
+        SOURCE.fetched_at,
+        SOURCE.posted_at,
+    )
+    gateway = CollectorGateway(
+        rental_lease, sessions=sessions, fetch=AsyncMock(return_value=[rental_source])
+    )
+    await gateway.call("sources_collect", {"source": "archive"})
+
+    result = await gateway.call("catalog_stage", {"index": 0, "extracted": FACTS})
+
+    assert result == {"observation_id": 20, "published": False}
+    repo.stage.assert_awaited_once()
+    repo.publish.assert_not_awaited()
+
+
 def test_collector_disabled_by_default_and_interval_cannot_be_aggressive() -> None:
     assert "AGENT_COLLECTOR_ENABLED" in collector.missing_settings(Settings.model_construct())
     with pytest.raises(ValidationError):
@@ -502,9 +539,8 @@ async def test_deadline_cancels_work_and_records_finite_retry(
     assert repo.fail.await_args.kwargs["retry_seconds"] == 3600
 
 
-@pytest.mark.parametrize("tool_name", ["sources_collect", "catalog_stage"])
-async def test_real_mcp_collector_loop_and_model_write_tool_denial(
-    storage: Storage, monkeypatch: pytest.MonkeyPatch, tool_name: str
+async def test_real_mcp_collector_calls_known_source_without_model_tool_json(
+    storage: Storage, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _, sessions, _ = storage
     lease = CollectionLease(
@@ -522,36 +558,15 @@ async def test_real_mcp_collector_loop_and_model_write_tool_denial(
     monkeypatch.setattr(collector, "CatalogObservationRepository", lambda _: repo)
     monkeypatch.setattr(collector_gateway, "CatalogObservationRepository", lambda _: repo)
     broker = SimpleNamespace(
-        chat=AsyncMock(
-            side_effect=[
-                BrokerResult(
-                    text="",
-                    finish_reason="tool_calls",
-                    tool_calls=[
-                        {
-                            "id": "one",
-                            "type": "function",
-                            "function": {"name": tool_name, "arguments": '{"source":"chotot"}'},
-                        }
-                    ],
-                ),
-                BrokerResult(text="done", finish_reason="stop"),
-            ]
-        ),
         structured=AsyncMock(return_value=FACTS),
         aclose=AsyncMock(),
     )
     monkeypatch.setattr(collector, "BrokerClient", lambda **_: broker)
-    if tool_name == "catalog_stage":
-        with pytest.raises(BaseExceptionGroup):
-            await collector.process(lease)
-        fetch.assert_not_awaited()
-        repo.stage.assert_not_awaited()
-        broker.structured.assert_not_awaited()
-    else:
-        assert await collector.process(lease) == {"collected": 1, "published": 1}
-        assert broker.chat.await_count == 2 and broker.structured.await_count == 1
-        repo.stage.assert_awaited_once()
-        repo.publish.assert_awaited_once()
-        repo.record_coverage.assert_awaited_once_with(11, "trusted", "chotot", "success")
+
+    assert await collector.process(lease) == {"collected": 1, "published": 1}
+    fetch.assert_awaited_once()
+    broker.structured.assert_awaited_once()
+    repo.stage.assert_awaited_once()
+    repo.publish.assert_awaited_once()
+    repo.record_coverage.assert_awaited_once_with(11, "trusted", "chotot", "success")
     broker.aclose.assert_awaited_once()

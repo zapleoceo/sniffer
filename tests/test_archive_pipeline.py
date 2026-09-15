@@ -6,7 +6,7 @@ import pytest
 
 from sniffer.domain.prices import MAX_PLAUSIBLE_VND, price_hint
 from sniffer.domain.records import Chat, RawMessage
-from sniffer.pipeline.archive import STAGE_REJECTED, classify, listing_from
+from sniffer.pipeline.archive import STAGE_REJECTED, classify, listing_from, offer_deal_type
 from sniffer.search import vocabulary
 from sniffer.search.intake_rules import parse_query
 
@@ -58,6 +58,22 @@ def test_explicit_attributes_survive_the_archive_pipeline(chat: Chat) -> None:
     assert listing.attributes["brand"] == "honda"
     assert listing.attributes["model"] == "lead"
     assert listing.attributes["transmission"] == "automatic"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "АРЕНДА БАЙКОВ в Нячанге, большой выбор моделей",
+        "D1 MOTO — АРЕНДА БАЙКОВ на любой срок",
+        "Аренда доступных байков в центре Нячанга",
+        "Возьми мотоцикл у нас в аренду на месяц",
+        "Выбирай байки. Аренда на любой срок",
+    ],
+)
+def test_rental_offer_wording_never_becomes_a_sale(text: str) -> None:
+    parsed = parse_query(text, default_city="nha_trang")
+
+    assert offer_deal_type(parsed.intent) == "rent_out"
 
 
 @pytest.mark.parametrize(

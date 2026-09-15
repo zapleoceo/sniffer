@@ -218,6 +218,7 @@ class CollectorGateway:
             matches = (
                 observed.facts.city == self.scope.city
                 and observed.facts.category == self.scope.category
+                and observed.facts.deal_type == self.scope.deal_type
             )
             published = matches and await repo.publish(self.lease.id, self.lease.token, identifier)
             await session.commit()

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from sniffer.domain.passport import Intent
 from sniffer.domain.prices import price_hint
 from sniffer.domain.records import Chat, Listing, RawMessage
 from sniffer.pipeline.gate import CategoryDetector, GateResult, gate
@@ -21,6 +22,19 @@ STAGE_REJECTED = "rejected"
 # а не `rejected`: сообщение не мусор, просто карточка у него уже есть, и
 # разбираться в отклонённых потом придётся именно по этой разнице.
 STAGE_DUPLICATE = "duplicate"
+
+
+def offer_deal_type(intent: Intent | None) -> str:
+    """Convert customer-side intent into the direction of an offer card.
+
+    ``rent`` describes a customer looking to rent, but in an advertisement
+    that passed the offer gate the same vocabulary means that the owner rents
+    the item out.  Treating it as an unknown intent used to turn bare headings
+    such as ``АРЕНДА БАЙКОВ`` into sale cards.
+    """
+    if intent in {Intent.RENT, Intent.RENT_OUT}:
+        return Intent.RENT_OUT.value
+    return Intent.SELL.value
 
 
 def classify(raw: RawMessage, *, category_hints: CategoryDetector | None = None) -> GateResult:
