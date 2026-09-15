@@ -14,10 +14,6 @@ from sniffer.agent_app.collector_gateway import CollectorGateway, Sessions
 from sniffer.agent_app.extraction import extract
 from sniffer.agent_app.followup import queue_answers, queue_cap_answers, queue_failure_answers
 from sniffer.agent_app.mcp_server import connect
-from sniffer.agents.broker_model import BrokerModel
-from sniffer.agents.contracts import AgentError
-from sniffer.agents.mcp import McpReadTools
-from sniffer.agents.runtime import ReadAgent
 from sniffer.broker.client import BrokerCapError, BrokerClient
 from sniffer.broker.usage import default_usage_sink
 from sniffer.config import Settings, get_settings
@@ -40,26 +36,15 @@ async def process(lease: CollectionLease) -> dict[str, int]:
     broker = BrokerClient(usage=default_usage_sink)
     try:
         async with connect(gateway) as session:
-            read = McpReadTools(session, allowed_read_tools=frozenset({"sources_collect"}))
-            agent = ReadAgent(
-                BrokerModel(broker),
-                read,
-                gateway.read_specs,
-                allowed_read_tools=frozenset({"sources_collect"}),
-                max_calls=2,
-                max_turns=3,
-                deadline_s=60,
-            )
-            try:
-                await agent.run(
-                    "Collect each assigned source once: " + ", ".join(gateway.scope.sources)
-                )
-            except AgentError as exc:
-                # BrokerModel intentionally hides raw provider diagnostics; retain only
-                # the typed terminal cap classification for scheduling, never its text.
-                if str(exc) == "broker_cap":
-                    raise BrokerCapError("collector_cap") from None
-                raise
+            # The task already contains the complete server-owned source list.
+            # Asking a model to repeat it as JSON/tool calls added no judgement,
+            # but made collection depend on provider formatting.  Execute these
+            # bounded MCP reads deterministically; the broker remains responsible
+            # only for semantic extraction of each retained original below.
+            for assigned_source in gateway.scope.sources:
+                result = await session.call_tool("sources_collect", {"source": assigned_source})
+                if result.isError or result.structuredContent is None:
+                    raise ValueError("source_collection_failed")
             if set(gateway.outcomes) != set(gateway.scope.sources):
                 raise ValueError("incomplete_collection")
             for index, original in enumerate(gateway.originals):
@@ -71,11 +56,12 @@ async def process(lease: CollectionLease) -> dict[str, int]:
                     raise ValueError("stage_failed")
         async with session_scope() as db:
             repo = CatalogObservationRepository(db)
-            for source in gateway.outcomes:
-                await repo.record_coverage(lease.id, lease.token, source, "success")
+            for successful_source in gateway.outcomes:
+                await repo.record_coverage(lease.id, lease.token, successful_source, "success")
             await db.commit()
         return {"collected": len(gateway.originals), "published": gateway.published}
-    except Exception:
+    except Exception as exc:
+        log.exception("collector.task_failed", task_id=lease.id, kind=type(exc).__name__)
         # Partial publication stays valid; never label an incomplete extraction fresh.
         try:
             async with session_scope() as db:

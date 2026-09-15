@@ -18,7 +18,7 @@ from sniffer.agent_app import collector, collector_gateway
 from sniffer.agent_app.collector_gateway import CollectorGateway, Sessions
 from sniffer.agent_app.contracts import CollectionScope
 from sniffer.agent_app.extraction import Original, extract, observation
-from sniffer.broker.client import BrokerCapError, BrokerResult
+from sniffer.broker.client import BrokerCapError
 from sniffer.config import Settings
 from sniffer.db.repositories.collection_sources import CollectionSourceRepository
 from sniffer.db.repositories.collection_tasks import CollectionLease, LeaseLost
@@ -502,9 +502,8 @@ async def test_deadline_cancels_work_and_records_finite_retry(
     assert repo.fail.await_args.kwargs["retry_seconds"] == 3600
 
 
-@pytest.mark.parametrize("tool_name", ["sources_collect", "catalog_stage"])
-async def test_real_mcp_collector_loop_and_model_write_tool_denial(
-    storage: Storage, monkeypatch: pytest.MonkeyPatch, tool_name: str
+async def test_real_mcp_collector_calls_known_source_without_model_tool_json(
+    storage: Storage, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _, sessions, _ = storage
     lease = CollectionLease(
@@ -522,36 +521,15 @@ async def test_real_mcp_collector_loop_and_model_write_tool_denial(
     monkeypatch.setattr(collector, "CatalogObservationRepository", lambda _: repo)
     monkeypatch.setattr(collector_gateway, "CatalogObservationRepository", lambda _: repo)
     broker = SimpleNamespace(
-        chat=AsyncMock(
-            side_effect=[
-                BrokerResult(
-                    text="",
-                    finish_reason="tool_calls",
-                    tool_calls=[
-                        {
-                            "id": "one",
-                            "type": "function",
-                            "function": {"name": tool_name, "arguments": '{"source":"chotot"}'},
-                        }
-                    ],
-                ),
-                BrokerResult(text="done", finish_reason="stop"),
-            ]
-        ),
         structured=AsyncMock(return_value=FACTS),
         aclose=AsyncMock(),
     )
     monkeypatch.setattr(collector, "BrokerClient", lambda **_: broker)
-    if tool_name == "catalog_stage":
-        with pytest.raises(BaseExceptionGroup):
-            await collector.process(lease)
-        fetch.assert_not_awaited()
-        repo.stage.assert_not_awaited()
-        broker.structured.assert_not_awaited()
-    else:
-        assert await collector.process(lease) == {"collected": 1, "published": 1}
-        assert broker.chat.await_count == 2 and broker.structured.await_count == 1
-        repo.stage.assert_awaited_once()
-        repo.publish.assert_awaited_once()
-        repo.record_coverage.assert_awaited_once_with(11, "trusted", "chotot", "success")
+
+    assert await collector.process(lease) == {"collected": 1, "published": 1}
+    fetch.assert_awaited_once()
+    broker.structured.assert_awaited_once()
+    repo.stage.assert_awaited_once()
+    repo.publish.assert_awaited_once()
+    repo.record_coverage.assert_awaited_once_with(11, "trusted", "chotot", "success")
     broker.aclose.assert_awaited_once()
