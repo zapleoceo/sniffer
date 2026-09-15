@@ -26,6 +26,7 @@ class CollectionLease:
     scope: dict[str, Any]
     attempts: int
     deadline_at: datetime
+    error_code: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +34,27 @@ class CollectionRecipient:
     user_id: int
     request_id: int
     request_version: int
+
+
+@dataclass(frozen=True, slots=True)
+class CollectionDeliveryState:
+    task_id: int
+    task_status: str
+    attempts: int
+    max_attempts: int
+    error_code: str | None
+    created_at: datetime
+    user_id: int
+    tg_user_id: int
+    request_id: int
+    request_version: int
+    active: bool
+    reply_queued_at: datetime | None
+    outbox_id: int | None
+    delivery_status: str | None
+    delivery_attempts: int | None
+    scheduled_at: datetime | None
+    sent_at: datetime | None
 
 
 def fingerprint(value: dict[str, Any]) -> str:
@@ -90,6 +112,24 @@ class CollectionTaskRepository(Repository):
         """),
             {"task": task_id, "user": user_id, "request": request_id, "version": request_version},
         )
+        # The upsert above locks the task row. A request that attaches after a
+        # previous terminal run must make that shared task runnable again.
+        await self._session.execute(
+            text("""
+            UPDATE collection_tasks t SET status='pending',attempts=0,
+                run_after=clock_timestamp(),lease_token=NULL,lease_until=NULL,
+                deadline_at=NULL,error_code=NULL
+            WHERE t.id=:task AND t.status IN ('done','failed','cancelled')
+                AND EXISTS (
+                    SELECT 1 FROM collection_subscribers s
+                    JOIN passports p ON p.user_id=s.user_id
+                        AND COALESCE(p.root_id,p.id)=s.request_id
+                        AND p.version=s.request_version AND p.is_current
+                    WHERE s.task_id=t.id AND s.active AND s.reply_queued_at IS NULL
+                )
+        """),
+            {"task": task_id},
+        )
         return task_id
 
     async def claim(
@@ -97,11 +137,39 @@ class CollectionTaskRepository(Repository):
     ) -> CollectionLease | None:
         _positive(lease_seconds, 900)
         _positive(max_run_seconds, 3600)
+        # A crashed final attempt may have died before its reply was durable.
+        # Keep one collection attempt available until every current subscriber
+        # owns an outbox row; otherwise `exhausted` below would silence it.
+        await self._session.execute(
+            text("""
+            WITH unanswered AS (
+                SELECT t.id FROM collection_tasks t
+                WHERE t.attempts>=t.max_attempts
+                    AND (t.error_code IS NULL OR t.error_code NOT LIKE 'reply_failed_%')
+                    AND (t.status='pending' OR (t.status='running' AND
+                        (t.lease_until<=clock_timestamp()
+                            OR t.deadline_at<=clock_timestamp())))
+                    AND EXISTS (
+                        SELECT 1 FROM collection_subscribers s
+                        JOIN passports p ON p.user_id=s.user_id
+                            AND COALESCE(p.root_id,p.id)=s.request_id
+                            AND p.version=s.request_version AND p.is_current
+                        WHERE s.task_id=t.id AND s.active AND s.reply_queued_at IS NULL
+                    )
+                FOR UPDATE OF t SKIP LOCKED
+            )
+            UPDATE collection_tasks t SET status='pending',attempts=t.max_attempts-1,
+                run_after=clock_timestamp(),lease_token=NULL,lease_until=NULL,
+                deadline_at=NULL
+            WHERE t.id IN (SELECT id FROM unanswered)
+        """)
+        )
         # Retire exhausted crashed attempts before selecting another runnable task.
         await self._session.execute(
             text("""
             WITH exhausted AS (
                 SELECT id FROM collection_tasks WHERE attempts>=max_attempts AND
+                    (error_code IS NULL OR error_code NOT LIKE 'reply_failed_%') AND
                     (status='pending' OR (status='running' AND
                     (lease_until<=clock_timestamp() OR deadline_at<=clock_timestamp())))
                 FOR UPDATE SKIP LOCKED
@@ -115,6 +183,7 @@ class CollectionTaskRepository(Repository):
             text("""
             WITH candidate AS (
                 SELECT id FROM collection_tasks WHERE attempts<max_attempts AND
+                    (error_code IS NULL OR error_code NOT LIKE 'reply_failed_%') AND
                     ((status='pending' AND run_after<=clock_timestamp()) OR
                      (status='running' AND (lease_until<=clock_timestamp()
                         OR deadline_at<=clock_timestamp())))
@@ -137,6 +206,46 @@ class CollectionTaskRepository(Repository):
             if row is None
             else CollectionLease(
                 row["id"], row["lease_token"], row["scope"], row["attempts"], row["deadline_at"]
+            )
+        )
+
+    async def claim_reply(
+        self, *, lease_seconds: int = 90, max_run_seconds: int = 180
+    ) -> CollectionLease | None:
+        """Claim answer-only recovery without spending another collection attempt."""
+        _positive(lease_seconds, 900)
+        _positive(max_run_seconds, 3600)
+        result = await self._session.execute(
+            text("""
+            WITH candidate AS (
+                SELECT id FROM collection_tasks
+                WHERE error_code LIKE 'reply_failed_%'
+                    AND ((status='pending' AND run_after<=clock_timestamp()) OR
+                        (status='running' AND (lease_until<=clock_timestamp()
+                            OR deadline_at<=clock_timestamp())))
+                ORDER BY run_after,id FOR UPDATE SKIP LOCKED LIMIT 1
+            )
+            UPDATE collection_tasks t SET status='running',lease_token=:token,
+                lease_until=clock_timestamp()+make_interval(secs =>
+                    LEAST(CAST(:lease AS double precision),CAST(:deadline AS double precision))),
+                deadline_at=clock_timestamp()+make_interval(secs =>
+                    CAST(:deadline AS double precision))
+            FROM candidate WHERE t.id=candidate.id
+            RETURNING t.id,t.lease_token,t.scope,t.attempts,t.deadline_at,t.error_code
+        """),
+            {"token": uuid4().hex, "lease": lease_seconds, "deadline": max_run_seconds},
+        )
+        row = result.mappings().first()
+        return (
+            None
+            if row is None
+            else CollectionLease(
+                row["id"],
+                row["lease_token"],
+                row["scope"],
+                row["attempts"],
+                row["deadline_at"],
+                row["error_code"],
             )
         )
 
@@ -178,8 +287,22 @@ class CollectionTaskRepository(Repository):
         await self.require_lease(task_id, lease_token)
         await self._session.execute(
             text("""
-            UPDATE collection_tasks SET status='done',result=CAST(:result AS jsonb),
-                lease_token=NULL,lease_until=NULL,error_code=NULL WHERE id=:id
+            WITH state AS (
+                SELECT EXISTS (
+                    SELECT 1 FROM collection_subscribers s
+                    JOIN passports p ON p.user_id=s.user_id
+                        AND COALESCE(p.root_id,p.id)=s.request_id
+                        AND p.version=s.request_version AND p.is_current
+                    WHERE s.task_id=:id AND s.active AND s.reply_queued_at IS NULL
+                ) AS unanswered
+            )
+            UPDATE collection_tasks SET
+                status=CASE WHEN state.unanswered THEN 'pending' ELSE 'done' END,
+                attempts=CASE WHEN state.unanswered THEN 0 ELSE attempts END,
+                run_after=CASE WHEN state.unanswered THEN clock_timestamp() ELSE run_after END,
+                result=CAST(:result AS jsonb),lease_token=NULL,lease_until=NULL,
+                deadline_at=NULL,error_code=NULL
+            FROM state WHERE id=:id
         """),
             {"id": task_id, "result": json.dumps(result, allow_nan=False)},
         )
@@ -197,14 +320,60 @@ class CollectionTaskRepository(Repository):
         await self.require_lease(task_id, lease_token)
         await self._session.execute(
             text("""
-            UPDATE collection_tasks SET status=CASE WHEN attempts>=max_attempts
-                THEN 'failed' ELSE 'pending' END,
-                error_code=:error,lease_token=NULL,lease_until=NULL,
+            WITH state AS (
+                SELECT EXISTS (
+                    SELECT 1 FROM collection_subscribers s
+                    JOIN passports p ON p.user_id=s.user_id
+                        AND COALESCE(p.root_id,p.id)=s.request_id
+                        AND p.version=s.request_version AND p.is_current
+                    WHERE s.task_id=:id AND s.active AND s.reply_queued_at IS NULL
+                ) AS unanswered
+            )
+            UPDATE collection_tasks SET
+                status=CASE WHEN attempts>=max_attempts AND NOT state.unanswered
+                    THEN 'failed' ELSE 'pending' END,
+                attempts=CASE WHEN attempts>=max_attempts AND state.unanswered
+                    AND :error NOT LIKE 'reply_failed_%'
+                    THEN max_attempts-1 ELSE attempts END,
+                error_code=:error,lease_token=NULL,lease_until=NULL,deadline_at=NULL,
                 run_after=clock_timestamp()+make_interval(secs => CAST(:retry AS double precision))
-                WHERE id=:id
+            FROM state WHERE id=:id
         """),
             {"id": task_id, "error": error_code, "retry": retry_seconds},
         )
+
+    async def release_after_reply(
+        self,
+        task_id: int,
+        lease_token: str,
+        error_code: str,
+        *,
+        retry_seconds: int,
+    ) -> None:
+        """Finish answer-only recovery, then restore bounded collection retry."""
+        _positive(retry_seconds, 86400)
+        if not error_code or len(error_code) > 100:
+            raise ValueError("invalid_collection_error_code")
+        await self.require_lease(task_id, lease_token)
+        result = await self._session.execute(
+            text("""
+            UPDATE collection_tasks t SET
+                status=CASE WHEN attempts>=max_attempts THEN 'failed' ELSE 'pending' END,
+                error_code=:error,lease_token=NULL,lease_until=NULL,deadline_at=NULL,
+                run_after=clock_timestamp()+make_interval(secs => CAST(:retry AS double precision))
+            WHERE id=:id AND NOT EXISTS (
+                SELECT 1 FROM collection_subscribers s
+                JOIN passports p ON p.user_id=s.user_id
+                    AND COALESCE(p.root_id,p.id)=s.request_id
+                    AND p.version=s.request_version AND p.is_current
+                WHERE s.task_id=t.id AND s.active AND s.reply_queued_at IS NULL
+            )
+            RETURNING id
+        """),
+            {"id": task_id, "error": error_code, "retry": retry_seconds},
+        )
+        if result.scalar_one_or_none() is None:
+            raise LeaseLost("collection_reply_not_durable")
 
     async def unsubscribe(self, user_id: int, request_id: int) -> None:
         # Lock tasks first, same order as enqueue, then subscribers; concurrent attach
@@ -249,6 +418,42 @@ class CollectionTaskRepository(Repository):
             {"user": user_id, "request": request_id, "version": request_version},
         )
         return [dict(row) for row in result.mappings()]
+
+    async def recent_deliveries(self, *, limit: int = 20) -> list[CollectionDeliveryState]:
+        """Recent collection tasks with their client-delivery outcome."""
+        _positive(limit, 100)
+        result = await self._session.execute(
+            text("""
+            SELECT t.id AS task_id,t.status AS task_status,t.attempts,t.max_attempts,
+                t.error_code,t.created_at,s.user_id,u.tg_user_id,s.request_id,
+                s.request_version,s.active,s.reply_queued_at,o.id AS outbox_id,
+                o.status AS delivery_status,o.attempts AS delivery_attempts,
+                o.scheduled_at,o.sent_at
+            FROM collection_tasks t
+            JOIN collection_subscribers s ON s.task_id=t.id
+            JOIN users u ON u.id=s.user_id
+            LEFT JOIN LATERAL (
+                SELECT candidate.id,candidate.status,candidate.attempts,
+                    candidate.scheduled_at,candidate.sent_at
+                FROM outbox candidate
+                WHERE candidate.user_id=s.user_id
+                    AND candidate.payload->>'kind'='collection_result'
+                    AND (
+                        candidate.payload->>'collection_task_id'=t.id::text
+                        OR (
+                            candidate.payload->>'collection_task_id' IS NULL
+                            AND s.reply_queued_at IS NOT NULL
+                            AND candidate.scheduled_at>=s.reply_queued_at-interval '1 second'
+                            AND candidate.scheduled_at<=s.reply_queued_at+interval '5 seconds'
+                        )
+                    )
+                ORDER BY candidate.id DESC LIMIT 1
+            ) o ON TRUE
+            ORDER BY t.id DESC,s.user_id,s.request_id LIMIT :limit
+        """),
+            {"limit": limit},
+        )
+        return [CollectionDeliveryState(**dict(row)) for row in result.mappings()]
 
     async def pending_recipients(self, task_id: int, lease_token: str) -> list[CollectionRecipient]:
         """Current request versions still waiting for their deferred answer."""

@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 from sniffer.config import reload_settings
 from sniffer.dashboard import app as dashboard_app
 from sniffer.dashboard import auth, data, reauth, views
+from sniffer.db.repositories.collection_tasks import CollectionDeliveryState
 from sniffer.domain.records import (
     REQUEST_DONE,
     BrokerCall,
@@ -122,6 +123,27 @@ INVENTORY = data.Inventory(
             text_hash="0" * 64,
             posted_at=NOW,
             has_media=True,
+        )
+    ],
+    collection_deliveries=[
+        CollectionDeliveryState(
+            task_id=7,
+            task_status="done",
+            attempts=1,
+            max_attempts=3,
+            error_code=None,
+            created_at=NOW,
+            user_id=7,
+            tg_user_id=OWNER,
+            request_id=3,
+            request_version=1,
+            active=True,
+            reply_queued_at=NOW,
+            outbox_id=9,
+            delivery_status="sent",
+            delivery_attempts=0,
+            scheduled_at=NOW,
+            sent_at=NOW,
         )
     ],
 )
@@ -585,6 +607,10 @@ def test_csp_allows_the_widget_file_not_the_whole_telegram_origin(client: TestCl
 def test_database_page_shows_what_is_accumulated(owner: TestClient) -> None:
     """Главный вопрос страницы: есть ли чему отвечать на запрос клиента."""
     body = owner.get("/database").text
+
+    assert "Ответы после сбора" in body
+    assert "sent" in body
+    assert str(OWNER) in body
 
     assert "Наполнение" in body
     assert "Чаты реестра" in body and "Очередь вступлений" in body

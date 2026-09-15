@@ -14,6 +14,10 @@ from decimal import Decimal
 from sniffer.db.engine import session_scope
 from sniffer.db.repositories.broker_calls import BrokerCallRepository
 from sniffer.db.repositories.chats import ChatRepository
+from sniffer.db.repositories.collection_tasks import (
+    CollectionDeliveryState,
+    CollectionTaskRepository,
+)
 from sniffer.db.repositories.dialog import DialogRepository
 from sniffer.db.repositories.discovery import (
     CandidateRepository,
@@ -105,6 +109,7 @@ class Inventory:
     join_ceiling: int = MAX_JOINS_PER_DAY
     rejects: list[RejectedCandidate] = field(default_factory=list)
     raw: list[RawMessage] = field(default_factory=list)
+    collection_deliveries: list[CollectionDeliveryState] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -154,6 +159,9 @@ async def inventory(*, now: datetime | None = None) -> Inventory:
             limits=await JoinLedgerRepository(session).state(moment, window=JOIN_WINDOW),
             rejects=await RejectRepository(session).recent(limit=INVENTORY_TAIL),
             raw=await RawMessageRepository(session).recent(limit=INVENTORY_TAIL),
+            collection_deliveries=await CollectionTaskRepository(session).recent_deliveries(
+                limit=INVENTORY_TAIL
+            ),
         )
 
 

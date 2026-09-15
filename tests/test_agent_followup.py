@@ -56,6 +56,8 @@ async def test_one_agent_analysis_answers_every_subscriber_once(
     search.assert_awaited_once_with(156, 21, 1, allow_collection=False)
     assert repository.queue_reply.await_count == 2
     payload = repository.queue_reply.await_args_list[0].args[3]
+    assert payload["collection_task_id"] == 7
+    assert payload["request_id"] == 21
     message = render(payload)
     assert "Обновление каталога завершено" in message
     assert "Honda rental" in message and "3 млн/месяц" in message
@@ -80,5 +82,29 @@ async def test_analysis_failure_is_an_answer_not_a_silent_task(
 
     assert await followup.queue_answers(LEASE) == 2
     payload = repository.queue_reply.await_args_list[0].args[3]
-    assert "проверить результаты не удалось" in render(payload)
+    assert "проверить результаты не удалось" in render(payload).lower()
     assert "private details" not in render(payload)
+
+
+async def test_collection_failure_checks_existing_catalogue_and_answers(
+    repository: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(followup, "search_request", AsyncMock(return_value=CatalogAnswer([])))
+
+    assert await followup.queue_failure_answers(LEASE) == 2
+    payload = repository.queue_reply.await_args_list[0].args[3]
+    message = render(payload)
+    assert "Полностью обновить каталог не удалось" in message
+    assert "пока нет" in message
+
+
+async def test_budget_cap_answer_never_calls_the_agent(
+    repository: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    search = AsyncMock()
+    monkeypatch.setattr(followup, "search_request", search)
+
+    assert await followup.queue_cap_answers(LEASE) == 2
+    search.assert_not_awaited()
+    payload = repository.queue_reply.await_args_list[0].args[3]
+    assert "не удалось проверить" in render(payload)

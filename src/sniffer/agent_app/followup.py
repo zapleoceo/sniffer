@@ -19,6 +19,32 @@ log = structlog.get_logger(__name__)
 
 async def queue_answers(lease: CollectionLease) -> int:
     """Analyse fresh catalogue state, then enqueue a terminal client answer."""
+    return await queue_answers_for_outcome(lease, collection_succeeded=True)
+
+
+async def queue_failure_answers(lease: CollectionLease) -> int:
+    """Answer even when collection failed, using the catalogue already available."""
+    return await queue_answers_for_outcome(lease, collection_succeeded=False)
+
+
+async def queue_cap_answers(lease: CollectionLease) -> int:
+    """Queue a deterministic answer without calling the capped broker."""
+    async with session_scope() as session:
+        recipients = await CollectionTaskRepository(session).pending_recipients(
+            lease.id, lease.token
+        )
+    if not recipients:
+        return 0
+    payload = _payload(
+        "Сейчас не удалось проверить обновлённый каталог. "
+        "Повторите запрос позже — сохранённые условия останутся доступны через /requests.",
+        [],
+    )
+    payload["collection_task_id"] = lease.id
+    return await queue_payload_for_recipients(lease, recipients, payload)
+
+
+async def queue_answers_for_outcome(lease: CollectionLease, *, collection_succeeded: bool) -> int:
     async with session_scope() as session:
         recipients = await CollectionTaskRepository(session).pending_recipients(
             lease.id, lease.token
@@ -28,19 +54,43 @@ async def queue_answers(lease: CollectionLease) -> int:
         return 0
     # One task is one canonical scope. Analysing it once is sufficient for all
     # subscribers and prevents shared demand from multiplying broker cost.
-    payload = await _answer(recipients[0])
+    payload = await _answer(recipients[0], collection_succeeded=collection_succeeded)
+    payload["collection_task_id"] = lease.id
+    return await queue_payload_for_recipients(lease, recipients, payload)
+
+
+async def queue_payload_for_recipients(
+    lease: CollectionLease,
+    recipients: list[CollectionRecipient],
+    payload: dict[str, object],
+) -> int:
+    """Durably enqueue one prepared payload for each still-current recipient."""
     queued = 0
     for recipient in recipients:
         async with session_scope() as session:
             added = await CollectionTaskRepository(session).queue_reply(
-                lease.id, lease.token, recipient, payload
+                lease.id,
+                lease.token,
+                recipient,
+                {
+                    **payload,
+                    "request_id": recipient.request_id,
+                    "request_version": recipient.request_version,
+                },
             )
             await session.commit()
         queued += int(added)
     return queued
 
 
-async def _answer(recipient: CollectionRecipient) -> dict[str, object]:
+async def _answer(
+    recipient: CollectionRecipient, *, collection_succeeded: bool
+) -> dict[str, object]:
+    prefix = (
+        "Обновление каталога завершено."
+        if collection_succeeded
+        else "Полностью обновить каталог не удалось. Проверил уже собранные данные."
+    )
     try:
         answer = await search_request(
             recipient.user_id,
@@ -56,22 +106,21 @@ async def _answer(recipient: CollectionRecipient) -> dict[str, object]:
             kind=type(exc).__name__,
         )
         return _payload(
-            "Обновление каталога завершено, но проверить результаты не удалось. "
-            "Повторите запрос через несколько минут.",
+            f"{prefix} Проверить результаты не удалось. Повторите запрос через несколько минут.",
             [],
         )
     if not answer.items:
         if answer.status:
-            return _payload(f"Обновление каталога завершено. {answer.status}", [])
+            return _payload(f"{prefix} {answer.status}", [])
         return _payload(
-            "Обновление каталога завершено. Подходящих вариантов по вашему запросу "
-            "пока нет. Можно изменить условия или включить мониторинг через /requests.",
+            f"{prefix} Подходящих вариантов по вашему запросу пока нет. "
+            "Можно изменить условия или включить мониторинг через /requests.",
             [],
         )
     count = min(len(answer.items), get_settings().max_cards)
     word = "вариант" if count == 1 else "варианта" if 2 <= count <= 4 else "вариантов"
     return _payload(
-        f"Обновление каталога завершено. Нашёл {count} подходящих {word}:",
+        f"{prefix} Нашёл {count} подходящих {word}:",
         answer.items[:count],
     )
 

@@ -67,9 +67,11 @@ FACTS = {
 def storage(monkeypatch: pytest.MonkeyPatch) -> Storage:
     repo = SimpleNamespace(
         claim=AsyncMock(return_value=LEASE),
+        claim_reply=AsyncMock(return_value=None),
         require_lease=AsyncMock(),
         complete=AsyncMock(),
         fail=AsyncMock(),
+        release_after_reply=AsyncMock(),
         heartbeat=AsyncMock(),
     )
     session = SimpleNamespace(commit=AsyncMock())
@@ -86,6 +88,8 @@ def storage(monkeypatch: pytest.MonkeyPatch) -> Storage:
     monkeypatch.setattr(collector, "CollectionTaskRepository", lambda _: repo)
     monkeypatch.setattr(collector_gateway, "CollectionTaskRepository", lambda _: repo)
     monkeypatch.setattr(collector, "queue_answers", AsyncMock(return_value=0))
+    monkeypatch.setattr(collector, "queue_failure_answers", AsyncMock(return_value=0))
+    monkeypatch.setattr(collector, "queue_cap_answers", AsyncMock(return_value=0))
     return repo, sessions, active
 
 
@@ -317,6 +321,49 @@ async def test_failures_retry_finitely_with_cap_deferred_to_utc_midnight(
     assert args[:2] == (11, "trusted")
     assert args[2] == ("budget_cap" if isinstance(error, BrokerCapError) else "collection_failed")
     assert 1 <= kwargs["retry_seconds"] <= 86400
+
+
+async def test_collection_failure_still_queues_a_client_answer(storage: Storage) -> None:
+    _, sessions, _ = storage
+    failure_reply = AsyncMock(return_value=1)
+
+    await collector.Collector(
+        sessions=sessions,
+        work=AsyncMock(side_effect=RuntimeError("source failed")),
+        failure_reply=failure_reply,
+    ).tick()
+
+    failure_reply.assert_awaited_once_with(LEASE)
+
+
+async def test_failed_failure_reply_keeps_retrying_even_after_broker_cap(storage: Storage) -> None:
+    repo, sessions, _ = storage
+    reply_lease = CollectionLease(
+        LEASE.id,
+        LEASE.token,
+        LEASE.scope,
+        LEASE.attempts,
+        LEASE.deadline_at,
+        "reply_failed_budget_cap",
+    )
+    repo.claim_reply.side_effect = [None, reply_lease]
+    failure_reply = AsyncMock()
+    cap_reply = AsyncMock(side_effect=[RuntimeError("database unavailable"), None])
+    worker = collector.Collector(
+        sessions=sessions,
+        work=AsyncMock(side_effect=BrokerCapError("cap")),
+        failure_reply=failure_reply,
+        cap_reply=cap_reply,
+    )
+
+    assert await worker.tick() == 1
+    assert repo.fail.await_args.kwargs["retry_seconds"] == 300
+    assert await worker.tick() == 1
+    assert repo.claim.await_count == 1
+    failure_reply.assert_not_awaited()
+    assert cap_reply.await_count == 2
+    repo.release_after_reply.assert_awaited_once()
+    assert repo.release_after_reply.await_args.args[2] == "budget_cap"
 
 
 async def test_cancellation_never_marks_unknown_outcome_complete(storage: Storage) -> None:
