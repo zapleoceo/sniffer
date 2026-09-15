@@ -28,6 +28,13 @@ class CollectionLease:
     deadline_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class CollectionRecipient:
+    user_id: int
+    request_id: int
+    request_version: int
+
+
 def fingerprint(value: dict[str, Any]) -> str:
     payload = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
     if len(payload) > 16000:
@@ -242,6 +249,62 @@ class CollectionTaskRepository(Repository):
             {"user": user_id, "request": request_id, "version": request_version},
         )
         return [dict(row) for row in result.mappings()]
+
+    async def pending_recipients(self, task_id: int, lease_token: str) -> list[CollectionRecipient]:
+        """Current request versions still waiting for their deferred answer."""
+        await self.require_lease(task_id, lease_token)
+        result = await self._session.execute(
+            text("""
+            SELECT s.user_id,s.request_id,s.request_version
+            FROM collection_subscribers s
+            JOIN passports p ON p.user_id=s.user_id
+                AND COALESCE(p.root_id,p.id)=s.request_id
+                AND p.version=s.request_version AND p.is_current
+            WHERE s.task_id=:task AND s.active AND s.reply_queued_at IS NULL
+            ORDER BY s.user_id,s.request_id,s.request_version
+        """),
+            {"task": task_id},
+        )
+        return [CollectionRecipient(**dict(row)) for row in result.mappings()]
+
+    async def queue_reply(
+        self,
+        task_id: int,
+        lease_token: str,
+        recipient: CollectionRecipient,
+        payload: dict[str, Any],
+    ) -> bool:
+        """Atomically claim one subscriber reply and put it in the durable outbox."""
+        await self.require_lease(task_id, lease_token)
+        encoded = json.dumps(payload, allow_nan=False)
+        if len(encoded) > 50000:
+            raise ValueError("collection_reply_too_large")
+        result = await self._session.execute(
+            text("""
+            WITH claimed AS (
+                UPDATE collection_subscribers SET reply_queued_at=clock_timestamp()
+                WHERE task_id=:task AND user_id=:user AND request_id=:request
+                    AND request_version=:version AND active AND reply_queued_at IS NULL
+                    AND EXISTS (
+                        SELECT 1 FROM passports p WHERE p.user_id=:user
+                            AND COALESCE(p.root_id,p.id)=:request
+                            AND p.version=:version AND p.is_current
+                    )
+                RETURNING user_id
+            )
+            INSERT INTO outbox(user_id,payload)
+            SELECT user_id,CAST(:payload AS jsonb) FROM claimed
+            RETURNING id
+        """),
+            {
+                "task": task_id,
+                "user": recipient.user_id,
+                "request": recipient.request_id,
+                "version": recipient.request_version,
+                "payload": encoded,
+            },
+        )
+        return result.scalar_one_or_none() is not None
 
     async def action_result(
         self, task_id: int, lease_token: str, action_key: str, arguments: dict[str, Any]

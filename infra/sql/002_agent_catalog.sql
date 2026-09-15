@@ -21,8 +21,10 @@ CREATE TABLE IF NOT EXISTS collection_subscribers (
     request_id BIGINT NOT NULL,
     request_version INTEGER NOT NULL CHECK (request_version > 0),
     active BOOLEAN NOT NULL DEFAULT TRUE,
+    reply_queued_at TIMESTAMPTZ,
     PRIMARY KEY(task_id,user_id,request_id,request_version)
 );
+ALTER TABLE collection_subscribers ADD COLUMN IF NOT EXISTS reply_queued_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS collection_subscribers_request_idx ON collection_subscribers(user_id,request_id);
 CREATE TABLE IF NOT EXISTS collection_actions (
     task_id BIGINT NOT NULL REFERENCES collection_tasks(id) ON DELETE CASCADE,

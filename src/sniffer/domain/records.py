@@ -362,7 +362,11 @@ class OutboxMessage:
     """Сообщение, которое ещё не ушло клиенту."""
 
     id: int
+    # `user_id` is the internal FK. Telegram must receive `tg_user_id`, which
+    # is deliberately carried separately so the two identifiers cannot be
+    # confused at the transport boundary.
     user_id: int
+    recipient_id: int
     payload: dict[str, Any]
     attempts: int = 0
     scheduled_at: datetime | None = None

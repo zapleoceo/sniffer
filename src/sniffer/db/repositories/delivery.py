@@ -115,17 +115,18 @@ class DeliveryRepository(Repository):
         self, *, limit: int = 20, now: datetime | None = None
     ) -> list[OutboxMessage]:
         """Что пора доставить. `SKIP LOCKED` — чтобы две копии не слали дважды."""
-        rows = await self._session.scalars(
-            select(models.Outbox)
+        rows = await self._session.execute(
+            select(models.Outbox, models.User.tg_user_id)
+            .join(models.User, models.User.id == models.Outbox.user_id)
             .where(
                 models.Outbox.status == OUTBOX_PENDING,
                 models.Outbox.scheduled_at <= (now or datetime.now(UTC)),
             )
             .order_by(models.Outbox.scheduled_at, models.Outbox.id)
-            .with_for_update(skip_locked=True)
+            .with_for_update(of=models.Outbox, skip_locked=True)
             .limit(limit)
         )
-        return [_outbox(row) for row in rows]
+        return [_outbox(row, tg_user_id) for row, tg_user_id in rows]
 
     async def mark_sent(self, message_id: int, *, now: datetime | None = None) -> None:
         moment = now or datetime.now(UTC)
@@ -326,10 +327,11 @@ def _subscription(row: models.Subscription, passport: models.Passport) -> Subscr
     )
 
 
-def _outbox(row: models.Outbox) -> OutboxMessage:
+def _outbox(row: models.Outbox, recipient_id: int) -> OutboxMessage:
     return OutboxMessage(
         id=row.id,
         user_id=row.user_id,
+        recipient_id=recipient_id,
         payload=dict(row.payload),
         attempts=row.attempts,
         scheduled_at=row.scheduled_at,

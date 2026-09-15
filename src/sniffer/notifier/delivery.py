@@ -74,7 +74,7 @@ class Delivery:
         if len(messages) > 1:
             text = render_digest([message.payload for message in messages])
         try:
-            await self._send(messages[0].user_id, text)
+            await self._send(messages[0].recipient_id, text)
         except Exception as exc:
             # Широкий except намеренно: причин не доставить сообщение столько
             # же, сколько состояний у чужого сервиса, и перечислять их значит
@@ -108,6 +108,8 @@ def render(payload: dict[str, Any]) -> str:
     Всё, что приехало из чужого чата, проходит через `escape`: текст
     объявления писал незнакомый человек, а Bot API принимает HTML.
     """
+    if payload.get("kind") == "collection_result":
+        return _collection_result(payload)
     title = escape(str(payload.get("title") or "без заголовка"))
     url = escape(str(payload.get("url") or ""))
     price = _price(payload)
@@ -118,6 +120,16 @@ def render(payload: dict[str, Any]) -> str:
     if url:
         lines.append(f'<a href="{url}">открыть оригинал</a>')
     return "\n".join(line for line in lines if line)
+
+
+def _collection_result(payload: dict[str, Any]) -> str:
+    """Render a deferred answer from data, never from stored HTML."""
+    intro = escape(str(payload.get("intro") or "Обновление каталога завершено."))
+    raw_items = payload.get("items")
+    if not isinstance(raw_items, list):
+        raw_items = []
+    cards = [render(item) for item in raw_items if isinstance(item, dict)]
+    return "\n\n".join([intro, *cards])
 
 
 def render_digest(payloads: list[dict[str, Any]]) -> str:
@@ -139,6 +151,9 @@ def _groups(messages: list[OutboxMessage]) -> list[list[OutboxMessage]]:
 
 
 def _price(payload: dict[str, Any]) -> str:
+    display = str(payload.get("price_display") or "").strip()
+    if display:
+        return escape(display)
     amount = str(payload.get("price_amount") or "").strip()
     if not amount:
         return "цена не указана"

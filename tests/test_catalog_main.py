@@ -150,6 +150,7 @@ async def test_missing_coverage_queues_sanitized_shared_scope(repos: dict[str, A
     gateway = MainGateway(MainIdentity(7, 9, 2), repos["sessions"])
     status = await gateway.queue_if_needed()
     assert status and "22" in status
+    assert gateway.waiting and "сам пришлю" in status
     args = repos["tasks"].enqueue.call_args
     assert args.kwargs["user_id"] == 7 and args.kwargs["request_version"] == 2
     assert "raw_query" not in args.args[0] and "user_id" not in args.args[0]
@@ -180,6 +181,7 @@ async def test_pending_job_is_not_duplicated_at_next_hour(repos: dict[str, Any])
     repos["tasks"].status_for.return_value = [{"id": 11, "status": "running"}]
     gateway = MainGateway(MainIdentity(7, 9, 2), repos["sessions"])
     assert "выполняется" in (await gateway.queue_if_needed() or "")
+    assert gateway.waiting
     repos["tasks"].enqueue.assert_not_awaited()
 
 

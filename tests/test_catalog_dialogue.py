@@ -147,7 +147,9 @@ async def test_scoped_dialogue_asks_only_for_category_and_reports_empty_status()
             return parse_query(text)
 
     store = MemoryStore()
-    finder = AsyncMock(return_value=Found([], status="Данных пока нет. Сбор запланирован."))
+    finder = AsyncMock(
+        return_value=Found([], status="Данных пока нет. Сбор запланирован.", deferred=True)
+    )
     legacy = AsyncMock()
     talk = Conversation(
         store, intake=Parser, finder=legacy, scoped_finder=finder, recorder=FakeJournal()
@@ -162,6 +164,7 @@ async def test_scoped_dialogue_asks_only_for_category_and_reports_empty_status()
     assert finder.await_count == 1
     legacy.assert_not_awaited()
     assert replies.texts[-1].startswith("Данных пока нет. Сбор запланирован.")
+    assert not replies.sent[-1].offer_subscription
     current = await store.load(CLIENT)
     assert finder.await_args is not None
     assert finder.await_args.args[0] == current
@@ -185,6 +188,39 @@ async def test_exact_unlisted_model_is_searched_without_redundant_questions() ->
     assert finder.await_args is not None
     searched = finder.await_args.args[0].passport.passport
     assert searched.attributes == {"brand": "honda", "model": "zoomer"}
+
+
+async def test_real_rental_request_waits_for_an_automatic_answer_without_false_offer() -> None:
+    class Parser:
+        async def parse(self, text: str) -> Passport:
+            return parse_query(text)
+
+    finder = AsyncMock(
+        return_value=Found(
+            [],
+            status=(
+                "Обновление каталога поставлено в очередь (№7). Сборщик проверяет очередь "
+                "раз в час. После проверки я сам пришлю подходящие варианты или сообщу, "
+                "что их пока нет."
+            ),
+            deferred=True,
+        )
+    )
+    replies = Replies()
+    talk = Conversation(MemoryStore(), intake=Parser, scoped_finder=finder, recorder=FakeJournal())
+
+    await talk.on_text(CLIENT, "Мотоцикл в нячанге в аренду", replies)
+
+    assert finder.await_args is not None
+    searched = finder.await_args.args[0].passport.passport
+    assert (searched.intent.value, searched.category.value, searched.city) == (
+        "rent",
+        "motorbike",
+        "nha_trang",
+    )
+    assert "сам пришлю" in replies.sent[-1].text
+    assert "Если из этого ничего не подошло" not in replies.sent[-1].text
+    assert not replies.sent[-1].offer_subscription
 
 
 async def test_selected_old_request_and_revised_version_reach_catalog() -> None:

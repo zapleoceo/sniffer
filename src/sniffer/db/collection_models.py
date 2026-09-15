@@ -39,6 +39,7 @@ class CollectionSubscriber(Base):
     request_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     request_version: Mapped[int] = mapped_column(Integer, primary_key=True)
     active: Mapped[bool] = mapped_column(Boolean, server_default=TRUE)
+    reply_queued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class CollectionAction(Base):
