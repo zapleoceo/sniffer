@@ -117,7 +117,8 @@ class CollectionSourceRepository(Repository):
                 params.update(engine_low=int(engine_cc * 0.75), engine_high=int(engine_cc * 1.25))
         # Every clause is an application-owned literal above; customer values
         # remain bound parameters. Only the min/max operator is chosen locally.
-        statement = f"""  # noqa: S608
+        statement = (
+            f"""
             WITH candidates AS (
                 SELECT r.chat_tg_id,r.msg_id,r.text,r.posted_at,r.ingested_at,
                        c.username,
@@ -135,6 +136,7 @@ class CollectionSourceRepository(Repository):
             WHERE duplicate_rank=1
             ORDER BY posted_at DESC,msg_id DESC LIMIT :limit
         """
+        )
         result = await self._session.execute(text(statement), params)
         return [dict(row) for row in result.mappings()]
 
