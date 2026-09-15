@@ -25,7 +25,10 @@ from sniffer.bot.store import Client, PassportStore
 from sniffer.broker.client import BrokerResult
 from sniffer.config import Settings
 from sniffer.db.repositories.catalog_observations import CatalogObservationRepository
-from sniffer.db.repositories.collection_tasks import CollectionTaskRepository
+from sniffer.db.repositories.collection_tasks import (
+    CollectionRecipient,
+    CollectionTaskRepository,
+)
 from sniffer.domain.catalog import CatalogFacts, CatalogObservation, Evidence
 from sniffer.domain.passport import Category, Passport
 from sniffer.search.intake_rules import parse_query
@@ -274,6 +277,12 @@ async def test_exact_catalogue_request_reaches_postgres_without_redundant_llm_an
             await catalog.stage(task_id, lease.token, unpublished)
             for source in scope["sources"]:
                 await catalog.record_coverage(task_id, lease.token, source, "success")
+            assert await tasks.queue_reply(
+                task_id,
+                lease.token,
+                CollectionRecipient(user_id, request_id, version),
+                {"kind": "collection_result", "collection_task_id": task_id},
+            )
             await tasks.complete(task_id, lease.token, {"published": len(observations)})
             await session.commit()
         return await main.search_request(
