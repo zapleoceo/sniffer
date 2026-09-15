@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import cast
 
-from sqlalchemy import Table, func, or_, select
+from sqlalchemy import Table, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from sniffer.db import models
@@ -14,6 +14,29 @@ from sniffer.domain.records import Listing, MatchFilter
 
 
 class ListingRepository(Repository):
+    _REPLACEABLE_FIELDS = (
+        "raw_message_id",
+        "source",
+        "external_id",
+        "seller_id",
+        "deal_type",
+        "category",
+        "city",
+        "district",
+        "title",
+        "summary",
+        "price_amount",
+        "price_currency",
+        "price_period",
+        "price_usd_month",
+        "attributes",
+        "tg_link",
+        "lang",
+        "confidence",
+        "posted_at",
+        "is_active",
+    )
+
     async def add(self, listing: Listing) -> Listing:
         """Вставка карточки. Возвращает её же с проставленным `id`.
 
@@ -154,3 +177,41 @@ class ListingRepository(Repository):
             select(models.Listing).where(models.Listing.raw_message_id == raw_message_id)
         )
         return to_listing(row) if row is not None else None
+
+    async def get_by_fingerprint(self, text_hash: str, *, besides: int) -> Listing | None:
+        """Return the active canonical card for another copy of the same advert."""
+        row = await self._session.scalar(
+            select(models.Listing)
+            .join(models.RawMessage, models.Listing.raw_message_id == models.RawMessage.id)
+            .where(
+                models.RawMessage.text_hash == text_hash,
+                models.RawMessage.id != besides,
+                models.Listing.is_active.is_(True),
+            )
+            .order_by(models.Listing.posted_at.desc(), models.Listing.id.desc())
+            .limit(1)
+        )
+        return to_listing(row) if row is not None else None
+
+    async def refresh(self, listing_id: int, replacement: Listing) -> Listing:
+        """Move a canonical duplicate card to its freshest original and facts."""
+        values = {
+            field: dict(value) if field == "attributes" else value
+            for field in self._REPLACEABLE_FIELDS
+            for value in (getattr(replacement, field),)
+        }
+        await self._session.execute(
+            update(models.Listing).where(models.Listing.id == listing_id).values(**values)
+        )
+        await self._session.flush()
+        refreshed = await self.get(listing_id)
+        if refreshed is None:
+            raise ValueError("listing_not_found")
+        return refreshed
+
+    async def deactivate(self, listing_id: int) -> None:
+        await self._session.execute(
+            update(models.Listing)
+            .where(models.Listing.id == listing_id)
+            .values(is_active=False)
+        )

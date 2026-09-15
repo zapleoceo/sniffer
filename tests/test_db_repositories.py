@@ -809,6 +809,62 @@ async def test_the_stage_pass_can_refresh_a_stale_fingerprint(db_session: AsyncS
     assert (stored.stage, stored.text_hash) == ("extracted", "свежий-отпечаток")
 
 
+async def test_a_fresh_rental_repost_replaces_a_misclassified_sale(
+    db_session: AsyncSession,
+) -> None:
+    """A duplicate must repair old facts instead of preserving a known lie."""
+    from sniffer.domain.fingerprint import fingerprint
+    from sniffer.worker.archive import ArchivePipeline
+
+    chat = Chat(tg_id=-100123, title="Байки", city="nha_trang", username="bikes")
+    await ChatRepository(db_session).add(chat)
+    text = "D1 MOTO — АРЕНДА БАЙКОВ в Нячанге, цена от 100.000 VND в день"
+    old_id, fresh_id = await RawMessageRepository(db_session).add_many(
+        [
+            RawMessage(
+                chat_tg_id=chat.tg_id,
+                msg_id=1,
+                text=text,
+                text_hash=fingerprint(text),
+                posted_at=NOW,
+            ),
+            RawMessage(
+                chat_tg_id=chat.tg_id,
+                msg_id=2,
+                text=text,
+                text_hash="legacy-byte-hash",
+                posted_at=NOW + timedelta(days=1),
+            ),
+        ]
+    )
+    old = await ListingRepository(db_session).add(
+        Listing(
+            raw_message_id=old_id,
+            deal_type="sell",
+            category="motorbike",
+            city="nha_trang",
+            title="D1 MOTO",
+            summary=text,
+            tg_link="https://t.me/bikes/1",
+            posted_at=NOW,
+        )
+    )
+    await db_session.commit()
+    fresh = await RawMessageRepository(db_session).get_by_key(chat.tg_id, 2)
+    assert fresh is not None
+
+    assert await ArchivePipeline()._one(fresh, db_session) == 1
+    await db_session.commit()
+
+    stale = await ListingRepository(db_session).get(old.id or 0)
+    repaired = await ListingRepository(db_session).get_by_raw_message(fresh_id)
+    stored_raw = await RawMessageRepository(db_session).get_by_key(chat.tg_id, 2)
+    assert stale is not None and stale.is_active is False
+    assert repaired is not None and repaired.deal_type == "rent_out"
+    assert repaired.tg_link == "https://t.me/bikes/2"
+    assert stored_raw is not None and stored_raw.stage == "extracted"
+
+
 # ── подписки и доставка ─────────────────────────────────────────────────────
 
 
