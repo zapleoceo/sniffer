@@ -393,7 +393,9 @@ def _other_category(item: RawItem, passport: Passport) -> bool:
     """
     if passport.category is None:
         return False
-    named = category_of(f"{item.title} {item.text}")
+    # Заголовок и текст — через перевод строки, как их видит воронка: иначе
+    # заголовок сливается с текстом, и одна карточка получает две категории.
+    named = category_of(f"{item.title}\n{item.text}")
     return named is not None and named is not passport.category
 
 

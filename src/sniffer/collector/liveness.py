@@ -89,10 +89,18 @@ class LivenessChecker:
         return retired
 
     async def _read(self, chat: Chat, ids: list[int]) -> Sequence[MessageLike | None]:
-        """По имени, а если имя протухло — по tg_id, как у догона истории."""
-        if chat.username:
-            try:
-                return await self.reader.messages_by_ids(chat.username, ids)
-            except Exception as exc:
-                log.info("collector.username_stale", chat=chat.tg_id, error=type(exc).__name__)
-        return await self.reader.messages_by_ids(chat.tg_id, ids)
+        """Сначала по tg_id, и лишь если он не разрешился — по имени.
+
+        Порядок обратный догону истории намеренно. Догон в этом же проходе уже
+        прочитал все чаты, их сущности лежат в кэше клиента, и числовой id
+        разрешается без сети. Имя же стоит запроса `ResolveUsername`, а у него
+        свой флуд-лимит: замер 18.09.2026 — паузы по 8 секунд, в которые
+        проверка по имени добавляла свою долю.
+        """
+        try:
+            return await self.reader.messages_by_ids(chat.tg_id, ids)
+        except Exception as exc:
+            if not chat.username:
+                raise
+            log.info("collector.liveness_by_username", chat=chat.tg_id, error=type(exc).__name__)
+        return await self.reader.messages_by_ids(chat.username, ids)

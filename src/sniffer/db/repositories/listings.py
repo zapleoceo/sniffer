@@ -270,6 +270,29 @@ class ListingRepository(Repository):
                 refs.append((int(listing_id), int(tail)))
         return refs
 
+    async def active_page(self, source: str, *, after_id: int, limit: int) -> list[Listing]:
+        """Страница активных карточек источника по возрастанию id — для пересчёта."""
+        rows = await self._session.scalars(
+            select(models.Listing)
+            .where(
+                models.Listing.source == source,
+                models.Listing.is_active.is_(True),
+                models.Listing.id > after_id,
+            )
+            .order_by(models.Listing.id)
+            .limit(limit)
+        )
+        return [to_listing(row) for row in rows]
+
+    async def reclassify(
+        self, listing_id: int, *, category: str, deal_type: str, attributes: dict[str, Any]
+    ) -> None:
+        await self._session.execute(
+            update(models.Listing)
+            .where(models.Listing.id == listing_id)
+            .values(category=category, deal_type=deal_type, attributes=dict(attributes))
+        )
+
     async def deactivate_many(self, listing_ids: list[int]) -> int:
         if not listing_ids:
             return 0

@@ -36,6 +36,7 @@ from sniffer.search.motorbike_models import BODY_SCOOTER, MOTORBIKE_BRANDS
 from sniffer.search.rooms import read_rooms
 from sniffer.search.vocabulary import (
     brand_category,
+    category_hints,
     city_variants,
     model_brand,
     model_category,
@@ -99,7 +100,8 @@ _CATEGORY_RULES: tuple[tuple[Category, re.Pattern[str]], ...] = (
     ),
     (
         Category.BICYCLE,
-        re.compile(r"\b(?:велосипед\w*|велик\w*|bicycle|xe\s?đạp)\b", re.IGNORECASE),
+        # «велик(?!олеп)»: «великолепный вид» — не велосипед.
+        re.compile(r"\b(?:велосипед\w*|велик(?!олеп)\w*|bicycle|xe\s?đạp)\b", re.IGNORECASE),
     ),
     (
         Category.APARTMENT,
@@ -114,7 +116,8 @@ _CATEGORY_RULES: tuple[tuple[Category, re.Pattern[str]], ...] = (
             re.IGNORECASE,
         ),
     ),
-    (Category.ROOM, re.compile(r"\b(?:комнат\w*|room|phòng)\b", re.IGNORECASE)),
+    # «комнат(?!н)»: «1-комнатная квартира» — квартира, а не комната.
+    (Category.ROOM, re.compile(r"\b(?:комнат(?!н)\w*|room|phòng)\b", re.IGNORECASE)),
     (
         Category.HOUSE,
         re.compile(r"\b(?:дом|дома|домик\w*|вилл\w*|house|villa|nhà)\b", re.IGNORECASE),
@@ -380,6 +383,12 @@ def detect_intent(text: str) -> Intent | None:
 
 
 def detect_category(text: str) -> Category | None:
+    """Категория, названная клиентом словом. Порядок правил значим (см. выше).
+
+    Это разбор ЗАПРОСА. Категорию текста объявления читает `category_of` —
+    другим правилом, потому что у продавца заголовок и обстановка, а у клиента
+    одна фраза.
+    """
     for category, pattern in _CATEGORY_RULES:
         if pattern.search(text):
             return category
@@ -485,20 +494,21 @@ def detect_model(text: str, category: Category | None = None) -> str | None:
 
 
 def category_of(text: str) -> Category | None:
-    """Категория текста — по слову, а если слова нет, по названной модели.
+    """Категория текста ЛОТА — тем же детектором, что поставил её карточке.
 
-    «Honda Lead 110 2008» не содержит слова «скутер» — только имя модели, — но
-    Lead бывает лишь у мотобайка. Сторона запроса и сторона лота ОБЯЗАНЫ читать
-    категорию одинаково: `parse_query` выводит её из модели («хочу вижн» →
-    motorbike), а отбор выдачи раньше этого не делал, и лот, назвавший только
-    модель, для запроса о жилье выглядел «неизвестной категорией» и проходил
-    фильтр (realcheck 03.09.2026 — Honda Lead в выдаче студий).
+    Воронка берёт категорию карточки из `vocabulary.category_hints` (слово рынка,
+    марка, модель — по позиции первого упоминания). Отбор выдачи обязан читать
+    лот так же: пока здесь стоял разбор КЛИЕНТСКОГО запроса, «Продам Honda Lead,
+    доставлю к квартире» карточкой была байком, а отбором — квартирой, и выдача
+    мотобайков её выбрасывала. Разбор запроса знает ещё слова клиента (опечатки,
+    «мотак», «двушка») — он запасной путь, когда словарь рынка молчит.
 
-    Модель ищется уже с учётом слова: у листинга «студия Vision Tower» категория
-    названа словом (apartment), и до модели дело не доходит — «Vision» там имя
-    дома, а не Honda. Та же защита, что у `parse_query`: вывод категории из
-    модели не даёт таблице читать саму себя.
+    Модель ищется с учётом слова: у листинга «студия Vision Tower» первой названа
+    студия, и «Vision» там имя дома, а не Honda.
     """
+    named = category_hints(text)
+    if named:
+        return named[0]
     said = detect_category(text)
     return said or model_category(detect_model(text, said))
 
