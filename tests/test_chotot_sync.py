@@ -151,14 +151,16 @@ def test_board_fields_win_over_words_of_the_text() -> None:
 def test_structured_facts_read_only_known_codes() -> None:
     assert structured_facts({"motorbiketype": 3, "motorbikebrand": 3}) == {
         "transmission": "manual",
+        "power": "fuel",
         "brand": "piaggio",
     }
     assert structured_facts({"motorbiketype": "2", "regdate": "2019"}) == {
         "transmission": "semi",
+        "power": "fuel",
         "year": 2019,
     }
-    # Электро: ни коробки, ни вариатора — поле честно пусто.
-    assert structured_facts({"motorbiketype": 4, "motorbikebrand": 999}) == {}
+    # Электро: ни коробки, ни вариатора — только двигатель назван: электро.
+    assert structured_facts({"motorbiketype": 4, "motorbikebrand": 999}) == {"power": "electric"}
     assert structured_facts({"motorbiketype": "ga", "regdate": 3000}) == {}
 
 

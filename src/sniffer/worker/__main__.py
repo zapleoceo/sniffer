@@ -22,6 +22,7 @@ from sniffer.worker.expiry import Expiry
 from sniffer.worker.matcher import Matcher
 from sniffer.worker.recategorize import Recategorize
 from sniffer.worker.retention import Retention
+from sniffer.worker.screening import Screening
 
 log = structlog.get_logger(__name__)
 
@@ -40,9 +41,10 @@ async def run(stop: asyncio.Event) -> None:
     chotot = ChototSync()
     expiry = Expiry()
     recategorize = Recategorize()
+    screening = Screening()
     await idle_loop(
         stop,
-        lambda: _tick(retention, archive, matcher, chotot, expiry, recategorize),
+        lambda: _tick(retention, archive, matcher, chotot, expiry, recategorize, screening),
         service=NAME,
     )
 
@@ -54,6 +56,7 @@ async def _tick(
     chotot: ChototSync,
     expiry: Expiry,
     recategorize: Recategorize,
+    screening: Screening,
 ) -> int:
     """Сколько работы сделали за проход.
 
@@ -71,6 +74,9 @@ async def _tick(
     # Пересчёт категорий у накопленного — тоже до сопоставления: подписчику
     # квартиры не уходит карточка, которая этим проходом перестала быть байком.
     expired += await recategorize.tick()
+    # Проверка моделью — тоже до сопоставления: подписчику не уходит «обмен
+    # валют», который модель этим проходом признала не товаром.
+    expired += await screening.tick()
     matched = await matcher.tick()
     return synced + processed + expired + matched + await retention.tick()
 

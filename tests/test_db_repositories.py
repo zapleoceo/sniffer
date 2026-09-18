@@ -1551,3 +1551,51 @@ async def test_catalog_expiry_retirement_and_liveness_refs(db_session: AsyncSess
 
     active = await repo.search_catalog(MatchFilter(city="nha_trang", category="motorbike"))
     assert {row.external_id for row in active} == {"-100:1", "-200:3", "c-live"}
+
+
+async def test_screening_reads_fresh_first_and_applies_the_verdict(
+    db_session: AsyncSession,
+) -> None:
+    """ИИ-проверка: свежие первыми, мусор гаснет, у товара — поля и период цены;
+    прочитанное не возвращается в очередь и не переписывается словарём."""
+    from sniffer.domain.records import MatchFilter
+
+    repo = ListingRepository(db_session)
+    for ext, age in (("-100:1", 2), ("-100:2", 1), ("-100:3", 3)):
+        await repo.upsert_external(
+            _catalog_card(ext, posted_at=NOW - timedelta(days=age), price_amount=9_000_000)
+        )
+    await db_session.commit()
+
+    queue = await repo.unscreened("telegram_archive", limit=10)
+    assert [row.external_id for row in queue] == ["-100:2", "-100:1", "-100:3"]
+    junk, bike = queue[0], queue[1]
+    assert junk.id is not None and bike.id is not None
+    await repo.apply_screen(junk.id, keep=False, note="junk/other: обмен")
+    await repo.apply_screen(
+        bike.id,
+        keep=True,
+        note="offer/motorbike",
+        category="motorbike",
+        deal_type="rent_out",
+        attributes={"power": "electric"},
+    )
+    await db_session.commit()
+
+    left = await repo.unscreened("telegram_archive", limit=10)
+    assert [row.external_id for row in left] == ["-100:3"]
+    fixed = await repo.get(bike.id)
+    assert fixed is not None
+    assert (fixed.deal_type, fixed.price_period) == ("rent_out", "month")
+    assert fixed.attributes == {"power": "electric"}
+    page = await repo.active_page("telegram_archive", after_id=0, limit=10)
+    assert [row.external_id for row in page] == ["-100:3"], "прочитанное словарём не трогаем"
+    electric = await repo.search_catalog(
+        MatchFilter(city="nha_trang", category="motorbike", attributes={"power": "fuel"})
+    )
+    assert {row.external_id for row in electric} == {"-100:3"}, "мусор погас, электро не бензин"
+
+    await repo.refresh(bike.id, fixed)
+    await db_session.commit()
+    again = await repo.unscreened("telegram_archive", limit=10)
+    assert bike.id in {row.id for row in again}, "новый текст — новая проверка"

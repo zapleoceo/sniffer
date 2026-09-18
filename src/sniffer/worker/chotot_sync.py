@@ -45,6 +45,7 @@ from sniffer.sources.chotot_reference import (
     MAX_LIMIT,
     MOTORBIKE_BRAND,
     MOTORBIKE_TYPE_AUTOMATIC,
+    MOTORBIKE_TYPE_ELECTRIC,
     REGION_V2,
     SOURCE_NAME,
     TRANSMISSION_TYPE,
@@ -205,6 +206,10 @@ def structured_facts(raw: dict[str, Any]) -> dict[str, Any]:
         facts["transmission"] = transmission
     if kind == MOTORBIKE_TYPE_AUTOMATIC:
         facts["body_type"] = BODY_SCOOTER
+    # Тип доски — единственный структурный ответ «электро или бензин»: у
+    # электро (4) своя категория, у трёх остальных — двигатель.
+    if kind is not None:
+        facts["power"] = "electric" if kind == MOTORBIKE_TYPE_ELECTRIC else "fuel"
     brand = _BRAND_BY_CODE.get(_as_int(raw.get("motorbikebrand")) or 0)
     if brand:
         facts["brand"] = brand

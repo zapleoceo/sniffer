@@ -175,7 +175,7 @@ async def test_search_listings_turns_neutral_params_into_a_catalog_filter(
     assert spec.city == CITY
     assert spec.category == "motorbike"
     assert spec.deal_type == "sell"
-    assert spec.attributes == {"brand": "honda", "transmission": "automatic"}
+    assert spec.attributes == {"brand": "honda", "transmission": "automatic", "power": "fuel"}
     assert spec.model == "lead"
     assert (spec.engine_cc_min, spec.engine_cc_max) == (250, None)
     assert spec.max_price_vnd == Decimal("12500000.0")
