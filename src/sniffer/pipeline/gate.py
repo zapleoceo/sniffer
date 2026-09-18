@@ -17,6 +17,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from sniffer.domain.listing_state import announces_closed
 from sniffer.domain.passport import Category
 
 # Детектор категорий, названных в тексте. Внедряется снаружи (воркер даёт
@@ -120,6 +121,11 @@ def gate(text: str, *, category_hints: CategoryDetector | None = None) -> GateRe
         # Простыни на 4000+ символов — это дайджесты и правила чата,
         # а не объявления.
         return GateResult(False, "too_long")
+    if announces_closed(stripped):
+        # «Продано», «сдано», «sold» — продавец сообщает, что предложения больше
+        # нет. Такое сообщение карточкой не становится: бот отвечает из базы, и
+        # закрытое объявление в выдаче — ложь клиенту (domain/listing_state).
+        return GateResult(False, "closed_offer")
 
     has_price = bool(PRICE_RE.search(stripped))
     offer_match = OFFER_RE.search(stripped)

@@ -106,7 +106,9 @@ class ArchivePipeline:
             raw,
             chat,
             result,
-            deal_type=offer_deal_type(parsed.intent),
+            # Глагол сделки из текста, иначе умолчание категории: жильё
+            # сдают, технику продают (`pipeline.archive.offer_deal_type`).
+            deal_type=offer_deal_type(parsed.intent, result.categories[0]),
             attributes=dict(parsed.attributes),
             # Город из текста лота. `parse_query` уже получил его выше с
             # городом чата по умолчанию — оставалось только донести до

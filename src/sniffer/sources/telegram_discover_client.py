@@ -115,6 +115,16 @@ class TelethonJoiner:
         )
         return cast(Sequence[Any], messages)
 
+    async def messages_by_ids(self, entity: int | str, ids: Sequence[int]) -> Sequence[Any]:
+        """Сообщения по номерам — чтение, как и `history`; удалённое приходит `None`.
+
+        Нужно проверке живости каталога (`collector/liveness.py`): удалённое или
+        отредактированное в «продано» объявление видно только так — догон
+        истории читает новое сверху и старых сообщений больше не касается.
+        """
+        messages = await self._client.get_messages(entity, ids=list(ids))
+        return cast(Sequence[Any], messages)
+
     async def join_public(self, username: str) -> int:
         """Исключение 1 из «юзербот только читает» (CLAUDE.md)."""
         from telethon.tl.functions.channels import JoinChannelRequest

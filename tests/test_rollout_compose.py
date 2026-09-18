@@ -23,10 +23,11 @@ def _service_block(name: str) -> str:
     return "\n".join(lines[start:end])
 
 
-def test_public_bot_reads_catalogue_and_can_queue_collection() -> None:
+def test_public_bot_answers_from_the_listings_catalogue() -> None:
+    """Владелец 12.09.2026: ответ — из своей базы, без живого обхода групп."""
     bot = _service_block("bot")
 
-    assert "CATALOG_MODE: catalog" in bot
+    assert "CATALOG_MODE: listings" in bot
     assert 'AGENT_COLLECTOR_ENABLED: "true"' in bot
 
 
@@ -42,6 +43,6 @@ def test_deploy_includes_profile_and_rejects_idle_public_collector() -> None:
 
     assert 'COMPOSE_PROFILE_ARGS="--profile agent-catalog"' in deploy
     assert "docker compose $COMPOSE_PROFILE_ARGS up -d --remove-orphans" in deploy
-    assert 's.catalog_mode == "catalog"' in deploy
+    assert 's.catalog_mode in ("catalog", "listings")' in deploy
     assert "s.agent_collector_enabled" in deploy
     assert "s.broker_project_key.strip()" in deploy

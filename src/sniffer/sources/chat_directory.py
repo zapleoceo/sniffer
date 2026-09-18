@@ -25,12 +25,14 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from contextlib import AbstractAsyncContextManager
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sniffer.domain.passport import Intent, counterpart_deal_type
+from sniffer.domain.listing_state import LISTING_MAX_AGE_DAYS
+from sniffer.domain.passport import Intent, counterpart_deal_type, engine_cc_bounds
 from sniffer.domain.records import Listing, MatchFilter
 from sniffer.sources.telegram_reference import ChatDirectory, ChatLike
 
@@ -39,6 +41,15 @@ log = structlog.get_logger(__name__)
 # Во сколько раз больше чатов просим у базы, чем нужно источнику. Города в
 # реестре перемешаны, и без запаса фильтр оставил бы от выборки огрызок.
 CITY_OVERFETCH = 5
+
+# Докуда назад смотрит разовый поиск по каталогу — столько же, сколько живёт
+# карточка (`domain.listing_state`): старше её гасит воркер, и окно шире лишь
+# листало бы погашенное.
+CATALOG_MAX_AGE_DAYS = LISTING_MAX_AGE_DAYS
+
+# Свойства, которые каталог отбирает «известное ≠ несовпадение». Модель и объём
+# идут своими полями `MatchFilter`: у них другая семантика (см. там).
+_EXACT_ATTRIBUTES = ("brand", "transmission", "rooms")
 
 
 class CityChatLike(ChatLike, Protocol):
@@ -153,11 +164,25 @@ async def search_listings(params: dict[str, object], *, limit: int) -> list[List
         value = budget.get("max")
         if isinstance(value, (int, float)) and value >= 0:
             ceiling = Decimal(str(value))
+    # Атрибуты приезжают в нейтральном виде паспорта (`search/plan.context_params`)
+    # — те же имена, что читает разбор запроса и отбор выдачи.
+    raw_attributes = params.get("attributes")
+    attributes = dict(raw_attributes) if isinstance(raw_attributes, dict) else {}
+    low, high = engine_cc_bounds(attributes.get("engine_cc"), attributes.get("engine_cc_dir"))
     spec = MatchFilter(
         city=city,
         category=str(params.get("category") or "").strip() or None,
         deal_type=counterpart_deal_type(intent),
         max_price_vnd=ceiling,
+        since=datetime.now(UTC) - timedelta(days=CATALOG_MAX_AGE_DAYS),
+        attributes={
+            key: attributes[key]
+            for key in _EXACT_ATTRIBUTES
+            if attributes.get(key) not in (None, "")
+        },
+        model=str(attributes.get("model") or "").strip() or None,
+        engine_cc_min=low,
+        engine_cc_max=high,
     )
     async with session_scope() as session:
         return await ListingRepository(session).search_catalog(spec, limit=limit)
@@ -174,3 +199,20 @@ async def store_listings(listings: list[Listing]) -> int:
             inserted += await repo.upsert_external(listing)
         await session.commit()
         return inserted
+
+
+async def retire_unseen_listings(source: str, *, city: str, category: str, seen: set[str]) -> int:
+    """Погасить карточки источника, которых полный обход больше не нашёл.
+
+    Зовётся только после обхода, дошедшего до КОНЦА выдачи: если доска отдала
+    полную страницу, за ней могли остаться живые объявления, и гасить их по
+    неполному списку значит снять с продажи то, что продаётся.
+    """
+    from sniffer.db import ListingRepository, session_scope
+
+    async with session_scope() as session:
+        retired = await ListingRepository(session).retire_unseen(
+            source, city=city, category=category, seen=seen
+        )
+        await session.commit()
+        return retired

@@ -22,7 +22,13 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from sniffer.domain.passport import Category, Intent, Passport, PassportStatus
+from sniffer.domain.passport import (
+    RENTED_CATEGORIES,
+    Category,
+    Intent,
+    Passport,
+    PassportStatus,
+)
 from sniffer.search.budget_rules import parse_budget
 from sniffer.search.engine_size import cc_glued_to_name, read_engine_size, without_engine_cc
 from sniffer.search.market_terms import ALL_CITY_NAMES, ATTRIBUTE_TERMS, LangTerms
@@ -41,7 +47,12 @@ from sniffer.search.vocabulary import (
 # аренда, а не покупка, поэтому глаголы сделки идут раньше общего «ищу».
 _INTENT_RULES: tuple[tuple[Intent, re.Pattern[str]], ...] = (
     (Intent.SELL, re.compile(r"\b(?:прода(?:м|ю|ть)|sell|for\s?sale)\b", re.IGNORECASE)),
-    (Intent.RENT_OUT, re.compile(r"\b(?:сда(?:м|ю|ть)|cho\s?thuê)\b", re.IGNORECASE)),
+    # «сдаётся»/«сдается» — так пишут объявления, а не клиенты; разбор читает
+    # и те и другие (конвейер архива берёт сторону сделки отсюда же).
+    (
+        Intent.RENT_OUT,
+        re.compile(r"\b(?:сда(?:м|ю|ть|[её]тся)|cho\s?thuê)\b", re.IGNORECASE),
+    ),
     (
         Intent.RENT,
         # «прокат»/«напрокат» — это тоже аренда: «прокат скутера» клиент хочет
@@ -251,12 +262,11 @@ _CITY_RULES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
     (slug, _city_pattern(slug)) for slug in ALL_CITY_NAMES
 )
 
-# Жильё в Нячанге снимают, а не покупают: иностранцу с туристической визой
-# купить квартиру нельзя в принципе. Для транспорта симметрично — берут себе.
-_RENTED_CATEGORIES = (Category.APARTMENT, Category.ROOM, Category.HOUSE)
+# Жильё в Нячанге снимают, а не покупают — знание общее с конвейером архива и
+# лежит в домене (`RENTED_CATEGORIES`). Для транспорта симметрично — берут себе.
 
 # У жилья свой набор атрибутов — мебель, вид на море, число комнат, — и его
-# извлекают только для жилых категорий. Совпадает с `_RENTED_CATEGORIES` не
+# извлекают только для жилых категорий. Совпадает с `RENTED_CATEGORIES` не
 # случайно (то же жильё), но знание разное: там «это снимают», здесь «у этого
 # такие атрибуты», и завтра они могут разойтись (гараж покупают, а комнаты у
 # него есть). Число комнат гейтится этим кортежем; мебель и вид на море — своей
@@ -295,7 +305,7 @@ def parse_query(text: str, *, default_city: str = "") -> Passport:
     # «yamaha» без иных слов — мотобайк (иначе в выдачу лезла даже квартира).
     category = said or model_category(model) or brand_category(brand)
     if intent is None:
-        intent = Intent.RENT if category in _RENTED_CATEGORIES else Intent.BUY
+        intent = Intent.RENT if category in RENTED_CATEGORIES else Intent.BUY
 
     attributes: dict[str, Any] = {}
     # Объём двигателя вынимается ПЕРВЫМ и вырезается из текста: «200 кубиков»

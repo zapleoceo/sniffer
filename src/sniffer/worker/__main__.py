@@ -17,6 +17,8 @@ import structlog
 from sniffer.config import Settings
 from sniffer.runtime.service import Service, idle_loop, run_service
 from sniffer.worker.archive import ArchivePipeline
+from sniffer.worker.chotot_sync import ChototSync
+from sniffer.worker.expiry import Expiry
 from sniffer.worker.matcher import Matcher
 from sniffer.worker.retention import Retention
 
@@ -34,20 +36,33 @@ async def run(stop: asyncio.Event) -> None:
     retention = Retention()
     archive = ArchivePipeline()
     matcher = Matcher()
-    await idle_loop(stop, lambda: _tick(retention, archive, matcher), service=NAME)
+    chotot = ChototSync()
+    expiry = Expiry()
+    await idle_loop(stop, lambda: _tick(retention, archive, matcher, chotot, expiry), service=NAME)
 
 
-async def _tick(retention: Retention, archive: ArchivePipeline, matcher: Matcher) -> int:
+async def _tick(
+    retention: Retention,
+    archive: ArchivePipeline,
+    matcher: Matcher,
+    chotot: ChototSync,
+    expiry: Expiry,
+) -> int:
     """Сколько работы сделали за проход.
 
     Возврат числа, а не флага, нужен циклу: пока пачки полные, спать незачем.
     """
     # Порядок обязателен: сопоставление обязано видеть карточки, созданные
     # этим же проходом, иначе подписчик узнаёт о находке на четверть часа позже
-    # без всякой причины.
+    # без всякой причины. Доска — тем же процессом и перед сопоставлением по
+    # той же причине: карточка Chotot — такая же строка `listings`.
+    synced = await chotot.tick()
     processed = await archive.tick()
+    # Гашение устаревшего — до сопоставления: подписчику не уходит карточка,
+    # которая в этом же проходе перестала быть актуальной.
+    expired = await expiry.tick()
     matched = await matcher.tick()
-    return processed + matched + await retention.tick()
+    return synced + processed + expired + matched + await retention.tick()
 
 
 SERVICE = Service(name=NAME, requires=missing_settings, run=run)
