@@ -206,6 +206,8 @@ CREATE TABLE IF NOT EXISTS listings (
     posted_at       TIMESTAMPTZ NOT NULL,
     extracted_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     is_active       BOOLEAN     NOT NULL DEFAULT TRUE,
+    screened_at     TIMESTAMPTZ,            -- ИИ-проверка, см. 009_listing_screen.sql
+    screen_note     TEXT,
 
     search_tsv      tsvector,
     embedding       vector(1024),

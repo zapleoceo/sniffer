@@ -14,12 +14,14 @@ from sniffer.domain.passport import (
     Currency,
     Intent,
     Passport,
+    with_default_attributes,
 )
 from sniffer.search.engine_size import listing_cc_values
 from sniffer.search.intake_rules import (
     category_of,
     detect_brand,
     detect_housing_attributes,
+    detect_power,
     detect_transmission,
 )
 from sniffer.search.market_terms import RENTAL_PRICE_MARKERS, RENTAL_STEMS
@@ -152,6 +154,8 @@ def _contradicts(item: RawItem, passport: Passport, usd_vnd: float | None) -> bo
         return True
     if _contrary_attribute(passport, "transmission", text):
         return True
+    if _contrary_power(passport, text):
+        return True
     if _contrary_furnished(passport, text):
         return True
     if _wrong_engine(
@@ -197,6 +201,24 @@ def _contrary_attribute(passport: Passport, field: str, text: str) -> bool:
     else:
         return False
     return found is not None and str(found) != str(wanted)
+
+
+def _contrary_power(passport: Passport, text: str) -> bool:
+    """Электро на запрос ДВС и наоборот. Умолчание байка — бензин
+    (`domain.passport.DEFAULT_ATTRIBUTES`).
+
+    Несимметрично намеренно. Молчащий лот на рынке — почти всегда бензиновый
+    (электро продавец называет: это первое, что спросит покупатель), поэтому
+    на бензин молчание проходит, а на электро — нет: Honda Lead без слова
+    «бензин» электробайком не становится."""
+    category = passport.category.value if passport.category else None
+    wanted = with_default_attributes(category, dict(passport.attributes)).get("power")
+    if not wanted:
+        return False
+    found = detect_power(text, passport.category)
+    if wanted == "electric":
+        return found != "electric"
+    return found is not None and found != wanted
 
 
 def _contrary_furnished(passport: Passport, text: str) -> bool:

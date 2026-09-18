@@ -212,6 +212,8 @@ class ListingRepository(Repository):
             for field in self._REPLACEABLE_FIELDS
             for value in (getattr(replacement, field),)
         }
+        # Текст сменился — прежний вердикт модели читал другой текст.
+        values["screened_at"] = None
         await self._session.execute(
             update(models.Listing).where(models.Listing.id == listing_id).values(**values)
         )
@@ -278,6 +280,9 @@ class ListingRepository(Repository):
                 models.Listing.source == source,
                 models.Listing.is_active.is_(True),
                 models.Listing.id > after_id,
+                # Прочитанное моделью правилом не переписываем: вердикт по
+                # всему тексту точнее словаря (worker/screening.py).
+                models.Listing.screened_at.is_(None),
             )
             .order_by(models.Listing.id)
             .limit(limit)
@@ -291,6 +296,50 @@ class ListingRepository(Repository):
             update(models.Listing)
             .where(models.Listing.id == listing_id)
             .values(category=category, deal_type=deal_type, attributes=dict(attributes))
+        )
+
+    async def unscreened(self, source: str, *, limit: int) -> list[Listing]:
+        """Активные карточки, которых модель ещё не читала; свежие первыми —
+        новое объявление важнее хвоста накопленного."""
+        rows = await self._session.scalars(
+            select(models.Listing)
+            .where(
+                models.Listing.source == source,
+                models.Listing.is_active.is_(True),
+                models.Listing.screened_at.is_(None),
+            )
+            .order_by(models.Listing.posted_at.desc(), models.Listing.id.desc())
+            .limit(limit)
+        )
+        return [to_listing(row) for row in rows]
+
+    async def apply_screen(
+        self,
+        listing_id: int,
+        *,
+        keep: bool,
+        note: str,
+        category: str | None = None,
+        deal_type: str | None = None,
+        attributes: dict[str, Any] | None = None,
+    ) -> None:
+        """Вердикт модели: мусор гасится, предложение получает уточнённые поля."""
+        values: dict[str, Any] = {"screened_at": func.now(), "screen_note": note[:300]}
+        if not keep:
+            values["is_active"] = False
+        if category is not None:
+            values["category"] = category
+        if deal_type is not None:
+            values["deal_type"] = deal_type
+            # Период цены следует за стороной (как в `pipeline.archive.listing_from`).
+            values["price_period"] = case(
+                (models.Listing.price_amount.is_(None), models.Listing.price_period),
+                else_="month" if deal_type == "rent_out" else "once",
+            )
+        if attributes is not None:
+            values["attributes"] = dict(attributes)
+        await self._session.execute(
+            update(models.Listing).where(models.Listing.id == listing_id).values(**values)
         )
 
     async def deactivate_many(self, listing_ids: list[int]) -> int:

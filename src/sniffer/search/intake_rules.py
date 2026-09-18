@@ -353,6 +353,9 @@ def parse_query(text: str, *, default_city: str = "") -> Passport:
         # после этого «автомат или механика?» — заставлять клиента повторяться.
         attributes["body_type"] = BODY_SCOOTER
         attributes.setdefault("transmission", "automatic")
+    power = detect_power(query, category)
+    if power:
+        attributes["power"] = power
     papers = detect_papers(query, category)
     if papers:
         attributes["papers"] = papers
@@ -529,6 +532,36 @@ def detect_transmission(text: str, category: Category | None = None) -> str | No
     категории в этом слове нет.
     """
     return _attribute_named_in(category, "transmission", text)
+
+
+# Марки, у которых на рынке Нячанга бензиновых байков нет вовсе: назвать их —
+# значит назвать электро. VinFast выпускал и бензиновые (до 2019), но на снимке
+# базы 18.09.2026 все 26 карточек VinFast — электро (Evo, Klara, Feliz, Vero).
+ELECTRIC_BRANDS_RE = re.compile(r"\b(?:vinfast|yadea|pega|dibao|dat\s?bike|selex)\b", re.IGNORECASE)
+# «электро» словом отдельно или через дефис: «электро-скутер», «хочу электро».
+# Слитное продолжение («электростартер») сюда не попадает — `\b` после «о».
+_ELECTRIC_WORD_RE = re.compile(r"\bэлектро(?:\b|-)", re.IGNORECASE)
+# Вольтаж батареи — «72V», «60 в»: у бензинового байка его в объявлении не пишут.
+_VOLTAGE_RE = re.compile(r"\b(?:48|60|72|96)\s?(?:v|в)\b", re.IGNORECASE)
+
+
+def detect_power(text: str, category: Category | None = None) -> str | None:
+    """Электро или ДВС: словом («электробайк», «xe điện», «бензин»), иначе по
+    электро-марке или вольтажу. Молчание — `None`, а не «бензин»: умолчание
+    выбирает запрос (`domain.passport.default_attributes`), не разбор текста.
+    """
+    if category not in (None, Category.MOTORBIKE):
+        return None
+    named = _attribute_named_in(Category.MOTORBIKE, "power", text)
+    if named:
+        return named
+    if (
+        ELECTRIC_BRANDS_RE.search(text)
+        or _VOLTAGE_RE.search(text)
+        or _ELECTRIC_WORD_RE.search(text)
+    ):
+        return "electric"
+    return None
 
 
 def detect_papers(text: str, category: Category | None = None) -> str | None:

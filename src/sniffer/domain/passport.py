@@ -61,6 +61,22 @@ def default_deal_type(category: Category | None) -> str:
     return "rent_out" if category in RENTED_CATEGORIES else "sell"
 
 
+# Чем категория считается, пока клиент не сказал обратного. Байк без слова
+# «электро» — бензиновый: электробайк и ДВС — разные запросы (решение владельца
+# 18.09.2026), и на «байк от 200 кубов» VinFast EVO не ответ. Одна таблица на
+# отбор в каталоге и отбор выдачи — иначе умолчания разъедутся.
+DEFAULT_ATTRIBUTES: dict[Category, dict[str, str]] = {Category.MOTORBIKE: {"power": "fuel"}}
+
+
+def with_default_attributes(category: str | None, attributes: dict[str, Any]) -> dict[str, Any]:
+    """Атрибуты запроса с умолчаниями категории; сказанное клиентом главнее."""
+    try:
+        defaults = DEFAULT_ATTRIBUTES.get(Category(category), {}) if category else {}
+    except ValueError:
+        defaults = {}
+    return {**defaults, **{k: v for k, v in attributes.items() if v not in (None, "")}}
+
+
 # Полоса допуска объёма двигателя, когда клиент назвал точку, а не границу:
 # «200 кубиков» — это про класс мотоцикла, 175 и 250 клиент назовёт тем же
 # поиском, 700 — нет. Одно число на отбор выдачи (`search/relevance.py`) и на

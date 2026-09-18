@@ -186,6 +186,25 @@ ATTRIBUTE_TERMS: dict[Category, dict[str, dict[str, LangTerms]]] = {
                 "en": ("semi-automatic",),
             },
         },
+        # Электро и ДВС — разные запросы, а не оттенок одного (решение владельца
+        # 18.09.2026): VinFast EVO на «от 200 кубов» — это не мотоцикл, который
+        # клиент искал. Марки-электро и вольтаж узнаёт `intake_rules.detect_power`.
+        "power": {
+            "electric": {
+                # Только составные слова: голая основа «электр» ловит
+                # «электростартер» и «электронику» у бензинового байка, а
+                # «electric» — «electric start» (ревью 18.09.2026). Одиночное
+                # «электро» клиента узнаёт `intake_rules.detect_power`.
+                "ru": ("электробайк", "электроскутер", "электромопед", "электромотоцикл"),
+                "vi": ("xe điện", "xe máy điện"),
+                "en": ("electric scooter", "electric bike", "electric motorbike", "e-bike"),
+            },
+            "fuel": {
+                "ru": ("бензин", "двс"),
+                "vi": ("xe xăng", "chạy xăng"),
+                "en": ("petrol", "gasoline"),
+            },
+        },
         # Слова документов лежат в PAPERS_WORDS: то же знание нужно и жаргону.
         "papers": {"blue_card": PAPERS_WORDS},
         "condition": {

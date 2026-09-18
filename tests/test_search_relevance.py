@@ -454,8 +454,25 @@ def test_an_electric_model_lends_no_displacement() -> None:
     at_least = passport(attributes={"engine_cc": 250, "engine_cc_dir": "min"})
     assert rank_items(at_least, [klara], usd_vnd=RATE, now=NOW) == []
 
+    # Потолок объёма её не режет — режет умолчание «байк = бензин» (18.09.2026):
+    # электро приходит только тому, кто электро назвал.
     at_most = passport(attributes={"engine_cc": 250, "engine_cc_dir": "max"})
-    assert rank_items(at_most, [klara], usd_vnd=RATE, now=NOW) == [klara]
+    assert rank_items(at_most, [klara], usd_vnd=RATE, now=NOW) == []
+    electric = passport(attributes={"engine_cc": 250, "engine_cc_dir": "max", "power": "electric"})
+    assert rank_items(electric, [klara], usd_vnd=RATE, now=NOW) == [klara]
+
+
+def test_electric_and_fuel_are_different_requests() -> None:
+    evo = item("evo", price=9_000_000, text="Продам VinFast Evo, 72V")
+    lead = item("lead", price=9_000_000, text="Продам Honda Lead")
+    silent = item("x", price=9_000_000, text="Продам байк, автомат")
+
+    assert rank_items(passport(), [evo, lead, silent], usd_vnd=RATE, now=NOW) != []
+    fuel = rank_items(passport(), [evo, lead, silent], usd_vnd=RATE, now=NOW)
+    assert evo not in fuel and lead in fuel
+    wants_electric = passport(attributes={"power": "electric"})
+    shown = rank_items(wants_electric, [evo, lead, silent], usd_vnd=RATE, now=NOW)
+    assert evo in shown and lead not in shown
 
 
 def test_a_ceiling_query_keeps_a_model_at_the_ceiling() -> None:
@@ -653,3 +670,15 @@ def test_a_matching_room_count_outranks_a_silent_listing() -> None:
 def _item_flat(name: str, text: str, *, age_hours: int = 1) -> RawItem:
     """Лот жилья: категория читается из «квартира»/«студия» в тексте, цена в бюджете."""
     return item(name, price=12_000_000, text=text, age_hours=age_hours)
+
+
+def test_an_electric_starter_is_not_an_electric_bike() -> None:
+    """Ревью 18.09.2026: основа «электр» и слово «electric» ловили стартер и
+    электронику бензинового байка — и тот пропадал из обычной выдачи."""
+    for text in (
+        "Продам Honda Lead, электростартер работает",
+        "Yamaha Nouvo, electric start, 125cc",
+        "Honda Vision, вся электроника в порядке",
+    ):
+        lot = item("fuel", price=9_000_000, text=text)
+        assert rank_items(passport(), [lot], usd_vnd=RATE, now=NOW) == [lot], text

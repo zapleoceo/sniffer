@@ -90,6 +90,9 @@ class Listing(BigIdMixin, Base):
         DateTime(timezone=True), nullable=False, server_default=NOW
     )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=TRUE)
+    # ИИ-проверка (009_listing_screen.sql): пусто — модель карточку не читала.
+    screened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    screen_note: Mapped[str | None] = mapped_column(Text)
     search_tsv: Mapped[str | None] = mapped_column(TSVECTOR)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIM))
 
