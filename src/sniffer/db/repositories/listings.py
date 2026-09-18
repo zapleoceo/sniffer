@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, cast
 
-from sqlalchemy import Integer, Select, Table, case, func, or_, select, update
+from sqlalchemy import Integer, Select, Table, and_, case, func, or_, select, update
 from sqlalchemy import cast as sql_cast
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -322,5 +322,7 @@ def _with_attributes(statement: Select[Any], spec: MatchFilter) -> Select[Any]:
             bounds.append(known >= spec.engine_cc_min)
         if spec.engine_cc_max is not None:
             bounds.append(known <= spec.engine_cc_max)
-        statement = statement.where(or_(known.is_(None), *bounds))
+        # Обе границы вместе (И): «200 кубиков» — это 150…250, а не «≥150
+        # ИЛИ ≤250», то есть всё подряд. Неизвестный объём не мешает.
+        statement = statement.where(or_(known.is_(None), and_(*bounds)))
     return statement
