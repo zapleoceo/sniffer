@@ -307,6 +307,10 @@ def parse_query(text: str, *, default_city: str = "") -> Passport:
     # Модель точнее марки, поэтому раньше неё; все марки рынка мотобайковые, и
     # «yamaha» без иных слов — мотобайк (иначе в выдачу лезла даже квартира).
     category = said or model_category(model) or brand_category(brand)
+    # «Электробайк», «xe điện» — сами по себе мотобайк: электро бывает только у
+    # него (живой отказ 18.09.2026: «сниму электробайк» без категории — ноль).
+    if category is None and detect_power(query) == "electric":
+        category = Category.MOTORBIKE
     if intent is None:
         intent = Intent.RENT if category in RENTED_CATEGORIES else Intent.BUY
 
