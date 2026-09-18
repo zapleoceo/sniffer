@@ -31,6 +31,7 @@ from typing import Protocol
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sniffer.domain.listing_state import LISTING_MAX_AGE_DAYS
 from sniffer.domain.passport import Intent, counterpart_deal_type, engine_cc_bounds
 from sniffer.domain.records import Listing, MatchFilter
 from sniffer.sources.telegram_reference import ChatDirectory, ChatLike
@@ -41,12 +42,10 @@ log = structlog.get_logger(__name__)
 # реестре перемешаны, и без запаса фильтр оставил бы от выборки огрызок.
 CITY_OVERFETCH = 5
 
-# Докуда назад смотрит разовый поиск по каталогу. Шире порога живости в отборе
-# выдачи (28 дней, `search/relevance.py`) намеренно: тот порог отменяется, когда
-# после него пусто, и старое показывается с честной пометкой возраста — а для
-# этого старое обязано доехать из базы. Без потолка вовсе запрос листал бы
-# девяносто дней сырья ради пяти карточек.
-CATALOG_MAX_AGE_DAYS = 60
+# Докуда назад смотрит разовый поиск по каталогу — столько же, сколько живёт
+# карточка (`domain.listing_state`): старше её гасит воркер, и окно шире лишь
+# листало бы погашенное.
+CATALOG_MAX_AGE_DAYS = LISTING_MAX_AGE_DAYS
 
 # Свойства, которые каталог отбирает «известное ≠ несовпадение». Модель и объём
 # идут своими полями `MatchFilter`: у них другая семантика (см. там).
@@ -200,3 +199,20 @@ async def store_listings(listings: list[Listing]) -> int:
             inserted += await repo.upsert_external(listing)
         await session.commit()
         return inserted
+
+
+async def retire_unseen_listings(source: str, *, city: str, category: str, seen: set[str]) -> int:
+    """Погасить карточки источника, которых полный обход больше не нашёл.
+
+    Зовётся только после обхода, дошедшего до КОНЦА выдачи: если доска отдала
+    полную страницу, за ней могли остаться живые объявления, и гасить их по
+    неполному списку значит снять с продажи то, что продаётся.
+    """
+    from sniffer.db import ListingRepository, session_scope
+
+    async with session_scope() as session:
+        retired = await ListingRepository(session).retire_unseen(
+            source, city=city, category=category, seen=seen
+        )
+        await session.commit()
+        return retired

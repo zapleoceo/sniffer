@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, cast
 
 from sqlalchemy import Integer, Select, Table, case, func, or_, select, update
@@ -219,6 +220,65 @@ class ListingRepository(Repository):
         if refreshed is None:
             raise ValueError("listing_not_found")
         return refreshed
+
+    async def expire(self, *, older_than: datetime, limit: int) -> int:
+        """Погасить пачку карточек, опубликованных раньше `older_than`."""
+        stale = (
+            select(models.Listing.id)
+            .where(models.Listing.is_active.is_(True), models.Listing.posted_at < older_than)
+            .limit(limit)
+            .scalar_subquery()
+        )
+        result = await self._session.execute(
+            update(models.Listing).where(models.Listing.id.in_(stale)).values(is_active=False)
+        )
+        return int(getattr(result, "rowcount", 0) or 0)
+
+    async def retire_unseen(self, source: str, *, city: str, category: str, seen: set[str]) -> int:
+        """Погасить карточки источника в городе и категории, которых нет в `seen`."""
+        statement = update(models.Listing).where(
+            models.Listing.source == source,
+            models.Listing.city == city,
+            models.Listing.category == category,
+            models.Listing.is_active.is_(True),
+        )
+        if seen:
+            statement = statement.where(models.Listing.external_id.not_in(sorted(seen)))
+        result = await self._session.execute(statement.values(is_active=False))
+        return int(getattr(result, "rowcount", 0) or 0)
+
+    async def live_archive_refs(
+        self, chat_tg_id: int, *, since: datetime, limit: int
+    ) -> list[tuple[int, int]]:
+        """Активные карточки чата: (id карточки, id сообщения) для перечитывания."""
+        prefix = f"{chat_tg_id}:"
+        rows = await self._session.execute(
+            select(models.Listing.id, models.Listing.external_id)
+            .where(
+                models.Listing.source == "telegram_archive",
+                models.Listing.is_active.is_(True),
+                models.Listing.posted_at >= since,
+                models.Listing.external_id.startswith(prefix),
+            )
+            .order_by(models.Listing.posted_at.desc())
+            .limit(limit)
+        )
+        refs: list[tuple[int, int]] = []
+        for listing_id, external_id in rows:
+            tail = str(external_id).removeprefix(prefix)
+            if tail.isdigit():
+                refs.append((int(listing_id), int(tail)))
+        return refs
+
+    async def deactivate_many(self, listing_ids: list[int]) -> int:
+        if not listing_ids:
+            return 0
+        result = await self._session.execute(
+            update(models.Listing)
+            .where(models.Listing.id.in_(listing_ids), models.Listing.is_active.is_(True))
+            .values(is_active=False)
+        )
+        return int(getattr(result, "rowcount", 0) or 0)
 
     async def deactivate(self, listing_id: int) -> None:
         await self._session.execute(

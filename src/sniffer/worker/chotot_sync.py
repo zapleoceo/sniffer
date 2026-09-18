@@ -15,6 +15,11 @@
 Повторный обход старое не переписывает: `upsert_external` вставляет только
 незнакомые `(source, external_id)`. Цена, изменённая продавцом, до базы не
 доедет — записанный предел, а не недосмотр: карточка ведёт на оригинал.
+
+Снятое с доски гасится: если обход дошёл до конца выдачи (последняя страница
+неполная), всё, чего в нём не было, продавец убрал. Если доска отдала полные
+страницы, за ними могли остаться живые объявления, и по неполному списку не
+гасится ничего.
 """
 
 from __future__ import annotations
@@ -22,7 +27,7 @@ from __future__ import annotations
 import time
 from collections.abc import Awaitable, Callable
 from decimal import Decimal
-from typing import Any
+from typing import Any, Protocol
 
 import structlog
 
@@ -33,7 +38,7 @@ from sniffer.search.intake_rules import parse_query
 from sniffer.search.motorbike_models import BODY_SCOOTER
 from sniffer.search.vocabulary import is_served
 from sniffer.sources.base import RawItem, Source
-from sniffer.sources.chat_directory import store_listings
+from sniffer.sources.chat_directory import retire_unseen_listings, store_listings
 from sniffer.sources.chotot import ChototSource
 from sniffer.sources.chotot_reference import (
     CATEGORY_CG,
@@ -53,6 +58,12 @@ log = structlog.get_logger(__name__)
 PAGES = 2
 
 Store = Callable[[list[Listing]], Awaitable[int]]
+
+
+class Retire(Protocol):
+    async def __call__(self, source: str, *, city: str, category: str, seen: set[str]) -> int: ...
+
+
 SourceFactory = Callable[[], Source]
 Clock = Callable[[], float]
 
@@ -73,6 +84,7 @@ class ChototSync:
         interval_s: float | None = None,
         source_factory: SourceFactory = ChototSource,
         store: Store = store_listings,
+        retire: Retire = retire_unseen_listings,
         clock: Clock = time.monotonic,
     ) -> None:
         self._interval = (
@@ -80,6 +92,7 @@ class ChototSync:
         )
         self._source_factory = source_factory
         self._store = store
+        self._retire = retire
         self._clock = clock
         # Первый обход — сразу при старте процесса: деплой не должен оставлять
         # каталог без доски на полчаса.
@@ -100,6 +113,7 @@ class ChototSync:
     async def _sync(self, city: str, category: Category) -> int:
         adapter = self._source_factory()
         found: list[RawItem] = []
+        complete = False
         try:
             for page in range(PAGES):
                 items = await adapter.search(
@@ -118,9 +132,21 @@ class ChototSync:
                     break
                 found.extend(items)
                 if len(items) < MAX_LIMIT:
+                    # Страница неполная — выдача доски кончилась, и список
+                    # увиденного полон: остальное с доски снято.
+                    complete = True
                     break
         finally:
             await adapter.aclose()
+        if complete:
+            retired = await self._retire(
+                SOURCE_NAME,
+                city=city,
+                category=category.value,
+                seen={item.external_id for item in found},
+            )
+            if retired:
+                log.info("chotot.retired", city=city, category=category.value, retired=retired)
         listings = [
             listing_from_ad(item, city=city, category=category)
             for item in found

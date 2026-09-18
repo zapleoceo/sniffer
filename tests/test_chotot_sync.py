@@ -58,8 +58,30 @@ class Store:
         return len(listings)
 
 
-def sync(board: Board, store: Store, *, clock: Any, interval: float = 1800.0) -> ChototSync:
-    return ChototSync(interval_s=interval, source_factory=board.source, store=store, clock=clock)
+@dataclass
+class Retired:
+    calls: list[tuple[str, str, str, set[str]]] = field(default_factory=list)
+
+    async def __call__(self, source: str, *, city: str, category: str, seen: set[str]) -> int:
+        self.calls.append((source, city, category, seen))
+        return 0
+
+
+def sync(
+    board: Board,
+    store: Store,
+    *,
+    clock: Any,
+    interval: float = 1800.0,
+    retired: Retired | None = None,
+) -> ChototSync:
+    return ChototSync(
+        interval_s=interval,
+        source_factory=board.source,
+        store=store,
+        retire=retired or Retired(),
+        clock=clock,
+    )
 
 
 async def test_first_pass_runs_at_start_then_waits_for_the_interval() -> None:
@@ -158,3 +180,31 @@ async def test_undated_ads_never_enter_the_catalog() -> None:
 
     assert "134413797" not in {row.external_id for row in store.rows}
     assert store.rows, "остальные объявления доски доехали"
+
+
+async def test_a_complete_sweep_retires_what_left_the_board() -> None:
+    """Обход дошёл до конца выдачи — всё, чего в нём нет, продавец снял."""
+    board, store, retired = Board(), Store(), Retired()
+    await sync(board, store, clock=lambda: 0.0, retired=retired).tick()
+
+    seen = {str(ad["list_id"]) for ad in payload()["ads"]}
+    assert retired.calls, "полная выдача — повод погасить снятое"
+    assert all(call[0] == "chotot" and call[2] == "motorbike" for call in retired.calls)
+    assert all(call[3] == seen for call in retired.calls)
+
+
+async def test_a_full_page_retires_nothing() -> None:
+    """За полной страницей могли остаться живые — по неполному списку не гасим."""
+    ad = payload()["ads"][0]
+    ads = [dict(ad, list_id=1000 + n) for n in range(50)]
+    board, store, retired = Board(ads=ads), Store(), Retired()
+    await sync(board, store, clock=lambda: 0.0, retired=retired).tick()
+
+    assert retired.calls == []
+
+
+async def test_a_dead_board_retires_nothing() -> None:
+    board, store, retired = Board(broken=True), Store(), Retired()
+    await sync(board, store, clock=lambda: 0.0, retired=retired).tick()
+
+    assert retired.calls == [], "лежащая доска — не повод снимать объявления"

@@ -1524,3 +1524,30 @@ async def test_catalog_search_filters_by_known_attributes_and_keeps_the_unknown(
     fresh = await repo.search_catalog(replace(base, since=NOW - timedelta(days=60)))
     assert "old" not in ids(fresh)
     assert "honda-lead" in ids(fresh)
+
+
+async def test_catalog_expiry_retirement_and_liveness_refs(db_session: AsyncSession) -> None:
+    """Каталог хранит актуальное: старое гаснет, снятое с доски гаснет, а
+    живость перечитывает только свежие карточки своего чата."""
+    repo = ListingRepository(db_session)
+    await repo.upsert_external(_catalog_card("-100:1", posted_at=NOW))
+    await repo.upsert_external(_catalog_card("-100:2", posted_at=NOW - timedelta(days=40)))
+    await repo.upsert_external(_catalog_card("-200:3", posted_at=NOW))
+    for ext in ("c-live", "c-gone"):
+        await repo.upsert_external(_catalog_card(ext, source="chotot"))
+    await db_session.commit()
+
+    refs = await repo.live_archive_refs(-100, since=NOW - timedelta(days=30), limit=50)
+    assert [msg for _, msg in refs] == [1]
+
+    assert await repo.expire(older_than=NOW - timedelta(days=30), limit=100) == 1
+    assert (
+        await repo.retire_unseen("chotot", city="nha_trang", category="motorbike", seen={"c-live"})
+        == 1
+    )
+    await db_session.commit()
+
+    from sniffer.domain.records import MatchFilter
+
+    active = await repo.search_catalog(MatchFilter(city="nha_trang", category="motorbike"))
+    assert {row.external_id for row in active} == {"-100:1", "-200:3", "c-live"}

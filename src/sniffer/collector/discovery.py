@@ -19,8 +19,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sniffer.collector.alerts import session_unavailable
 from sniffer.collector.backfill import HistoryBackfill
-from sniffer.collector.history_store import DatabaseHistoryStore
-from sniffer.collector.ingest import HistorySyncer
+from sniffer.collector.history_store import DatabaseHistoryStore, DatabaseLivenessStore
+from sniffer.collector.ingest import HISTORY_CHATS_PER_TICK, HistorySyncer
+from sniffer.collector.liveness import LivenessChecker
 from sniffer.config import Settings, get_settings
 from sniffer.db.engine import session_scope
 from sniffer.db.repositories.chats import ChatRepository
@@ -167,9 +168,16 @@ class BackfillLike(Protocol):
     async def run(self) -> int: ...
 
 
+class LivenessLike(Protocol):
+    position: int
+
+    async def run(self) -> int: ...
+
+
 JoinerFactory = Callable[[TelegramJoiner], JoinerLike]
 HistoryFactory = Callable[[TelegramJoiner], HistoryLike]
 BackfillFactory = Callable[[TelegramJoiner], BackfillLike]
+LivenessFactory = Callable[[TelegramJoiner], LivenessLike]
 ClientFactory = Callable[[Settings], TelegramJoiner]
 OwnerAlert = Callable[[Settings, str], Awaitable[None]]
 
@@ -191,6 +199,7 @@ class DiscoveryRunner:
         joiner_factory: JoinerFactory | None = None,
         history_factory: HistoryFactory | None = None,
         backfill_factory: BackfillFactory | None = None,
+        liveness_factory: LivenessFactory | None = None,
         owner_alert: OwnerAlert = session_unavailable,
     ) -> None:
         self._settings = settings or get_settings()
@@ -198,6 +207,10 @@ class DiscoveryRunner:
         self._joiner_factory = joiner_factory or self._new_joiner
         self._history_factory = history_factory or self._new_history
         self._backfill_factory = backfill_factory or self._new_backfill
+        self._liveness_factory = liveness_factory or self._new_liveness
+        # Номер чата в круге проверки живости. Клиент Telegram создаётся на
+        # проход заново, а круг обязан продолжаться с того места, где встал.
+        self._liveness_position = 0
         self._owner_alert = owner_alert
         self._unavailable_reported = False
 
@@ -233,6 +246,12 @@ class DiscoveryRunner:
             # случайный: свежее объявление клиенту нужнее вчерашнего, а добор
             # длинный и может оборваться на середине — обрывать при этом нечего.
             await self._backfill_factory(client).run()
+            # Живость каталога — последней: это перечитывание уже известного,
+            # и свежему посту и добору архива оно уступает место в проходе.
+            liveness = self._liveness_factory(client)
+            liveness.position = self._liveness_position
+            await liveness.run()
+            self._liveness_position = liveness.position
             if joined is None:
                 return muted
             log.info("collector.chat_joined", tg_id=joined.tg_id, chat=joined.username)
@@ -266,6 +285,11 @@ class DiscoveryRunner:
 
     def _new_backfill(self, client: TelegramJoiner) -> HistoryBackfill:
         return HistoryBackfill(reader=client, store=DatabaseHistoryStore())
+
+    def _new_liveness(self, client: TelegramJoiner) -> LivenessChecker:
+        return LivenessChecker(
+            reader=client, store=DatabaseLivenessStore(), chats_limit=HISTORY_CHATS_PER_TICK
+        )
 
 
 def _candidate(candidate: ChatCandidate) -> DiscoveryCandidate:

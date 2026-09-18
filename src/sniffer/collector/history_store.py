@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sniffer.db.engine import session_scope
 from sniffer.db.repositories.chats import ChatRepository
+from sniffer.db.repositories.listings import ListingRepository
 from sniffer.db.repositories.raw_messages import RawMessageRepository
 from sniffer.domain.records import Chat, RawMessage
 
@@ -57,3 +59,23 @@ class DatabaseHistoryStore:
                 chat.tg_id, oldest_msg_id=oldest_msg_id, done=done
             )
             return len(inserted)
+
+
+class DatabaseLivenessStore:
+    """Каталог для проверки живости: чьи карточки перечитать и какие погасить."""
+
+    async def active_chats(self, *, limit: int) -> list[Chat]:
+        async with _session() as session:
+            return await ChatRepository(session).list_active(limit=limit)
+
+    async def live_refs(self, chat: Chat, *, since: datetime) -> list[tuple[int, int]]:
+        from sniffer.collector.liveness import REFS_PER_CHAT
+
+        async with _session() as session:
+            return await ListingRepository(session).live_archive_refs(
+                chat.tg_id, since=since, limit=REFS_PER_CHAT
+            )
+
+    async def retire(self, listing_ids: list[int]) -> int:
+        async with _session() as session:
+            return await ListingRepository(session).deactivate_many(listing_ids)

@@ -1070,6 +1070,9 @@ def test_the_joiner_protocol_has_no_extra_methods() -> None:
         "check_invite",
         "search_contacts",
         "history",
+        # Чтение по номерам — тот же `get_messages`, что у `history`: проверка
+        # живости каталога перечитывает известные посты. Действием не является.
+        "messages_by_ids",
         "join_public",
         "join_invite",
         "set_muted",

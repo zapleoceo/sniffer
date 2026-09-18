@@ -69,6 +69,18 @@ class FakeBackfill:
         return self.inserted
 
 
+@dataclass
+class FakeLiveness:
+    order: list[str] | None = None
+    position: int = 0
+
+    async def run(self) -> int:
+        self.position += 1
+        if self.order is not None:
+            self.order.append("liveness")
+        return 0
+
+
 def _settings() -> Settings:
     return Settings(tg_api_id=1, tg_api_hash="hash", tg_session="session")
 
@@ -87,6 +99,7 @@ async def test_cycle_connects_joins_once_retries_mutes_and_disconnects() -> None
         joiner_factory=lambda _client: joiner,
         history_factory=lambda _client: history,
         backfill_factory=lambda _client: backfill,
+        liveness_factory=lambda _client: FakeLiveness(),
     )
 
     assert await runner.tick() == 3
@@ -109,11 +122,12 @@ async def test_the_archive_is_read_after_the_fresh_posts_never_before() -> None:
         joiner_factory=lambda _client: FakeJoiner(None),
         history_factory=lambda _client: FakeHistory(order=order),
         backfill_factory=lambda _client: FakeBackfill(order=order),
+        liveness_factory=lambda _client: FakeLiveness(order=order),
     )
 
     await runner.tick()
 
-    assert order == ["sync", "backfill"]
+    assert order == ["sync", "backfill", "liveness"], "живость каталога — последней в проходе"
 
 
 async def test_unavailable_telegram_does_not_enter_the_queue_or_retry_in_a_loop() -> None:
@@ -132,6 +146,7 @@ async def test_unavailable_telegram_does_not_enter_the_queue_or_retry_in_a_loop(
         joiner_factory=make_joiner,
         history_factory=lambda _client: FakeHistory(),
         backfill_factory=lambda _client: FakeBackfill(),
+        liveness_factory=lambda _client: FakeLiveness(),
         owner_alert=lambda _settings, _error: _record_alert(alerts, _error),
     )
 
