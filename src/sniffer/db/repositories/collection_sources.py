@@ -94,12 +94,20 @@ class CollectionSourceRepository(Repository):
         _text_clauses(clauses, params, "break", deal_breakers, negative=True)
         budget_min, budget_max = criteria.get("budget_min"), criteria.get("budget_max")
         currency = criteria.get("budget_currency")
-        price_column = "l.price_amount" if currency == "VND" else "l.price_usd_month"
-        if currency in {"VND", "USD"} and isinstance(budget_min, int):
-            clauses.append(f"({price_column} IS NULL OR {price_column}>=:budget_min)")
+        has_budget = isinstance(budget_min, int) or isinstance(budget_max, int)
+        if has_budget and currency not in (None, "VND"):
+            # Цены карточек лежат только в донгах (`price_amount`), и бюджет в
+            # другой валюте сравнить не с чем. Раньше доллары «фильтровались» по
+            # `price_usd_month`, которую не заполняет никто, — условие `IS NULL
+            # OR …` пропускало всё, и фильтр существовал только на вид. Отказ
+            # здесь заметен; молчаливое «без бюджета» — нет. Переводит в донги
+            # вызывающий (`agent_app/collector_gateway.py`), у него есть курс.
+            raise ValueError("archive_budget_must_be_vnd")
+        if currency == "VND" and isinstance(budget_min, int):
+            clauses.append("(l.price_amount IS NULL OR l.price_amount>=:budget_min)")
             params["budget_min"] = budget_min
-        if currency in {"VND", "USD"} and isinstance(budget_max, int):
-            clauses.append(f"({price_column} IS NULL OR {price_column}<=:budget_max)")
+        if currency == "VND" and isinstance(budget_max, int):
+            clauses.append("(l.price_amount IS NULL OR l.price_amount<=:budget_max)")
             params["budget_max"] = budget_max
         engine_cc = criteria.get("engine_cc")
         if isinstance(engine_cc, int):

@@ -26,20 +26,17 @@ Fetch = Callable[[str, CollectionScope, int], Awaitable[list[Original]]]
 async def fetch_source(source: str, scope: CollectionScope, limit: int) -> list[Original]:
     if source == "archive":
         archive_scope = scope
-        if scope.criteria.budget_currency == "USD":
+        currency = scope.criteria.budget_currency
+        if currency == "USD":
             budget = await _budget_vnd(scope)
             assert budget is not None
-            archive_scope = scope.model_copy(
-                update={
-                    "criteria": scope.criteria.model_copy(
-                        update={
-                            "budget_min": budget["min"],
-                            "budget_max": budget["max"],
-                            "budget_currency": "VND",
-                        }
-                    )
-                }
-            )
+            archive_scope = _with_budget(scope, budget["min"], budget["max"], "VND")
+        elif currency not in (None, "VND"):
+            # Евро и рубли в донги перевести нечем: курса есть только USD→VND.
+            # Архив ищет без бюджета — так было и раньше, но случайно: репозиторий
+            # просто не знал этих валют. Теперь это решение, а не пробел в `if`;
+            # сам репозиторий бюджет не в донгах отвергает.
+            archive_scope = _with_budget(scope, None, None, None)
         async with session_scope() as session:
             rows = await CollectionSourceRepository(session).archive(
                 archive_scope.model_dump(mode="json"), limit=limit
@@ -109,6 +106,19 @@ async def fetch_source(source: str, scope: CollectionScope, limit: int) -> list[
         ]
     finally:
         await adapter.aclose()
+
+
+def _with_budget(
+    scope: CollectionScope, low: object, high: object, currency: str | None
+) -> CollectionScope:
+    """Тот же охват с другим бюджетом. Паспорт и прочие критерии не трогаются."""
+    return scope.model_copy(
+        update={
+            "criteria": scope.criteria.model_copy(
+                update={"budget_min": low, "budget_max": high, "budget_currency": currency}
+            )
+        }
+    )
 
 
 async def _budget_vnd(scope: CollectionScope) -> dict[str, int | str] | None:

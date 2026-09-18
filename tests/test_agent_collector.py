@@ -269,6 +269,90 @@ async def test_archive_receives_usd_budget_as_live_vnd(
     assert captured["criteria"]["budget_currency"] == "VND"  # type: ignore[index]
 
 
+@pytest.mark.parametrize("currency", ["USD", "EUR", "RUB"])
+async def test_archive_refuses_a_budget_it_cannot_compare(currency: str) -> None:
+    """Все цены карточек лежат в донгах; бюджет в другой валюте сравнить не с чем.
+
+    Замер 18.09.2026: репозиторий принимал бюджет в долларах и «фильтровал» его
+    по колонке `price_usd_month`, которую не заполняет никто (0 из 10 250
+    карточек). Условие `IS NULL OR …` пропускало всё: на «до 500 USD» 5 строк из
+    12 оказались дороже потолка (14–17 млн при потолке 12.97 млн). Боевой путь
+    это не задевало — gateway переводит доллары в донги раньше, — но репозиторий
+    изображал фильтр, которого не было, и первый же новый вызывающий получил бы
+    выдачу без бюджета. Молча не фильтровать хуже, чем отказаться: отказ виден.
+    """
+    session = SimpleNamespace(execute=AsyncMock())
+    scope = {
+        "city": "nha_trang",
+        "category": "apartment",
+        "deal_type": "rent_out",
+        "criteria": {"key": "e" * 64, "budget_max": 500, "budget_currency": currency},
+    }
+
+    with pytest.raises(ValueError, match="archive_budget_must_be_vnd"):
+        await CollectionSourceRepository(cast(AsyncSession, session)).archive(scope, limit=6)
+    session.execute.assert_not_awaited()
+
+
+async def test_archive_filters_a_dong_budget_by_the_stored_price() -> None:
+    """Донги сравниваются с `price_amount` — единственной колонкой, где цена есть."""
+    result = SimpleNamespace(mappings=lambda: [])
+    session = SimpleNamespace(execute=AsyncMock(return_value=result))
+    scope = {
+        "city": "nha_trang",
+        "category": "apartment",
+        "deal_type": "rent_out",
+        "criteria": {"key": "e" * 64, "budget_max": 13_000_000, "budget_currency": "VND"},
+    }
+
+    await CollectionSourceRepository(cast(AsyncSession, session)).archive(scope, limit=6)
+
+    statement, params = session.execute.await_args.args
+    assert "l.price_amount<=:budget_max" in str(statement)
+    assert "price_usd_month" not in str(statement)
+    assert params["budget_max"] == 13_000_000
+
+
+async def test_archive_gets_no_budget_when_there_is_no_rate_for_its_currency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Евро и рубли в донги перевести нечем — архив ищет без бюджета, явно.
+
+    Так было и раньше, но случайно: репозиторий просто не знал этих валют.
+    Теперь это решение gateway, записанное словами, а не пробел в `if`.
+    """
+    captured: dict[str, object] = {}
+
+    class Repo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def archive(self, scope: dict[str, object], *, limit: int) -> list[object]:
+            captured.update(scope)
+            return []
+
+    @asynccontextmanager
+    async def sessions() -> AsyncIterator[AsyncSession]:
+        yield cast(AsyncSession, SimpleNamespace())
+
+    monkeypatch.setattr(collector_gateway, "session_scope", sessions)
+    monkeypatch.setattr(collector_gateway, "CollectionSourceRepository", Repo)
+    scope = CollectionScope.model_validate(
+        {
+            "city": "nha_trang",
+            "category": "room",
+            "deal_type": "rent_out",
+            "sources": ["archive"],
+            "criteria": {"key": "f" * 64, "budget_max": 400, "budget_currency": "EUR"},
+        }
+    )
+
+    assert await collector_gateway.fetch_source("archive", scope, 6) == []
+    criteria = captured["criteria"]
+    assert criteria["budget_max"] is None  # type: ignore[index]
+    assert criteria["budget_currency"] is None  # type: ignore[index]
+
+
 async def test_empty_queue_never_calls_model(storage: Storage) -> None:
     repo, sessions, _ = storage
     repo.claim.return_value = None
