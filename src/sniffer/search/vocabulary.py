@@ -528,6 +528,15 @@ _HOUSING_SIGNS = re.compile(
 _HOUSING = frozenset({Category.APARTMENT, Category.ROOM, Category.HOUSE})
 
 # Число прямо перед словом: «2 комнаты», «2-х комнат», «три комнаты».
+_BATHROOM_RE = re.compile(r"\bванн\w*[\s\-–]*$", re.IGNORECASE)
+_APPLIANCE_RE = re.compile(r"\b(?:стиральн|посудомоечн|кофе|швейн)\w*[\s\-–]*$", re.IGNORECASE)
+
+# Рекламный шаблон агентства в заголовке: один и тот же у квартир, домов и вилл
+# («💵Снимите дом в Нячанге без комиссии.💵», а в тексте — «Квартира в аренду»).
+# Аудит 18.09.2026: 142 карточки с таким заголовком, 138 из них — квартиры.
+# Такой заголовок предмета не называет, решает текст.
+_BOILERPLATE_TITLE_RE = re.compile(r"\bбез\s+(?:каких-либо\s+)?комисси", re.IGNORECASE)
+
 _COUNTED_RE = re.compile(
     r"(?:\d|\bдв[еу]х?|\bтр[её]х?|\bтри|\bчетыр[её]х?|\bпят[иь])[\s\-–]*(?:х[\s\-]*)?$",
     re.IGNORECASE,
@@ -562,14 +571,26 @@ def _title_end(text: str) -> int:
     рубрике — такое же прямое название предмета, как слово в первой строке.
     """
     position = 0
+    skipped = False
     for line in text.split("\n"):
         if _TITLE_WORD_RE.search(line):
+            if _BOILERPLATE_TITLE_RE.search(line):
+                # Рекламный шаблон агентства — не заголовок: предмет назовёт текст.
+                return 0
             # Заголовок не длиннее `_TITLE_MAX`: у поста из эмодзи-«заголовка»
             # и сплошного текста без переносов иначе заголовком стал бы весь
-            # текст, и «парковка для авто» в середине решала бы категорию.
-            return position + min(len(line), _TITLE_MAX)
+            # текст, и «парковка для авто» в середине решала бы категорию. Если
+            # выше были строки-украшения, «заголовок» найден лишь в тексте, и
+            # доверия к нему меньше — окно короче (аудит 18.09.2026:
+            # «Пентхаус… 10 минут на байке» становилось байком).
+            return position + min(len(line), _TITLE_FALLBACK if skipped else _TITLE_MAX)
+        if line.strip():
+            skipped = True
         position += len(line) + 1
     return len(text)
+
+
+_TITLE_FALLBACK = 60
 
 
 _TITLE_MAX = 120
@@ -605,9 +626,18 @@ def category_hints(text: str) -> list[Category]:
 
     for category, pattern in _CATEGORY_WORD_PATTERNS:
         for match in pattern.finditer(text):
-            if category is Category.ROOM and _COUNTED_RE.search(text[: match.start()]):
-                # «2 комнаты», «три комнаты» — число комнат квартиры или дома,
-                # а не комната в аренду.
+            before = text[max(0, match.start() - 40) : match.start()]
+            if category is Category.ROOM and (
+                _COUNTED_RE.search(before) or _BATHROOM_RE.search(before)
+            ):
+                # «2 комнаты» — число комнат квартиры или дома, «ванная комната»
+                # — санузел; ни то ни другое не комната в аренду. Аудит
+                # 18.09.2026: из 102 карточек, ставших комнатой, 63 были о
+                # санузлах домов и квартир.
+                continue
+            if category is Category.CAR and _APPLIANCE_RE.search(before):
+                # «стиральная машина» — удобство квартиры, не автомобиль: все 19
+                # переходов «квартира → машина» в аудите были ею.
                 continue
             seen(category, match.start())
             break

@@ -61,10 +61,25 @@ def test_client_queries_keep_rule_order_without_adjective_false_hits() -> None:
         ("Актуально, едем домой продаю байк жены", Category.MOTORBIKE),
         ("Аренда дома в Nha Trang, 3 спальни", Category.HOUSE),
         ("Конг\nТрёхэтажный дом в аренду, 3 спальни, 270m2", Category.HOUSE),
-        ("#Нячанг #аренда #сдам\nНОВЫЙ ДОМ В АРЕНДУ, 3 спальни, парковка для байка", Category.HOUSE),
+        (
+            "#Нячанг #аренда #сдам\nНОВЫЙ ДОМ В АРЕНДУ, 3 спальни, парковка для байка",
+            Category.HOUSE,
+        ),
         ("🏠 1️⃣➖🅱️\n📍 Рядом с центром 📐 45 м² | парковка для авто", Category.APARTMENT),
         ("Marina Suites\n2 спальни, вид на море, парковка для байка", Category.APARTMENT),
         ("ОСВОБОДИЛИСЬ 2 КОМНАТЫ по 45 м² В ЧАСТНОМ ДОМЕ", Category.HOUSE),
+        # Находки аудита на Sonnet по 6691 карточке (18.09.2026):
+        (
+            "💵Снимите дом в Нячанге без комиссии.💵\nКвартира в аренду, 2 спальни",
+            Category.APARTMENT,
+        ),
+        ("Квартира 30 м², своя стиральная машина, 🚗 парковка", Category.APARTMENT),
+        ("СДАЁТСЯ ДОМ, 4 ванные комнаты, бассейн", Category.HOUSE),
+        (
+            "⬜️⬜️⬜️⬜️\n🔑 Пентхаус | Ha Quang 2 📍 Запад Нячанга | ≈ 10 минут на байке до моря",
+            Category.APARTMENT,
+        ),
+        ("Продам машину Toyota Vios 2019, цена 400 млн", Category.CAR),
     ],
 )
 def test_body_mentions_do_not_override_the_subject(text: str, category: Category) -> None:
@@ -124,9 +139,29 @@ async def test_recategorize_walks_all_pages_once_and_stops() -> None:
         applied.append((listing_id, category, deal_type))
 
     job = Recategorize(page=page, apply=apply, size=1)
-    while await job.tick():
-        pass
 
+    assert await job.tick() == 1, "весь проход — один вызов"
     assert asked == [0, 1, 5]
     assert applied == [(1, "apartment", "rent_out")]
     assert await job.tick() == 0, "проход один на старт процесса"
+
+
+def test_relevance_reads_a_lot_like_the_gate_split_by_title() -> None:
+    """Ревью 18.09.2026: отбор склеивал заголовок пробелом, воронка — переводом
+    строки, и одна карточка получала две категории."""
+    from sniffer.search.intake_rules import parse_query
+    from sniffer.search.relevance import _other_category
+    from sniffer.sources.base import RawItem
+
+    item = RawItem(
+        source="telegram_archive",
+        external_id="1",
+        url="https://t.me/c/1/1",
+        title="Есть кое-что для вас",
+        text="Автомобиль ждёт у дома, а квартира сдаётся впритык",
+    )
+    gate_category = vocabulary.category_hints(f"{item.title}\n{item.text}")[0]
+    passport = parse_query(f"сниму {gate_category.value}", default_city="nha_trang")
+    passport = passport.model_copy(update={"category": gate_category})
+
+    assert not _other_category(item, passport)

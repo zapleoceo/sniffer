@@ -71,21 +71,25 @@ class Recategorize:
         self._changed = 0
 
     async def tick(self) -> int:
+        """Весь проход за один вызов; возврат — сколько карточек исправлено.
+
+        Страницы листаются здесь, а не циклом воркера: ненулевой возврат держит
+        цикл без паузы, и пока шёл бы пересчёт, остальные шаги прохода крутились
+        бы вхолостую (ревью 18.09.2026). 6–8 тысяч карточек — секунды.
+        """
         if self._done:
             return 0
-        rows = await self._page(self._cursor, self._size)
-        if not rows:
-            self._done = True
-            log.info("listings.recategorized", changed=self._changed)
-            return 0
-        changed = 0
-        for row in rows:
-            assert row.id is not None
-            self._cursor = row.id
-            fix = corrected(row)
-            if fix is not None:
-                await self._apply(row.id, *fix)
-                changed += 1
-        self._changed += changed
-        # Ненулевой возврат держит цикл воркера без паузы, пока страницы идут.
-        return max(changed, 1)
+        while True:
+            rows = await self._page(self._cursor, self._size)
+            if not rows:
+                break
+            for row in rows:
+                assert row.id is not None
+                self._cursor = row.id
+                fix = corrected(row)
+                if fix is not None:
+                    await self._apply(row.id, *fix)
+                    self._changed += 1
+        self._done = True
+        log.info("listings.recategorized", changed=self._changed)
+        return self._changed
