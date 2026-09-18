@@ -470,19 +470,40 @@ _MIN_CATEGORY_STEM = 4
 def _category_word_pattern(term: str) -> re.Pattern[str]:
     """Слово рынка → как его пишет продавец в объявлении.
 
-    Русское существительное с гласной на конце склоняется сменой окончания
-    («студия» → «студию»), поэтому у достаточно длинной основы берётся `\\w*`.
-    Короткое или оканчивающееся на согласную слово ищется целиком: иначе
-    «дом\\w*» поймал бы «домашний», «авт\\w*» — «автомат», «велик\\w*» —
-    «великолепный». Пробел значит «может быть, а может и не быть» — та же
-    дисциплина, что у написаний модели и города.
+    Русское существительное склоняется, и продавец пишет «аренда байков»,
+    «скутеры», «квартиру», «студии». Хвост берётся не любой (`\\w*`), а только
+    падежным окончанием существительного: любой хвост ловил «комнатная» в
+    «1-комнатная квартира» как комнату и «великолепный» как велосипед, а целое
+    слово без окончаний (прежнее правило для основ на согласную) не узнавало
+    «байков» — замер 18.09.2026: «Аренда байков, доставка к квартире»
+    становилась квартирой. Короткое слово («дом») по-прежнему ищется целиком:
+    у трёхбуквенной основы любое окончание ловит чужое. Пробел значит «может
+    быть, а может и не быть» — та же дисциплина, что у написаний модели и города.
     """
     head, _, tail = term.rpartition(" ")
-    if tail[-1:].lower() in _CYRILLIC_VOWELS and len(tail) - 1 >= _MIN_CATEGORY_STEM:
-        stem = re.escape(f"{head} {tail[:-1]}" if head else tail[:-1]).replace(r"\ ", r"\s*")
-        return re.compile(rf"\b{stem}\w*", re.IGNORECASE)
+    if _is_cyrillic(tail):
+        vowel_end = tail[-1:].lower() in _CYRILLIC_VOWELS
+        stem = tail[:-1] if vowel_end else tail
+        # Основа на согласную склоняется и короткой («дом» → «дома», «доме»), но
+        # у короткой окончания узкие: «домой» (наречие) и «домашний» не ловятся.
+        # Короткая основа от слова на гласную («авто» → «авт») не склоняется
+        # вовсе: её окончания съедают чужие слова.
+        endings = _NOUN_ENDINGS if len(stem) >= _MIN_CATEGORY_STEM else _SHORT_ENDINGS
+        if len(stem) >= _MIN_CATEGORY_STEM or (not vowel_end and len(stem) >= 3):
+            base = re.escape(f"{head} {stem}" if head else stem).replace(r"\ ", r"\s*")
+            return re.compile(rf"\b{base}(?:{endings})?\b", re.IGNORECASE)
     whole = re.escape(f"{head} {tail}" if head else tail).replace(r"\ ", r"\s*")
     return re.compile(rf"\b{whole}\b", re.IGNORECASE)
+
+
+# Окончания русского существительного во всех падежах обоих чисел. Прилагательных
+# («-ная», «-ный») здесь нет намеренно — ради этого список и закрыт.
+_NOUN_ENDINGS = "ами|ями|ах|ях|ам|ям|ов|ев|ей|ой|ом|ем|ью|а|я|у|ю|ы|и|е|о"
+_SHORT_ENDINGS = "ами|ах|ам|ов|ом|а|у|е|ы"
+
+
+def _is_cyrillic(word: str) -> bool:
+    return any("а" <= letter.lower() <= "я" or letter.lower() == "ё" for letter in word)
 
 
 _CATEGORY_WORD_PATTERNS: tuple[tuple[Category, re.Pattern[str]], ...] = tuple(
@@ -494,26 +515,116 @@ _CATEGORY_WORD_PATTERNS: tuple[tuple[Category, re.Pattern[str]], ...] = tuple(
 _BRAND_RE = re.compile(r"\b(?:" + "|".join(MOTORBIKE_BRANDS) + r")\b", re.IGNORECASE)
 
 
-def category_hints(text: str) -> list[Category]:
-    """Какие категории названы в тексте — словом рынка, маркой или моделью.
+# Признаки жилья, которых нет в `CATEGORY_TERMS` (там слова для поиска, а эти
+# ищут плохо): «2 спальни», «1 bedroom», «phòng ngủ». В объявлении о квартире
+# слова «квартира» часто нет вовсе — «Marina Suites — 2 спальни, вид на море», —
+# и без этих признаков категорию давала парковка для байка в тексте.
+_HOUSING_SIGNS = re.compile(
+    r"\b(?:спал(?:ьн|ен)\w*|bedrooms?|phòng\s+ngủ|кв\.?\s*м|м²|m2"
+    r"|пентхаус\w*|дуплекс\w*|апп?арт\w*|penthouse|duplex)(?!\w)",
+    re.IGNORECASE,
+)
 
-    Возвращает СПИСОК: одно сообщение вправе назвать и байк, и жильё сразу
-    («продам скутер, сдам квартиру»). Порядок стабильный — сначала категории,
-    названные словом (`CATEGORY_TERMS`, все языки рынка), потом та, что следует
-    из марки или модели (`MOTORBIKE_BRANDS`, `motorbike_models`); у нас все марки
-    мотобайковые. Порядок не случаен: гейт воронки берёт категорию карточки из
-    первого элемента, и предмет, названный прямым словом, главнее выведенного из
-    имени модели.
+_HOUSING = frozenset({Category.APARTMENT, Category.ROOM, Category.HOUSE})
 
-    Своего списка слов здесь нет — знание переиспользовано целиком, разъезжаться
-    нечему. Мультиязычно ровно настолько, насколько мультиязычны сами таблицы.
+# Число прямо перед словом: «2 комнаты», «2-х комнат», «три комнаты».
+_COUNTED_RE = re.compile(
+    r"(?:\d|\bдв[еу]х?|\bтр[её]х?|\bтри|\bчетыр[её]х?|\bпят[иь])[\s\-–]*(?:х[\s\-]*)?$",
+    re.IGNORECASE,
+)
+
+# Порядок категорий, когда предмет не назван в заголовке. Жильё впереди
+# транспорта: в объявлении о квартире байк — это парковка или прокат рядом, а в
+# объявлении о байке квартира почти не упоминается. Машина последней — «авто»
+# в тексте почти всегда трансфер или парковка. Внутри жилья квартира главнее
+# комнаты («2 комнаты» — это число комнат квартиры) и дома («для дома»).
+_BODY_PRIORITY: tuple[Category, ...] = (
+    Category.APARTMENT,
+    Category.ROOM,
+    Category.HOUSE,
+    Category.MOTORBIKE,
+    Category.BICYCLE,
+    Category.CAR,
+    Category.OTHER,
+)
+
+
+# Слово заголовка — буквы, перед которыми не стоит «#»: строка из одних
+# хэштегов («#Нячанг #аренда #сдам») — рубрика чата, а предмет назван строкой
+# ниже.
+_TITLE_WORD_RE = re.compile(r"(?:^|[^#\w])[^\W\d_]{2,}")
+
+
+def _title_end(text: str) -> int:
+    """Конец заголовка: первой строки, где есть слово не из хэштега.
+
+    Всё выше него (строки хэштегов) тоже считается заголовком: «#квартира» в
+    рубрике — такое же прямое название предмета, как слово в первой строке.
     """
-    found: list[Category] = []
+    position = 0
+    for line in text.split("\n"):
+        if _TITLE_WORD_RE.search(line):
+            # Заголовок не длиннее `_TITLE_MAX`: у поста из эмодзи-«заголовка»
+            # и сплошного текста без переносов иначе заголовком стал бы весь
+            # текст, и «парковка для авто» в середине решала бы категорию.
+            return position + min(len(line), _TITLE_MAX)
+        position += len(line) + 1
+    return len(text)
+
+
+_TITLE_MAX = 120
+
+
+def category_hints(text: str) -> list[Category]:
+    """Какие категории названы в тексте объявления — в порядке уверенности.
+
+    Возвращает СПИСОК: одно сообщение вправе назвать и байк, и жильё сразу.
+    Гейт воронки берёт категорию карточки из первого элемента, поэтому порядок —
+    это и есть решение, что продаётся:
+
+    * предмет, названный в ЗАГОЛОВКЕ (первая непустая строка), — первым, и из
+      нескольких в заголовке — названный раньше. Объявление начинается с того,
+      что предлагает: «Продам Honda Lead, доставлю к квартире» — байк;
+    * остальное — по `_BODY_PRIORITY`: жильё впереди транспорта, машина в конце.
+
+    Пока порядок задавала только таблица слов (мотобайк первым), «Сдаётся
+    квартира… рядом с Honda Nha Trang, парковка для байка» становилось
+    мотобайком — 72 активные карточки на 18.09.2026. Чистая позиция по всему
+    тексту была проверена на 6691 живой карточке и отвергнута: «2 комнаты»
+    внутри квартиры делало комнату, «парковка для авто» — машину.
+
+    Марка и модель — такое же упоминание байка, как слово. Своего списка слов
+    здесь нет, кроме признаков жилья; мультиязычно ровно настолько, насколько
+    мультиязычны сами таблицы.
+    """
+    first: dict[Category, int] = {}
+
+    def seen(category: Category, position: int) -> None:
+        if position < first.get(category, len(text) + 1):
+            first[category] = position
+
     for category, pattern in _CATEGORY_WORD_PATTERNS:
-        if pattern.search(text):
-            found.append(category)
+        for match in pattern.finditer(text):
+            if category is Category.ROOM and _COUNTED_RE.search(text[: match.start()]):
+                # «2 комнаты», «три комнаты» — число комнат квартиры или дома,
+                # а не комната в аренду.
+                continue
+            seen(category, match.start())
+            break
+    housing = _HOUSING_SIGNS.search(text)
+    if housing is not None and not first.keys() & _HOUSING:
+        # Признак жилья — только когда вид жилья словом не назван: «Трёхэтажный
+        # дом… 3 спальни» — дом, а не квартира.
+        seen(Category.APARTMENT, housing.start())
+    lowered = text.casefold()
     for slug in models_named_in(None, text):
-        found.append(_CATEGORY_BY_MODEL[slug])
-    if _BRAND_RE.search(text):
-        found.append(Category.MOTORBIKE)
-    return list(dict.fromkeys(found))
+        spot = lowered.find(slug.replace("_", " ").casefold())
+        seen(_CATEGORY_BY_MODEL[slug], spot if spot >= 0 else len(text))
+    brand = _BRAND_RE.search(text)
+    if brand is not None:
+        seen(Category.MOTORBIKE, brand.start())
+
+    title_end = _title_end(text)
+    in_title = sorted((c for c in first if first[c] < title_end), key=lambda c: first[c])
+    in_body = sorted((c for c in first if first[c] >= title_end), key=_BODY_PRIORITY.index)
+    return [*in_title, *in_body]

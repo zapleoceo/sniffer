@@ -71,7 +71,8 @@ CATEGORY_HINTS: dict[Category, re.Pattern[str]] = {
         r"|căn\s?hộ|chung\s?cư)\b",
         re.IGNORECASE,
     ),
-    Category.ROOM: re.compile(r"\b(?:комнат\w*|room|phòng)\b", re.IGNORECASE),
+    # «комнат(?!н)»: «1-комнатная квартира» — квартира, а не комната.
+    Category.ROOM: re.compile(r"\b(?:комнат(?!н)\w*|room|phòng)\b", re.IGNORECASE),
     Category.HOUSE: re.compile(r"\b(?:дом|дома|вилл\w*|house|villa|nhà)\b", re.IGNORECASE),
     Category.CAR: re.compile(r"\b(?:машин\w*|авто|car|ô\s?tô)\b", re.IGNORECASE),
     Category.BICYCLE: re.compile(r"\b(?:велосипед|bicycle|bike|xe\s?đạp)\b", re.IGNORECASE),
@@ -103,7 +104,13 @@ MAX_LENGTH = 4000
 
 
 def _builtin_categories(text: str) -> list[Category]:
-    return [cat for cat, pattern in CATEGORY_HINTS.items() if pattern.search(text)]
+    """Категории стабильного пола — по позиции первого упоминания в тексте."""
+    first = {
+        cat: match.start()
+        for cat, pattern in CATEGORY_HINTS.items()
+        if (match := pattern.search(text)) is not None
+    }
+    return sorted(first, key=lambda category: first[category])
 
 
 def gate(text: str, *, category_hints: CategoryDetector | None = None) -> GateResult:
@@ -134,7 +141,10 @@ def gate(text: str, *, category_hints: CategoryDetector | None = None) -> GateRe
     is_demand = demand_match is not None
     categories = _builtin_categories(stripped)
     if category_hints is not None:
-        categories = list(dict.fromkeys([*categories, *category_hints(stripped)]))
+        # Внедрённый детектор знает все языки, марки и модели и сам упорядочен
+        # по позиции в тексте, поэтому идёт первым; пол добавляет лишь то, чего
+        # детектор не узнал. Карточка берёт категорию из первого элемента.
+        categories = list(dict.fromkeys([*category_hints(stripped), *categories]))
 
     result = GateResult(
         passed=False,

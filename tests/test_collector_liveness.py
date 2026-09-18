@@ -23,6 +23,7 @@ class Message:
 class Reader:
     alive: dict[int, str]
     stale_usernames: set[str] = field(default_factory=set)
+    unresolved_ids: set[int] = field(default_factory=set)
     calls: list[tuple[int | str, list[int]]] = field(default_factory=list)
 
     async def messages_by_ids(
@@ -31,6 +32,8 @@ class Reader:
         self.calls.append((entity, list(ids)))
         if isinstance(entity, str) and entity in self.stale_usernames:
             raise ValueError(f'No user has "{entity}" as username')
+        if isinstance(entity, int) and entity in self.unresolved_ids:
+            raise ValueError(f"Could not find the input entity for {entity}")
         found = [Message(i, self.alive[i]) if i in self.alive else None for i in ids]
         return cast(Sequence[MessageLike | None], found)
 
@@ -73,16 +76,27 @@ async def test_chats_are_checked_one_per_pass_in_a_circle() -> None:
     for _ in range(3):
         await checker.run()
 
-    assert [entity for entity, _ in reader.calls] == ["a", "b", "a"]
+    assert [entity for entity, _ in reader.calls] == [-1, -2, -1]
 
 
-async def test_a_renamed_chat_is_checked_by_id() -> None:
+async def test_chats_are_read_by_id_first_without_resolving_the_name() -> None:
+    """Имя стоит `ResolveUsername` со своим флуд-лимитом; id уже в кэше клиента."""
     reader = Reader(alive={5: "Сдам байк"}, stale_usernames={"old"})
     store = Store([chat(-7, "old")], {-7: [(50, 5)]})
 
     await LivenessChecker(reader=reader, store=store).run()
 
-    assert reader.calls == [("old", [5]), (-7, [5])]
+    assert reader.calls == [(-7, [5])]
+    assert store.retired == []
+
+
+async def test_an_unresolved_id_falls_back_to_the_username() -> None:
+    reader = Reader(alive={5: "Сдам байк"}, unresolved_ids={-7})
+    store = Store([chat(-7, "flea")], {-7: [(50, 5)]})
+
+    await LivenessChecker(reader=reader, store=store).run()
+
+    assert reader.calls == [(-7, [5]), ("flea", [5])]
     assert store.retired == []
 
 
