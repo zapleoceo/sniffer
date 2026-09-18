@@ -682,3 +682,12 @@ def test_an_electric_starter_is_not_an_electric_bike() -> None:
     ):
         lot = item("fuel", price=9_000_000, text=text)
         assert rank_items(passport(), [lot], usd_vnd=RATE, now=NOW) == [lot], text
+
+
+def test_an_electric_word_alone_names_a_motorbike() -> None:
+    from sniffer.search.intake_rules import parse_query
+
+    for text in ("сниму электробайк", "аренда электроскутера", "cần thuê xe máy điện"):
+        parsed = parse_query(text, default_city="nha_trang")
+        assert parsed.category is Category.MOTORBIKE, text
+        assert parsed.attributes.get("power") == "electric", text
