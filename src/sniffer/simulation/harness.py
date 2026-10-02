@@ -27,7 +27,7 @@ from sniffer.simulation.catalog import CATALOG, Lot
 from sniffer.simulation.fit import off_target
 from sniffer.simulation.market import lots_by_url, market_finder
 from sniffer.simulation.scenarios import SCENARIOS
-from sniffer.simulation.script import Says, Scenario, Step, Taps
+from sniffer.simulation.script import Says, Scenario, StartsNew, Step, Switches, Taps, ThreadStep
 from sniffer.simulation.stubs import MemoryStore, SilentJournal
 from sniffer.verifier.liveness import assess
 
@@ -88,6 +88,8 @@ class Metrics:
     silent_steps: tuple[int, ...]
     passport_fields: dict[str, object] = field(default_factory=dict)
     replies: tuple[str, ...] = ()
+    # Поля текущей версии КАЖДОГО поиска клиента по порядку открытия.
+    threads: tuple[dict[str, object], ...] = ()
 
     @property
     def cards_shown(self) -> int:
@@ -117,9 +119,10 @@ async def run_scenario(scenario: Scenario, *, catalog: tuple[Lot, ...] = CATALOG
 
     for number, step in enumerate(scenario.steps, start=1):
         seen = len(sent)
-        await _play(talker, step, sent)
+        await _play(talker, store, step, sent)
         fresh = sent[seen:]
-        if not fresh:
+        # `/new` и выбор поиска ничего не отвечают сами: их ответ — дело хендлера.
+        if not fresh and not isinstance(step, StartsNew | Switches):
             silent.append(number)
         passport = _current(store)
         cards = [card for reply in fresh for card in _cards(reply.text, index, passport)]
@@ -144,6 +147,7 @@ async def run_scenario(scenario: Scenario, *, catalog: tuple[Lot, ...] = CATALOG
         silent_steps=tuple(silent),
         passport_fields=_fields(_current(store)),
         replies=tuple(reply.text for reply in sent),
+        threads=_threads(store),
     )
 
 
@@ -151,11 +155,18 @@ async def run_all(scenarios: Sequence[Scenario] = SCENARIOS) -> list[Metrics]:
     return [await run_scenario(scenario) for scenario in scenarios]
 
 
-async def _play(talker: Conversation, step: Step, sent: list[Reply]) -> None:
+async def _play(
+    talker: Conversation, store: MemoryStore, step: Step | ThreadStep, sent: list[Reply]
+) -> None:
     async def send(reply: Reply) -> None:
         sent.append(reply)
 
-    if isinstance(step, Says):
+    if isinstance(step, StartsNew):
+        await talker.start_new(CLIENT)
+    elif isinstance(step, Switches):
+        roots = list(dict.fromkeys(row.root for row in store.rows))
+        await store.select(await store.load(CLIENT), roots[step.thread - 1])
+    elif isinstance(step, Says):
         await talker.on_text(CLIENT, step.text, send)
     elif isinstance(step, Taps):
         # Код берётся у последнего заданного вопроса: клиент нажимает ту
@@ -172,6 +183,12 @@ async def _play(talker: Conversation, step: Step, sent: list[Reply]) -> None:
 def _current(store: MemoryStore) -> Passport | None:
     current = next((row for row in reversed(store.rows) if row.is_current), None)
     return current.passport if current else None
+
+
+def _threads(store: MemoryStore) -> tuple[dict[str, object], ...]:
+    """Текущая версия каждого поиска, по порядку открытия."""
+    current = {row.root: row.passport for row in store.rows if row.is_current}
+    return tuple(_fields(passport) for _root, passport in sorted(current.items()))
 
 
 def _cards(text: str, index: dict[str, Lot], passport: Passport | None) -> list[Shown]:
