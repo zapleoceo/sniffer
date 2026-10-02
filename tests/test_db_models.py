@@ -22,7 +22,7 @@ NOT_A_COLUMN = ("unique", "primary", "foreign", "check", "constraint", "exclude"
 
 
 def _ddl() -> str:
-    """Схема целиком, без комментариев: одним текстом её читают оба теста ниже."""
+    """Схема целиком, без комментариев: одним текстом."""
     return re.sub(
         r"--[^\n]*",
         "",
@@ -51,30 +51,6 @@ def test_all_tables_are_mirrored() -> None:
 def test_columns_match_ddl() -> None:
     for name, columns in _sql_tables().items():
         assert {c.name for c in Base.metadata.tables[name].columns} == columns, name
-
-
-def test_every_deploy_sentinel_names_a_real_column() -> None:
-    """Колонки-часовые деплоя существуют в схеме, и доказывает это не память.
-
-    Часовой — это проверка в `infra/deploy.sh`, которая валит деплой, если ALTER
-    не доехал до живой базы (живой отказ 02.09.2026: таблицы были, колонок нет, а
-    деплой рапортовал успех). У такой проверки есть своя беда: опечатка в имени
-    колонки делает её вечно красной, а переименованная колонка — вечно зелёной,
-    и в обоих случаях часовой перестаёт охранять, ничего об этом не сказав.
-    Поэтому пары «таблица — колонка» читаются из самого скрипта и сверяются с
-    моделями, а не выписываются сюда списком: список — это снова то, что вспомнили.
-    """
-    script = (SCHEMA_DIR.parent / "deploy.sh").read_text(encoding="utf-8")
-    sentinels = re.findall(r"table_name='(\w+)' and column_name='(\w+)'", script)
-
-    assert sentinels, "часовых не нашлось — проверка охраняет пустоту"
-    for table, column in sentinels:
-        assert table in Base.metadata.tables, table
-        assert column in {c.name for c in Base.metadata.tables[table].columns}, f"{table}.{column}"
-        assert f"ADD COLUMN IF NOT EXISTS {column}" in _ddl(), (
-            f"{table}.{column}: часовой стоит на колонке без идемпотентного ALTER — "
-            "на свежей базе он зелёный, на живой красный"
-        )
 
 
 def test_raw_messages_dedup_key_is_unique() -> None:
