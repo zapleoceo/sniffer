@@ -4,6 +4,7 @@
 # Из CI:   workflow копирует этот файл в /tmp и запускает `bash /tmp/... <path> <sha>`
 # Руками:  cd /var/www/sniffer && bash infra/deploy.sh
 # Проверка без изменений: bash infra/deploy.sh --check
+# Сводка логов без деплоя: bash infra/deploy.sh --summary (только счётчики)
 #
 # Идемпотентен: повторный запуск на том же коммите не пересобирает образ и не
 # трогает контейнеры сверх `up -d`.
@@ -18,6 +19,7 @@ set -euo pipefail
 DEPLOY_PATH_DEFAULT=/var/www/sniffer
 
 PREFLIGHT_ONLY=${PREFLIGHT_ONLY:-0}
+SUMMARY_ONLY=${SUMMARY_ONLY:-0}
 FORCE_BUILD=${FORCE_BUILD:-0}
 POS1=""
 POS2=""
@@ -26,12 +28,14 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --check|--preflight) PREFLIGHT_ONLY=1 ;;
     --force-build)       FORCE_BUILD=1 ;;
+    --summary)           SUMMARY_ONLY=1 ;;
     -h|--help)
       cat <<'USAGE'
-deploy.sh [--check] [--force-build] [DEPLOY_PATH] [TARGET_REF]
+deploy.sh [--check] [--force-build] [--summary] [DEPLOY_PATH] [TARGET_REF]
 
   --check        только проверки (диск, окружение), ничего не меняет
   --force-build  пересобрать образ, даже если исходники не менялись
+  --summary      только сводка логов контейнеров (счётчики, без строк), ничего не меняет
 
   DEPLOY_PATH    по умолчанию /var/www/sniffer
   TARGET_REF     коммит или ветка, по умолчанию origin/master
@@ -74,6 +78,40 @@ LOG_TAIL="${LOG_TAIL:-30}"
 log()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 info() { printf '   %s\n' "$*"; }
 die()  { printf '\n!! %s\n' "$*" >&2; exit "${2:-1}"; }
+
+# ── Сводка логов ────────────────────────────────────────────────────────────
+# Вывод этого скрипта попадает в журнал Actions ПУБЛИЧНОГО репозитория, а в логах
+# контейнеров лежат id и названия чатов, ключи кандидатов, параметры SQL (строка
+# воркера до 600 символов с текстом объявления) и тексты ошибок. Сырые строки
+# сюда не выводятся никогда: считаем уровни и названия событий и печатаем только
+# числа. Название события берётся лишь если оно похоже на идентификатор (a-z,
+# цифры, точка, подчёркивание, дефис, до 60 знаков): всё прочее считается
+# значением и не печатается. Подробности - по SSH, там доступ у владельца.
+log_summary() {
+  local service lines total errors events
+  for service in $(docker compose ps --services 2>/dev/null); do
+    lines="$(docker compose logs --tail "$LOG_TAIL" --no-color --no-log-prefix "$service" 2>&1 || true)"
+    total="$(printf '%s\n' "$lines" | grep -c . || true)"
+    errors="$(printf '%s\n' "$lines" \
+      | grep -cE '"level": ?"(error|critical)"|(^|[^A-Za-z])(ERROR|FATAL|CRITICAL)[: ]|Traceback' || true)"
+    events="$(printf '%s\n' "$lines" \
+      | { grep -oE '"event": ?"[^"]*"' || true; } \
+      | sed -E 's/^"event": ?"//; s/"$//' \
+      | { grep -E '^[a-z0-9_.-]{1,60}$' || true; } \
+      | sort | uniq -c | sort -rn | head -3 \
+      | awk '{printf "%s%s=%s", sep, $2, $1; sep=", "}')"
+    printf '   %-18s строк %-4s ошибок %-3s %s\n' "$service" "$total" "$errors" "${events:+события: $events}"
+  done
+  info "строки логов здесь не печатаются: подробности по SSH, docker compose logs --tail 100 <сервис>"
+}
+
+if [ "$SUMMARY_ONLY" = 1 ]; then
+  [ -d "$DEPLOY_PATH" ] || die "нет каталога $DEPLOY_PATH" 10
+  cd "$DEPLOY_PATH"
+  log "сводка логов (только счётчики)"
+  log_summary
+  exit 0
+fi
 
 # ── 0. Замок: два деплоя одновременно перетрут друг другу рабочее дерево ─────
 LOCK_FILE="/var/lock/sniffer-deploy.lock"
@@ -417,8 +455,8 @@ docker compose ps || true
 free -m | sed 's/^/   /' || true
 df -h "$DEPLOY_PATH" | sed 's/^/   /' || true
 
-log "последние $LOG_TAIL строк логов"
-docker compose logs --tail "$LOG_TAIL" --no-color --timestamps 2>&1 | tail -n 200 || true
+log "сводка логов (только счётчики)"
+log_summary
 
 if [ "$FAIL" -ne 0 ]; then
   die "деплой $NEW_SHA прошёл, но контейнеры не в порядке — см. логи выше" 40
