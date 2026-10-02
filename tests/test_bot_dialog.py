@@ -18,15 +18,7 @@ from aiogram.types import Message
 
 from sniffer.bot import app as bot_app
 from sniffer.bot import journal, query_menu, subscription
-from sniffer.bot.conversation import (
-    NO_REQUEST_YET,
-    NOTHING_FOUND,
-    NOTHING_TO_REFINE,
-    SEARCH_FAILED,
-    Conversation,
-    Found,
-    Reply,
-)
+from sniffer.bot.conversation import Conversation, Found, Reply
 from sniffer.bot.handlers import search as handler
 from sniffer.bot.keyboards import (
     AnswerCallback,
@@ -38,6 +30,7 @@ from sniffer.bot.keyboards import (
     requests_markup,
 )
 from sniffer.bot.store import Client, Dialogue
+from sniffer.bot.wording import NO_REQUEST_YET, NOTHING_FOUND, NOTHING_TO_REFINE, SEARCH_FAILED
 from sniffer.broker import usage
 from sniffer.domain.dialogue import (
     EVENT_USER_MESSAGE,

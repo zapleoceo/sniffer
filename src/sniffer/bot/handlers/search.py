@@ -17,10 +17,10 @@ from aiogram.types import (
     PreCheckoutQuery,
 )
 
-from sniffer.bot import billing, query_menu, subscription
+from sniffer.bot import billing, query_menu, subscription, wording
 from sniffer.bot import voice as voice_input
 from sniffer.bot.catalog_finder import CatalogFinder
-from sniffer.bot.conversation import NO_REQUEST_YET, Conversation, Reply, Send
+from sniffer.bot.conversation import Conversation, Reply, Send
 from sniffer.bot.keyboards import (
     AnswerCallback,
     FeedbackCallback,
@@ -181,7 +181,7 @@ async def subscribe(callback: CallbackQuery, callback_data: SubscribeCallback) -
     tg_user_id = callback.from_user.id
     root = callback_data.root
     if root <= 0 or not await subscription.owns(tg_user_id, root):
-        await message.answer(NO_REQUEST_YET)
+        await message.answer(wording.NO_REQUEST_YET)
         return
 
     active = await subscription.active_for(tg_user_id, root)

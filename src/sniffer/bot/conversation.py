@@ -20,7 +20,7 @@ from typing import Protocol, cast
 
 import structlog
 
-from sniffer.bot import journal
+from sniffer.bot import journal, wording
 from sniffer.bot.billing import OFFER
 from sniffer.bot.cards import render_cards
 from sniffer.bot.store import Client, Dialogue, DialogueStore
@@ -46,7 +46,7 @@ from sniffer.domain.dialogue import (
     question_for,
     restates,
 )
-from sniffer.domain.passport import Category, Intent, Passport
+from sniffer.domain.passport import Passport
 from sniffer.search.answers import interpret, is_skip
 from sniffer.search.currency import usd_vnd_rate
 from sniffer.search.intake import QueryIntake
@@ -55,24 +55,12 @@ from sniffer.search.live import run_plan
 from sniffer.search.planner import SearchPlanner
 from sniffer.search.refinements import merge_edit, price_refinement
 from sniffer.search.relevance import rank_items, with_vnd_budget
-from sniffer.search.vocabulary import city_name, is_served, served_cities
+from sniffer.search.vocabulary import is_served
 from sniffer.sources.base import RawItem, registered_sources
 from sniffer.sources.catalog_sink import remember
 from sniffer.verifier import screen
 
 log = structlog.get_logger(__name__)
-
-NOTHING_FOUND = (
-    "По этому запросу ничего не нашлось. Попробуйте иначе: без марки, "
-    "с другим бюджетом или другой формулировкой."
-)
-SEARCH_FAILED = "Не смог доискать: источники не ответили. Попробуйте ещё раз через пару минут."
-NO_REQUEST_YET = "Сначала напишите, что ищете, — а потом уточним."
-NOTHING_TO_REFINE = "Уточнить больше нечего. Переформулируйте запрос, и поищу заново."
-UNSERVED_CITY = (
-    "{city} я пока не ищу: реестр чатов и параметры досок собраны под другие города — "
-    "{served}. Напишите запрос по одному из них, и поищу."
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -375,7 +363,7 @@ class Conversation:
         dialogue = await self._store.load(client)
         dialogue = await self._store.select(dialogue, root)
         if dialogue.passport is None or dialogue.passport.root != root:
-            await send(Reply(NO_REQUEST_YET))
+            await send(Reply(wording.NO_REQUEST_YET))
             return
         await self._ask_or_search(dialogue, send)
 
@@ -398,7 +386,7 @@ class Conversation:
         current = dialogue.passport
         question = question_by_code(code)
         if question is None or current is None:
-            await send(Reply(NO_REQUEST_YET))
+            await send(Reply(wording.NO_REQUEST_YET))
             return
         if dialogue.state.pending != question.field:
             # Кнопка старого вопроса: клавиатура остаётся в чате и после
@@ -440,7 +428,7 @@ class Conversation:
     async def _feedback(self, client: Client, kind: Feedback, send: Send) -> None:
         dialogue = await self._store.load(client)
         if dialogue.passport is None:
-            await send(Reply(NO_REQUEST_YET))
+            await send(Reply(wording.NO_REQUEST_YET))
             return
 
         passport = apply_feedback(dialogue.passport.passport, kind)
@@ -523,7 +511,7 @@ class Conversation:
             # параметры досок, нечем. Сказать это прямо — единственный честный
             # ответ: уточнять бюджет в городе, где нет источников, значит
             # тратить вопросы клиента впустую.
-            await send(Reply(_unserved(passport.city)))
+            await send(Reply(wording.unserved(passport.city)))
             return
         question = blocking_question(passport, dialogue.state.asked)
         if question is None:
@@ -536,7 +524,7 @@ class Conversation:
             return
         question = feedback_question(dialogue.passport.passport, kind, dialogue.state.asked)
         if question is None:
-            await send(Reply(NOTHING_TO_REFINE))
+            await send(Reply(wording.NOTHING_TO_REFINE))
             return
         await self._ask(dialogue, question, send)
 
@@ -556,7 +544,7 @@ class Conversation:
         if dialogue.passport is None:  # pragma: no cover — сюда приходят с паспортом
             return
         passport = dialogue.passport.passport
-        await send(Reply(_accepted(passport)))
+        await send(Reply(wording.accepted(passport)))
 
         turn = _current_turn.get()
         try:
@@ -569,7 +557,7 @@ class Conversation:
             # Граница запроса: неожиданная ошибка внутри поиска не должна
             # оставлять клиента без ответа. Трейсбек уходит в лог целиком.
             log.exception("bot.search_failed", passport_id=dialogue.passport.id)
-            await send(Reply(SEARCH_FAILED))
+            await send(Reply(wording.SEARCH_FAILED))
             if turn is not None:
                 turn.failed = f"{type(exc).__name__}: {exc}"
             return
@@ -578,7 +566,7 @@ class Conversation:
             turn.found = found
         if not found.items:
             if found.deferred:
-                await send(Reply(found.status or SEARCH_FAILED))
+                await send(Reply(found.status or wording.SEARCH_FAILED))
                 return
             # Пустая выдача — самый честный повод предложить слежение: искать
             # больше негде, а новое появится.
@@ -586,14 +574,14 @@ class Conversation:
                 Reply(
                     f"{found.status}\n\n{OFFER}"
                     if found.status
-                    else f"{_nothing_found(passport)}\n\n{OFFER}",
+                    else f"{wording.nothing_found(passport)}\n\n{OFFER}",
                     offer_subscription=True,
                     passport_root=dialogue.passport.root,
                 )
             )
             return
         shown = min(len(found.items), get_settings().max_cards)
-        header = _result_header(passport, len(found.items), shown)
+        header = wording.result_header(passport, len(found.items), shown)
         if found.status:
             header = f"{found.status}\n\n{header}"
         await send(
@@ -606,148 +594,8 @@ class Conversation:
         )
 
 
-# Как назвать категорию во множественном числе в заголовке выдачи. Русские слова,
-# потому что заголовок читает человек, а не `passport.category.value` («motorbike»).
-_CATEGORY_PLURAL: dict[Category, str] = {
-    Category.MOTORBIKE: "байков",
-    Category.APARTMENT: "квартир",
-    Category.ROOM: "комнат",
-    Category.HOUSE: "домов",
-    Category.CAR: "машин",
-    Category.BICYCLE: "велосипедов",
-}
-
-
-def _is_broad(passport: Passport) -> bool:
-    """Запрос без единого сужающего факта — только категория (и, может, город).
-
-    «Скутер» без бюджета, марки, модели и объёма — это ещё не запрос, а тема:
-    под неё подходит пол-базы. Показать пять свежих и молча назвать это ответом —
-    ровно та жалоба владельца «находит шлак в большом количестве, не уточняя».
-    Такой выдаче нужен честный заголовок и приглашение сузить.
-    """
-    a = passport.attributes
-    return not (a.get("model") or a.get("brand") or a.get("engine_cc") or passport.budget.max)
-
-
-def _result_header(passport: Passport, total: int, shown: int) -> str:
-    """Строка над карточками: что нашлось и, если запрос широкий, как сузить.
-
-    Объяснение — не вежливость, а ответ на «не объясняя»: пять карточек без
-    контекста не говорят, из скольких они выбраны и почему именно эти. Широкий
-    запрос вдобавок сам просит сузить — но не вопросом до выдачи (это была бы
-    прежняя форма, которую владелец отверг), а приглашением поверх уже показанных
-    результатов: search-first остаётся.
-    """
-    if total <= shown:
-        return "Вот что нашлось:" if total > 1 else "Нашёлся один вариант:"
-    if _is_broad(passport):
-        noun = _CATEGORY_PLURAL.get(passport.category) if passport.category else None
-        many = f"{noun} нашлось много" if noun else "нашлось много"
-        return (
-            f"Запрос широкий — {many} ({total}). Показываю {shown} самых свежих.\n"
-            f"{_narrowing_advice(passport)}"
-        )
-    return f"Нашёл {total}, показываю {shown} самых подходящих:"
-
-
-def _narrowing_advice(passport: Passport) -> str:
-    """Подсказка использует свойства предмета, который действительно ищут."""
-    if passport.category in {Category.APARTMENT, Category.ROOM, Category.HOUSE}:
-        return (
-            "Чтобы сузить, допишите бюджет, район или важные условия — "
-            "например «2 спальни с мебелью до 10 млн»."
-        )
-    if passport.category in {Category.MOTORBIKE, Category.CAR, Category.BICYCLE}:
-        return (
-            "Чтобы сузить, допишите бюджет, марку или модель — например «yamaha до 500» "
-            "или «honda lead»."
-        )
-    return "Чтобы сузить, допишите бюджет, район или обязательные условия."
-
-
-def _nothing_found(passport: Passport) -> str:
-    """Пустая выдача предлагает ослабить только уместные для категории критерии."""
-    if passport.category in {Category.APARTMENT, Category.ROOM, Category.HOUSE}:
-        return (
-            "По этому запросу ничего не нашлось. Попробуйте другой бюджет, район, "
-            "количество комнат или условия."
-        )
-    if passport.category in {Category.MOTORBIKE, Category.CAR, Category.BICYCLE}:
-        return NOTHING_FOUND
-    return (
-        "По этому запросу ничего не нашлось. Попробуйте изменить бюджет, место "
-        "или обязательные условия."
-    )
-
-
 def _lap(stage: str) -> None:
     """Отметить этап у текущего хода, если он есть."""
     turn = _current_turn.get()
     if turn is not None:
         turn.watch.lap(stage)
-
-
-def _unserved(city: str | None) -> str:
-    """Список городов берётся из словаря: набранный руками, он разъедется первым."""
-    return UNSERVED_CITY.format(
-        city=city_name(city, "ru") or "Этот город", served=", ".join(served_cities("ru"))
-    )
-
-
-def _accepted(passport: Passport) -> str:
-    """Показываем, что поняли, — это дешевле лишнего уточняющего вопроса."""
-    parts: list[str] = []
-    if passport.category:
-        category = (
-            "скутер"
-            if passport.attributes.get("body_type") == "tay_ga"
-            else {
-                Category.MOTORBIKE: "мотобайк",
-                Category.APARTMENT: "квартира",
-                Category.ROOM: "комната",
-                Category.HOUSE: "дом",
-                Category.BICYCLE: "велосипед",
-                Category.CAR: "автомобиль",
-            }.get(passport.category, passport.category.value)
-        )
-        parts.append(category)
-    for key in ("brand", "model"):
-        if passport.attributes.get(key):
-            parts.append(str(passport.attributes[key]))
-    city = city_name(passport.city, "ru")
-    if city:
-        parts.append(city)
-    if passport.budget.max:
-        currency = passport.budget.currency.value if passport.budget.currency else ""
-        amount = f"{passport.budget.max:,.2f}".rstrip("0").rstrip(".").replace(",", " ")
-        parts.append(f"до {amount} {currency}".strip())
-    transmission = passport.attributes.get("transmission")
-    if transmission:
-        parts.append(
-            {"automatic": "автомат", "manual": "механика", "semi": "полуавтомат"}.get(
-                str(transmission), str(transmission)
-            )
-        )
-    engine_cc = passport.attributes.get("engine_cc")
-    if engine_cc is not None:
-        direction = passport.attributes.get("engine_cc_dir")
-        prefix = {"min": "от ", "max": "до "}.get(str(direction), "")
-        parts.append(f"{prefix}{engine_cc} cc")
-    rooms = passport.attributes.get("rooms")
-    if rooms is not None:
-        parts.append(f"{rooms} комн.")
-    furnished = passport.attributes.get("furnished")
-    if furnished is True:
-        parts.append("с мебелью")
-    elif furnished is False:
-        parts.append("без мебели")
-    understood = ", ".join(parts) if parts else "запрос как есть"
-    action = "Ищу подходящие предложения"
-    if passport.intent is Intent.RENT:
-        action = "Ищу варианты аренды"
-    elif passport.intent is Intent.SELL:
-        action = "Ищу покупателей"
-    elif passport.intent is Intent.RENT_OUT:
-        action = "Ищу арендаторов"
-    return f"Понял: {understood}. {action}, это занимает до минуты."
