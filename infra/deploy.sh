@@ -350,6 +350,17 @@ if [ -n "${PG_CID:-}" ]; then
   else
     info "миграции: listings.source на месте"
   fi
+  # Часовой САМОГО СВЕЖЕГО ALTER в 001_init.sql. Колонка выше доказывает только
+  # то, что файл когда-то дошёл до ALTER'ов, — а бот читает `users` на КАЖДОМ
+  # сообщении, и отсутствие этой колонки означает не деградацию, а молчащий бот
+  # при зелёном деплое.
+  HAS_NEW="$(docker exec "$PG_CID" psql -U sniffer -d sniffer -tAc "select count(*) from information_schema.columns where table_name='users' and column_name='awaiting_new_request'" 2>/dev/null || echo 0)"
+  if [ "${HAS_NEW:-0}" -lt 1 ]; then
+    echo "   миграции не применились: users.awaiting_new_request отсутствует — см. раздел «миграции схемы»" >&2
+    FAIL=1
+  else
+    info "миграции: users.awaiting_new_request на месте"
+  fi
   # Часовой ПОСЛЕДНЕЙ миграции в цепочке. Цикл выше применяет их по порядку и
   # падает на ошибке, но это доказывает только то, что psql не вернул ошибку на
   # ЗАПУЩЕННОМ файле: новый файл, не попавший в `git pull`, не запустится вовсе

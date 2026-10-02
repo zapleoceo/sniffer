@@ -20,7 +20,8 @@ from sniffer.bot import journal
 from sniffer.bot.store import Client, Dialogue
 from sniffer.domain.dialogue import EVENT_USER_MESSAGE, DialogueState, advance, replay
 from sniffer.domain.passport import Passport
-from sniffer.domain.records import PassportEvent, StoredPassport
+from sniffer.domain.records import PassportEvent, QueryOverview, StoredPassport
+from sniffer.domain.threads import MAX_LIVE_THREADS
 
 
 class MemoryStore:
@@ -32,6 +33,7 @@ class MemoryStore:
         self._users: dict[int, int] = {}
         self._active: dict[int, int] = {}
         self._editing: set[int] = set()
+        self._awaiting: set[int] = set()
 
     async def load(self, client: Client) -> Dialogue:
         user_id = self._users.setdefault(client.tg_user_id, len(self._users) + 1)
@@ -56,6 +58,7 @@ class MemoryStore:
             passport=current,
             state=replay(events),
             editing=current.root in self._editing,
+            starting_new=user_id in self._awaiting,
         )
 
     async def start(self, dialogue: Dialogue, passport: Passport) -> Dialogue:
@@ -65,6 +68,7 @@ class MemoryStore:
         self.rows.append(stored)
         self._active[dialogue.user_id] = stored.root
         self._editing.discard(stored.root)
+        self._awaiting.discard(dialogue.user_id)
         self._event(stored.id, EVENT_USER_MESSAGE, {"text": passport.raw_query})
         return Dialogue(user_id=dialogue.user_id, passport=stored, state=DialogueState())
 
@@ -101,11 +105,29 @@ class MemoryStore:
         self._event(dialogue.passport.id, kind, payload)
         return replace(dialogue, state=advance(dialogue.state, kind, payload))
 
+    async def live_threads(self, dialogue: Dialogue) -> list[QueryOverview]:
+        """Ветки в работе, свежие сверху и не больше предела — как в SQL.
+
+        Предел повторён здесь не ради красоты: по длине этого списка бот решает,
+        вытесняется ли ветка, и список без предела никогда не сказал бы «мест нет».
+        """
+        active = self._active.get(dialogue.user_id)
+        live = [
+            QueryOverview(root=row.root, passport=row.passport, is_active=row.root == active)
+            for row in reversed(self.rows)
+            if row.user_id == dialogue.user_id and row.is_current
+        ]
+        return live[:MAX_LIVE_THREADS]
+
+    async def await_new(self, dialogue: Dialogue) -> None:
+        self._awaiting.add(dialogue.user_id)
+
     async def select(self, dialogue: Dialogue, root: int, *, editing: bool = False) -> Dialogue:
         owned = any(row.user_id == dialogue.user_id and row.root == root for row in self.rows)
         if not owned:
             return dialogue
         self._active[dialogue.user_id] = root
+        self._awaiting.discard(dialogue.user_id)
         if editing:
             self._editing.add(root)
         else:

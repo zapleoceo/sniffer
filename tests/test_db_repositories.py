@@ -36,6 +36,7 @@ from sniffer.db.repositories.collection_sources import CollectionSourceRepositor
 from sniffer.db.repositories.delivery import DeliveryRepository
 from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
 from sniffer.domain.records import Chat, DiscoveryCandidate, Listing, Payment, RawMessage
+from sniffer.domain.threads import MAX_LIVE_THREADS
 from sniffer.pipeline.gate import GateResult
 
 pytestmark = pytest.mark.skipif(
@@ -372,6 +373,53 @@ async def test_active_query_is_explicit_not_whichever_was_edited_last(
     assert current is not None and current.root == first.root
     assert len(queries) == 2
     assert [row.root for row in queries if row.is_active] == [first.root]
+
+
+async def test_the_live_thread_list_is_capped_but_loses_nothing(
+    db_session: AsyncSession,
+) -> None:
+    """Предел стоит в запросе. Вытесненная ветка остаётся выбираемой.
+
+    Проверять это надо на живой базе: предел — это `LIMIT` в SQL, и обрезка
+    списка в питоне прошла бы такой тест, не обрезав выборку. А «не потеряна»
+    доказывается именно тем, что `select` на вытесненный корень по-прежнему
+    отвечает «да»: если бы предел что-то удалял, он отвечал бы «нет».
+    """
+    user = await UserRepository(db_session).get_or_create(46)
+    assert user.id is not None
+    repo = PassportRepository(db_session)
+    chains = [await repo.save_new(user.id, _passport(400 + step)) for step in range(6)]
+    await db_session.commit()
+
+    live = await repo.list_queries(user.id)
+
+    assert len(live) == MAX_LIVE_THREADS, "в работе не больше предела"
+    assert chains[0].root not in {row.root for row in live}, "вытеснена самая старая"
+    assert await repo.select(user.id, chains[0].root), "вытесненная ветка выбирается"
+
+
+async def test_an_awaited_new_request_survives_a_restart_and_is_spent_by_a_choice(
+    db_session: AsyncSession,
+) -> None:
+    """`/new` живёт в базе, а выбор ветки его снимает.
+
+    Снятие проверяется здесь, а не в диалоге, потому что делает его `select` —
+    через него проходят ВСЕ переключения контекста, включая создание ветки.
+    """
+    user = await UserRepository(db_session).get_or_create(47)
+    assert user.id is not None
+    repo = PassportRepository(db_session)
+    chain = await repo.save_new(user.id, _passport(400))
+    await repo.await_new_request(user.id)
+    await db_session.commit()
+
+    armed = await UserRepository(db_session).get(user.id)
+    assert armed is not None and armed.awaiting_new_request, "флаг прочитан из базы"
+
+    assert await repo.select(user.id, chain.root)
+    await db_session.commit()
+    disarmed = await UserRepository(db_session).get(user.id)
+    assert disarmed is not None and not disarmed.awaiting_new_request
 
 
 async def test_cannot_select_another_users_query(db_session: AsyncSession) -> None:

@@ -23,7 +23,9 @@ import structlog
 from sniffer.bot import journal
 from sniffer.bot.billing import OFFER
 from sniffer.bot.cards import render_cards
+from sniffer.bot.naming import category_noun
 from sniffer.bot.store import Client, Dialogue, DialogueStore
+from sniffer.bot.threads import open_thread
 from sniffer.broker.usage import request_scope
 from sniffer.config import get_settings
 from sniffer.domain.dialogue import (
@@ -301,6 +303,19 @@ class Conversation:
     async def _turn(self, client: Client, message: str, send: Send) -> None:
         dialogue = await self._store.load(client)
         current = dialogue.passport
+        if dialogue.starting_new:
+            # Человек уже сказал `/new`. Ни одна эвристика ниже спрашивать его
+            # второй раз не вправе: `restates` решает, что делать с сообщением
+            # ВНУТРИ ветки, а не открывать ли новую. Иначе дословный повтор
+            # прежней фразы после `/new` читался бы как повтор — то есть явное
+            # решение человека молча отменялось бы похожестью слов.
+            fresh = await self._intake().parse(message)
+            # Разбор стоит столько же, по какому бы пути он ни шёл: без этой
+            # отметки у запросов через `/new` в дашборде не было бы `intake_ms`,
+            # и доля времени на разбор поехала бы вниз на ровном месте.
+            _lap("intake_ms")
+            await self._open(dialogue, fresh, send)
+            return
         if current is not None and (not dialogue.state.pending or dialogue.editing):
             refined = price_refinement(current.passport, message)
             if refined is not None:
@@ -359,8 +374,28 @@ class Conversation:
             )
             await self._ask_or_search(dialogue, send)
             return
-        dialogue = await self._store.start(dialogue, passport)
-        await self._ask_or_search(dialogue, send)
+        await self._open(dialogue, passport, send)
+
+    async def _open(self, dialogue: Dialogue, passport: Passport, send: Send) -> None:
+        """Новая ветка: открыть, сказать про вытесненную и пойти обычным ходом.
+
+        Один путь на оба способа завести ветку — `/new` и не признанное
+        уточнением сообщение. Два пути разошлись бы ровно в том, о чём человеку
+        не говорят: про ушедший из списка поиск.
+        """
+        opened = await open_thread(self._store, dialogue, passport)
+        if opened.notice is not None:
+            await send(Reply(opened.notice))
+        await self._ask_or_search(opened.dialogue, send)
+
+    async def start_new(self, client: Client) -> None:
+        """`/new`: следующее сообщение открывает ветку, а не уточняет активную.
+
+        Без журнала: ход тут не кончается ни выдачей, ни отказом, а запись в
+        `client_requests` без поиска портила бы ровно ту статистику, ради которой
+        журнал заведён. Запись откроет уже само сообщение.
+        """
+        await self._store.await_new(await self._store.load(client))
 
     async def repeat(self, client: Client, root: int, send: Send) -> None:
         """Повторить выбранный запрос без нового разбора и новой версии."""
@@ -698,19 +733,8 @@ def _unserved(city: str | None) -> str:
 def _accepted(passport: Passport) -> str:
     """Показываем, что поняли, — это дешевле лишнего уточняющего вопроса."""
     parts: list[str] = []
-    if passport.category:
-        category = (
-            "скутер"
-            if passport.attributes.get("body_type") == "tay_ga"
-            else {
-                Category.MOTORBIKE: "мотобайк",
-                Category.APARTMENT: "квартира",
-                Category.ROOM: "комната",
-                Category.HOUSE: "дом",
-                Category.BICYCLE: "велосипед",
-                Category.CAR: "автомобиль",
-            }.get(passport.category, passport.category.value)
-        )
+    category = category_noun(passport)
+    if category:
         parts.append(category)
     for key in ("brand", "model"):
         if passport.attributes.get(key):

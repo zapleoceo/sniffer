@@ -17,7 +17,7 @@ from aiogram.filters.callback_data import CallbackData
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from sniffer.bot.conversation import Reply
-from sniffer.bot.query_menu import title
+from sniffer.bot.threads import title
 from sniffer.domain.records import QueryOverview
 
 # Сколько кнопок в ряд. Три коротких («автомат», «механика», «не важно») в один
@@ -27,6 +27,10 @@ ROW = 2
 # Цена стоит прямо на кнопке. Кнопка «следить», ведущая к счёту без
 # предупреждения о деньгах, — это тёмный паттерн, даже если речь про звезду.
 SUBSCRIBE_LABEL = "🔔 Следить за новыми — 1 ⭐/мес"
+
+# Отдельная ветка на каждый поиск — то, из-за чего уточнение не уезжает в чужой
+# паспорт. Подпись говорит «новый», а не «сбросить»: прежняя ветка остаётся.
+NEW_THREAD_LABEL = "➕ Новый поиск"
 
 
 class AnswerCallback(CallbackData, prefix="ans"):
@@ -114,6 +118,16 @@ def requests_markup(items: list[QueryOverview]) -> InlineKeyboardMarkup:
         ]
         for item in items
     ]
+    # Последней строкой, а не первой: человек пришёл сюда за своими ветками, и
+    # «новый поиск» над ними превращал бы список в развилку. Кнопка нужна тем,
+    # кто про `/new` не знает, — а список и так видно.
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=NEW_THREAD_LABEL, callback_data=RequestsCallback(action="new").pack()
+            )
+        ]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
