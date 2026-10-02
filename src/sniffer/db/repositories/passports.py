@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import Select, and_, func, or_, select, update
 
 from sniffer.db import models
 from sniffer.db.mappers import passport_values, to_passport_event, to_stored_passport
@@ -58,9 +58,10 @@ class PassportRepository(Repository):
 
         Выбор ветки снимает и взведённое `/new`: человек сказал, с какой веткой
         работает, и ждать от него новую просьбу больше незачем. Снимается здесь,
-        а не у вызывающих, потому что через это место проходят ВСЕ переключения
-        контекста — и создание ветки (`save_new`) в том числе. Снимай флаг у
-        вызывающих — один из них забудут, и `/new` остался бы взведённым навсегда.
+        а не у вызывающих, потому что через это место проходят ВСЕ действия над
+        веткой — выбор, создание (`save_new`) и правка (`save_revision`). Снимай
+        флаг у вызывающих — один из них забудут, и `/new` остался бы взведённым
+        навсегда. Здесь же ветка поднимается в списке (`last_used_at`).
         """
         chain = func.coalesce(models.Passport.root_id, models.Passport.id)
         owned = await self._session.scalar(
@@ -79,6 +80,19 @@ class PassportRepository(Repository):
                 awaiting_new_request=False,
             )
         )
+        # Использование поднимает поиск в списке — по этому и работает обещание
+        # «выбор возвращает поиск в список». `clock_timestamp`, а не `now`: `now`
+        # стоит на начале транзакции, и два выбора в одной транзакции были бы
+        # неразличимы по порядку.
+        await self._session.execute(
+            update(models.Passport)
+            .where(
+                models.Passport.user_id == user_id,
+                chain == root,
+                models.Passport.is_current.is_(True),
+            )
+            .values(last_used_at=func.clock_timestamp())
+        )
         return True
 
     async def await_new_request(self, user_id: int) -> None:
@@ -91,6 +105,24 @@ class PassportRepository(Repository):
             update(models.User).where(models.User.id == user_id).values(awaiting_new_request=True)
         )
 
+    async def consume_new_request(self, user_id: int) -> bool:
+        """Потратить взведённое `/new`: `True` — флаг был взведён и теперь снят.
+
+        Один `UPDATE … WHERE awaiting_new_request RETURNING`, а не «прочитал —
+        снял»: два сообщения подряд после `/new` читают флаг оба, пока разбор
+        первого ещё идёт, и без сравнения-и-замены оба открыли бы по поиску.
+        Второй `UPDATE` ждёт блокировку строки первого, а после коммита видит
+        снятый флаг и ничего не возвращает — проигравший знает, что поиск уже
+        открыт.
+        """
+        spent = await self._session.execute(
+            update(models.User)
+            .where(models.User.id == user_id, models.User.awaiting_new_request.is_(True))
+            .values(awaiting_new_request=False)
+            .returning(models.User.id)
+        )
+        return spent.scalar_one_or_none() is not None
+
     async def clear_editing(self, user_id: int) -> None:
         await self._session.execute(
             update(models.User).where(models.User.id == user_id).values(editing_passport_root=None)
@@ -99,52 +131,35 @@ class PassportRepository(Repository):
     async def list_queries(
         self, user_id: int, *, limit: int = MAX_LIVE_THREADS
     ) -> list[QueryOverview]:
-        """Ветки в работе и их мониторинги, свежие сверху, не больше предела.
+        """Поиски в работе и их мониторинги: недавно использованные сверху, не больше предела.
 
         Предел — в SQL, а не в отрисовке меню: обрезать список после выборки
         значило бы тянуть из базы все цепочки человека ради пяти строк, а главное
-        — «сколько веток в работе» перестало бы быть одним ответом. Вытесненная
-        ветка не удаляется: её мониторинг читает `subscriptions` по корню и о
-        списке не знает, а кнопки под её старой выдачей по-прежнему переключают
-        на неё (`select`) и возвращают её в список.
+        — «сколько поисков в работе» перестало бы быть одним ответом. Порядок — по
+        времени последнего использования (`last_used_at`, пока его нет — по
+        `created_at`): выбор вытесненного поиска возвращает его в список и
+        вытесняет самый давно не использованный. Вытесненный поиск не удаляется:
+        его мониторинг читает `subscriptions` по корню и о списке не знает, а
+        управлять им можно по корню (`get_query`), а не по членству в списке.
+        """
+        recency = func.coalesce(models.Passport.last_used_at, models.Passport.created_at)
+        rows = await self._session.execute(
+            _overviews(user_id).order_by(recency.desc(), models.Passport.id.desc()).limit(limit)
+        )
+        return [_overview(*row) for row in rows]
+
+    async def get_query(self, user_id: int, root: int) -> QueryOverview | None:
+        """Один поиск клиента по корню — независимо от того, помещается ли он в список.
+
+        Принадлежность проверяется здесь, а не членством в обрезанном списке:
+        вытесненный поиск остаётся поиском клиента, и пауза, «Искать снова» и
+        «Изменить» обязаны работать на нём так же, как на видимом. Чужой или
+        несуществующий корень — `None`.
         """
         chain = func.coalesce(models.Passport.root_id, models.Passport.id)
-        rows = await self._session.execute(
-            select(models.Passport, models.Subscription, models.User.active_passport_root)
-            .join(models.User, models.User.id == models.Passport.user_id)
-            .outerjoin(
-                models.Subscription,
-                and_(
-                    models.Subscription.user_id == user_id,
-                    models.Subscription.passport_root == chain,
-                ),
-            )
-            .where(models.Passport.user_id == user_id, models.Passport.is_current.is_(True))
-            .order_by(models.Passport.created_at.desc(), models.Passport.id.desc())
-            .limit(limit)
-        )
-        result: list[QueryOverview] = []
-        moment = datetime.now(UTC)
-        for passport, subscription, active_root in rows:
-            root = passport.root_id or passport.id
-            monitoring = "off"
-            expires_at = None
-            if subscription is not None:
-                expires_at = subscription.expires_at
-                if expires_at is not None and expires_at <= moment:
-                    monitoring = "expired"
-                else:
-                    monitoring = "active" if subscription.is_active else "paused"
-            result.append(
-                QueryOverview(
-                    root=root,
-                    passport=to_stored_passport(passport).passport,
-                    is_active=root == active_root,
-                    monitoring=monitoring,
-                    expires_at=expires_at,
-                )
-            )
-        return result
+        found = await self._session.execute(_overviews(user_id).where(chain == root).limit(1))
+        row = found.first()
+        return None if row is None else _overview(*row)
 
     async def save_new(self, user_id: int, passport: Passport) -> StoredPassport:
         """Первая версия цепочки: `root_id` пустой, корнем служит свой же id."""
@@ -232,3 +247,44 @@ class PassportRepository(Repository):
             .order_by(models.PassportEvent.id)
         )
         return [to_passport_event(row) for row in rows]
+
+
+def _overviews(user_id: int) -> Select[tuple[models.Passport, models.Subscription, int | None]]:
+    """Текущие версии цепочек клиента с их подпиской и указателем активной.
+
+    Один запрос на `list_queries` и `get_query`: два места, которые отвечают на
+    вопрос «что за поиск и что с его мониторингом», обязаны отвечать одинаково.
+    """
+    chain = func.coalesce(models.Passport.root_id, models.Passport.id)
+    return (
+        select(models.Passport, models.Subscription, models.User.active_passport_root)
+        .join(models.User, models.User.id == models.Passport.user_id)
+        .outerjoin(
+            models.Subscription,
+            and_(
+                models.Subscription.user_id == user_id, models.Subscription.passport_root == chain
+            ),
+        )
+        .where(models.Passport.user_id == user_id, models.Passport.is_current.is_(True))
+    )
+
+
+def _overview(
+    passport: models.Passport, subscription: models.Subscription | None, active_root: int | None
+) -> QueryOverview:
+    root = passport.root_id or passport.id
+    monitoring = "off"
+    expires_at = None
+    if subscription is not None:
+        expires_at = subscription.expires_at
+        if expires_at is not None and expires_at <= datetime.now(UTC):
+            monitoring = "expired"
+        else:
+            monitoring = "active" if subscription.is_active else "paused"
+    return QueryOverview(
+        root=root,
+        passport=to_stored_passport(passport).passport,
+        is_active=root == active_root,
+        monitoring=monitoring,
+        expires_at=expires_at,
+    )

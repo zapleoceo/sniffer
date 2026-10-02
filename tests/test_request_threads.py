@@ -1,72 +1,21 @@
-"""Ветки запросов: переключение, лимит и чужой контекст, в который нельзя уехать.
+"""Поиски (ветки): переключение, лимит и вытеснение из списка.
 
 Хранилище — `simulation.stubs.MemoryStore`: цепочки версий оно считает
 по-настоящему, и именно поэтому тест «уточнение ушло в правильную ветку»
 проверяет бота, а не подделку. Третьей копии словарного хранилища здесь нет
-намеренно (см. докстринг `stubs`).
+намеренно (см. докстринг `stubs`); что подделка делает так же, как база,
+доказывают контрактные тесты (`test_store_contract.py`). Что сказано про вытесненный
+поиск — `test_thread_notice.py`, гонка двух сообщений после `/new` — `test_thread_race.py`.
 """
 
 from __future__ import annotations
 
-from typing import Any, cast
-
-import pytest
-from aiogram.types import Message
-
-from sniffer.bot import query_menu, threads
-from sniffer.bot.conversation import Conversation, Found, Reply
-from sniffer.bot.handlers import search as handler
-from sniffer.bot.store import Client
-from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
+from sniffer.bot import threads
+from sniffer.domain.passport import Category
 from sniffer.domain.records import QueryOverview
 from sniffer.domain.threads import MAX_LIVE_THREADS, pushed_out
-from sniffer.search.intake_rules import parse_query
-from sniffer.simulation.stubs import MemoryStore, SilentJournal
-
-CLIENT = Client(tg_user_id=42, username="dima")
-
-
-class Replies:
-    def __init__(self) -> None:
-        self.sent: list[Reply] = []
-
-    async def __call__(self, reply: Reply) -> None:
-        self.sent.append(reply)
-
-    @property
-    def texts(self) -> list[str]:
-        return [reply.text for reply in self.sent]
-
-
-async def nothing(_passport: Passport) -> Found:
-    return Found(items=[])
-
-
-def talk(store: MemoryStore) -> Conversation:
-    """Разговор на правилах разбора: категорию и город берём из слов клиента.
-
-    Заранее заданный паспорт здесь не годится принципиально — он подменил бы
-    ровно те поля, по которым ветки и различаются.
-    """
-    return Conversation(store, intake=lambda: _Rules(), finder=nothing, recorder=SilentJournal())
-
-
-class _Rules:
-    async def parse(self, text: str) -> Passport:
-        return parse_query(text)
-
-
-def bike(**overrides: object) -> Passport:
-    fields: dict[str, object] = {
-        "intent": Intent.BUY,
-        "category": Category.MOTORBIKE,
-        "city": "nha_trang",
-        "budget": Budget(max=400, currency=Currency.USD),
-        "raw_query": "ищу скутер в Нячанге",
-    }
-    fields.update(overrides)
-    return Passport(**fields)  # type: ignore[arg-type]
-
+from sniffer.simulation.stubs import MemoryStore
+from tests.thread_support import CLIENT, Replies, bike, talk
 
 # ── переключение между ветками ──────────────────────────────────────────────
 
@@ -272,139 +221,4 @@ async def test_a_sixth_search_within_the_limit_says_nothing_about_crowding() -> 
     replies = Replies()
     await talker.on_text(CLIENT, "ищу скутер в нячанге", replies)
 
-    assert all("ушёл из списка" not in text for text in replies.texts)
-
-
-# ── заголовок ветки ─────────────────────────────────────────────────────────
-
-
-@pytest.mark.parametrize(
-    ("passport", "expected"),
-    [
-        (bike(attributes={"body_type": "tay_ga"}), "Скутер, Нячанг"),
-        (bike(), "Мотобайк, Нячанг"),
-        (bike(category=Category.APARTMENT, intent=Intent.RENT), "Квартира, Нячанг"),
-        (bike(attributes={"brand": "honda", "model": "lead"}), "Мотобайк Honda Lead, Нячанг"),
-        (bike(city=None), "Мотобайк"),
-    ],
-    ids=["scooter", "motorbike", "apartment", "brand_and_model", "no_city"],
-)
-def test_the_thread_title_names_the_subject_and_the_city(passport: Passport, expected: str) -> None:
-    assert threads.title(passport) == expected
-
-
-def test_a_title_without_a_category_falls_back_to_the_words_said() -> None:
-    """Категории нет — звать ветку нечем, кроме сказанного: пустая кнопка хуже."""
-    assert threads.title(bike(category=None, raw_query="honda до 300")) == "Honda до 300"
-
-
-def test_a_long_title_is_cut_to_fit_a_telegram_button() -> None:
-    long = bike(attributes={"brand": "honda", "model": "super cub c125 final edition"})
-
-    label = threads.title(long)
-
-    assert len(label) <= threads.TITLE_LIMIT
-    assert label.endswith("…")
-
-
-def test_the_title_does_not_follow_the_last_wording() -> None:
-    """Подпись кнопки не прыгает от правок: иначе ветку не найти глазами.
-
-    Формулировка меняется на каждом уточнении («до 500», «не скутер, а
-    мотоцикл»), а человек ищет в списке ту строку, которую запомнил.
-    """
-    first = bike(raw_query="ищу скутер в Нячанге до 400 долларов")
-    edited = bike(
-        raw_query="до 500\nПоследнее уточнение (заменяет прежние условия): до 500",
-        budget=Budget(max=500, currency=Currency.USD),
-    )
-
-    assert threads.title(first) == threads.title(edited)
-
-
-# ── команда и кнопка ────────────────────────────────────────────────────────
-
-
-async def test_the_new_command_arms_a_thread_and_searches_when_given_words(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """`/new` без текста спрашивает, с текстом — ищет. Взводится оба раза.
-
-    Взводится и с текстом тоже: иначе два входа в одну ветку расходились бы в
-    поведении, и `/new скутер` после разговора про квартиру дал бы версию
-    квартиры.
-    """
-    armed: list[int] = []
-    searched: list[str] = []
-
-    class Talker:
-        async def start_new(self, client: Client) -> None:
-            armed.append(client.tg_user_id)
-
-        async def on_text(self, _client: Client, text: str, _send: Any) -> None:
-            searched.append(text)
-
-    monkeypatch.setattr(handler, "Message", _FakeMessage)
-    monkeypatch.setattr(handler, "conversation", lambda: Talker())
-
-    bare = _FakeMessage("/new")
-    await handler.new_request(cast(Message, bare))
-    with_words = _FakeMessage("/new ищу скутер в Нячанге")
-    await handler.new_request(cast(Message, with_words))
-
-    assert armed == [42, 42]
-    assert searched == ["ищу скутер в Нячанге"], "текст команды ушёл в поиск без слова «/new»"
-    assert bare.answers[0] == threads.ASK_WHAT
-    assert with_words.answers == [], "со словами спрашивать нечего"
-
-
-async def test_the_menu_lists_live_threads_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Меню спрашивает у базы ветки в работе, и предел стоит в запросе, а не здесь."""
-    asked: list[int] = []
-
-    class Repo:
-        def __init__(self, _session: object) -> None:
-            pass
-
-        async def list_queries(self, user_id: int, *, limit: int = MAX_LIVE_THREADS) -> list[Any]:
-            asked.append(limit)
-            return []
-
-    class Users:
-        def __init__(self, _session: object) -> None:
-            pass
-
-        async def get_or_create(self, _tg_user_id: int, **_kwargs: object) -> Any:
-            return type("U", (), {"id": 1})()
-
-    monkeypatch.setattr(query_menu, "PassportRepository", Repo)
-    monkeypatch.setattr(query_menu, "UserRepository", Users)
-    monkeypatch.setattr(query_menu, "session_scope", _FakeSessions)
-
-    assert await query_menu.list_for(CLIENT) == []
-    assert asked == [MAX_LIVE_THREADS], "предел берётся из домена, а не из числа в меню"
-
-
-class _FakeMessage:
-    """Ровно то, что хендлер трогает у сообщения команды."""
-
-    def __init__(self, text: str) -> None:
-        self.text = text
-        self.from_user = type("U", (), {"id": 42, "username": "dima"})()
-        self.answers: list[str] = []
-
-    async def answer(self, text: str, **_kwargs: object) -> None:
-        self.answers.append(text)
-
-
-class _FakeSessions:
-    """`session_scope()` без Postgres: коммит есть, базы нет."""
-
-    async def __aenter__(self) -> _FakeSessions:
-        return self
-
-    async def __aexit__(self, *_exc: object) -> None:
-        return None
-
-    async def commit(self) -> None:
-        return None
+    assert all("из него убран" not in text for text in replies.texts)

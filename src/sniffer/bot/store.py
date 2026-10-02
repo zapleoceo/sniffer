@@ -41,9 +41,9 @@ class Client:
 class Dialogue:
     """Текущий разговор: чей, о чём и на каком вопросе остановились.
 
-    «О чём» — это всегда ОДНА ветка, активная. Паспорта соседних веток сюда не
-    попадают вовсе, и это не упрощение, а граница: пока в разговоре лежит один
-    паспорт, ни одна эвристика не может увести уточнение в чужую ветку —
+    «О чём» — это всегда ОДНА ветка (поиск), активная. Паспорта соседних веток
+    сюда не попадают вовсе, и это не упрощение, а граница: пока в разговоре лежит
+    один паспорт, ни одна эвристика не может увести уточнение в чужую ветку —
     сравнивать ей просто не с чем.
     """
 
@@ -52,7 +52,8 @@ class Dialogue:
     state: DialogueState = field(default_factory=DialogueState)
     editing: bool = False
     # Человек сказал `/new` и ещё не написал, что ищет. Пока флаг взведён,
-    # следующее сообщение открывает ветку, а не уточняет активную.
+    # следующее сообщение открывает ветку, а не уточняет активную. Это СНИМОК на
+    # момент `load`: настоящий флаг в базе, и тратится он там же (`start_requested`).
     starting_new: bool = False
 
 
@@ -66,6 +67,14 @@ class DialogueStore(Protocol):
     async def load(self, client: Client) -> Dialogue: ...
 
     async def start(self, dialogue: Dialogue, passport: Passport) -> Dialogue: ...
+
+    async def start_requested(self, dialogue: Dialogue, passport: Passport) -> Dialogue | None:
+        """Новая ветка по `/new`: флаг тратится В ТОМ ЖЕ действии, что и создание.
+
+        `None` — флаг уже потрачен другим сообщением, и ветка ему не нужна. Именно
+        это отличает метод от `start`: тот создаёт безусловно.
+        """
+        ...
 
     async def revise(
         self, dialogue: Dialogue, passport: Passport, *, kind: str, payload: dict[str, Any]
@@ -111,11 +120,32 @@ class PassportStore:
     async def start(self, dialogue: Dialogue, passport: Passport) -> Dialogue:
         """Новая формулировка — новая цепочка версий и чистый счётчик вопросов."""
         async with self._sessions() as session:
-            passports = PassportRepository(session)
-            stored = await passports.save_new(dialogue.user_id, passport)
-            await passports.add_event(stored.id, EVENT_USER_MESSAGE, {"text": passport.raw_query})
-            await session.commit()
+            stored = await self._insert(session, dialogue.user_id, passport)
         return Dialogue(user_id=dialogue.user_id, passport=stored, state=DialogueState())
+
+    async def start_requested(self, dialogue: Dialogue, passport: Passport) -> Dialogue | None:
+        """`/new`: потратить флаг и создать ветку одной транзакцией.
+
+        Порядок «сначала флаг, потом ветка» и общая транзакция — это и есть
+        гарантия. Флаг, снятый ДО разбора, терялся бы при упавшем разборе; флаг,
+        снятый отдельной транзакцией после создания, оставлял бы окно, в котором
+        два сообщения открывают по ветке. Здесь проигравший не вставляет ничего:
+        сессия закрывается без коммита.
+        """
+        async with self._sessions() as session:
+            if not await PassportRepository(session).consume_new_request(dialogue.user_id):
+                return None
+            stored = await self._insert(session, dialogue.user_id, passport)
+        return Dialogue(user_id=dialogue.user_id, passport=stored, state=DialogueState())
+
+    async def _insert(
+        self, session: AsyncSession, user_id: int, passport: Passport
+    ) -> StoredPassport:
+        passports = PassportRepository(session)
+        stored = await passports.save_new(user_id, passport)
+        await passports.add_event(stored.id, EVENT_USER_MESSAGE, {"text": passport.raw_query})
+        await session.commit()
+        return stored
 
     async def revise(
         self, dialogue: Dialogue, passport: Passport, *, kind: str, payload: dict[str, Any]
@@ -144,7 +174,7 @@ class PassportStore:
         return replace(dialogue, state=advance(dialogue.state, kind, payload))
 
     async def live_threads(self, dialogue: Dialogue) -> list[QueryOverview]:
-        """Ветки в работе, свежие сверху. Нужны, чтобы знать, есть ли место."""
+        """Ветки в списке, недавно использованные сверху. Нужны, чтобы знать, есть ли место."""
         async with self._sessions() as session:
             return await PassportRepository(session).list_queries(dialogue.user_id)
 

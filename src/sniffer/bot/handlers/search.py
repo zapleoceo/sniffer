@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import structlog
 from aiogram import F, Router
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
     CallbackQuery,
     LabeledPrice,
@@ -32,7 +32,6 @@ from sniffer.bot.keyboards import (
 )
 from sniffer.bot.store import Client, PassportStore
 from sniffer.domain.dialogue import Feedback
-from sniffer.domain.records import QueryOverview
 
 log = structlog.get_logger(__name__)
 
@@ -45,9 +44,8 @@ GREETING = (
     "Если чего-то важного не хватает, уточню парой вопросов — отвечать можно кнопкой "
     "или словами. Объявление не перепечатываю: даю ссылку на источник и честно помечаю, "
     "если лот старый и мог быть продан.\n\n"
-    "Ищете сразу несколько разных вещей? У каждого поиска своя ветка: /new начинает "
-    "новую и не смешивает её с прежней, /requests показывает все ветки и переключает "
-    "между ними."
+    "Ищете несколько разных вещей? Начинайте каждую с /new — поиски не перепутаются. "
+    "Последние поиски и переключение между ними — /requests."
 )
 
 _conversation: Conversation | None = None
@@ -74,18 +72,23 @@ async def requests(message: Message) -> None:
 
 
 @router.message(Command("new"))
-async def new_request(message: Message) -> None:
-    """Явная ветка. `/new скутер в Нячанге` — сразу, `/new` — следующим сообщением.
+async def new_request(message: Message, command: CommandObject) -> None:
+    """Явный поиск. `/new скутер в Нячанге` — сразу, `/new` — следующим сообщением.
 
     Текст в той же команде существует не для скорости: голосовой запрос в
     команду не положишь, поэтому взведённый флаг нужен всё равно — и пусть у
     одного и того же «начни новый поиск» будет один вход, а не два похожих.
+
+    Текст берётся у фильтра (`command.args`), а не режется здесь по пробелу:
+    фильтр читает и подпись к фото, и перевод строки после команды, а
+    `message.text.partition(" ")` терял и то и другое — «/new⏎квартира» уходила в
+    поиск без предмета, а «/new скутер» в подписи к фото не искала ничего.
     """
     client = _client(message)
     if client is None:  # pragma: no cover — сообщение без автора
         return
     await conversation().start_new(client)
-    query = (message.text or "").partition(" ")[2].strip()
+    query = (command.args or "").strip()
     if not query:
         await message.answer(threads.ASK_WHAT)
         return
@@ -236,15 +239,17 @@ async def manage_request(callback: CallbackQuery, callback_data: RequestsCallbac
         await _show_requests(message, client)
         return
     if action == "new":
-        # Кнопка делает ровно то же, что команда: ветка открывается следующим
+        # Кнопка делает ровно то же, что команда: поиск открывается следующим
         # сообщением. Второй путь с собственным поведением рассыпался бы первым.
         await conversation().start_new(client)
         await message.answer(threads.ASK_WHAT)
         return
-    items = await query_menu.list_for(client)
-    item = next((row for row in items if row.root == root), None)
+    # Принадлежность — по самому поиску, а не по вхождению в список из пяти:
+    # вытесненный из списка поиск остаётся поиском клиента, и его пауза, «Искать
+    # снова» и «Изменить» обязаны работать так же, как у видимого.
+    item = await query_menu.get_one(client, root)
     if item is None:
-        await message.answer("Этот запрос не найден. Откройте список заново.")
+        await message.answer(threads.NOT_FOUND)
         return
     if action == "open":
         await query_menu.select(client, root)
@@ -253,42 +258,28 @@ async def manage_request(callback: CallbackQuery, callback_data: RequestsCallbac
         return
     elif action == "edit":
         await query_menu.select(client, root, editing=True)
-        await message.answer(
-            f"Изменяем: <b>{threads.title(item.passport)}</b>\n\n"
-            "Напишите, что изменить, например «до 500», или новую формулировку целиком."
-        )
+        await message.answer(threads.edit_prompt(item.passport))
         return
     elif action in {"pause", "resume"}:
-        enabled = action == "resume"
-        if not await query_menu.toggle(client, root, active=enabled):
-            await message.answer("Мониторинг уже закончился. Его можно подключить заново.")
-        items = await query_menu.list_for(client)
-        item = next(row for row in items if row.root == root)
+        if not await query_menu.toggle(client, root, active=action == "resume"):
+            await message.answer(threads.MONITORING_ENDED)
+        item = await query_menu.get_one(client, root) or item
     else:
         return
-    await message.answer(_request_text(item), reply_markup=request_actions(item))
+    await message.answer(threads.card_text(item), reply_markup=request_actions(item))
 
 
 async def _show_requests(message: Message, client: Client) -> None:
-    items = await query_menu.list_for(client)
-    if not items:
-        await message.answer("Запросов пока нет. Напишите, что хотите найти.")
+    menu = await query_menu.list_for(client)
+    if not menu.items:
+        await message.answer(threads.NO_SEARCHES)
         return
     await message.answer(
-        "Ваши поиски — по ветке на каждый, ✓ отмечает тот, к которому относится "
-        "следующее сообщение\n\n🟢 мониторинг работает · ⏸ на паузе · ▫️ без мониторинга",
-        reply_markup=requests_markup(items),
+        threads.list_text(starting_new=menu.starting_new),
+        # «✓» значит «следующее сообщение уточнит этот поиск». Пока взведён
+        # `/new`, это неправда, и отметки нет.
+        reply_markup=requests_markup(menu.items, marked=not menu.starting_new),
     )
-
-
-def _request_text(item: QueryOverview) -> str:
-    states = {
-        "active": "мониторинг работает",
-        "paused": "мониторинг на паузе",
-        "expired": "мониторинг закончился",
-        "off": "мониторинг не подключён",
-    }
-    return f"<b>{threads.title(item.passport)}</b>\n{states[item.monitoring]}"
 
 
 @router.pre_checkout_query()

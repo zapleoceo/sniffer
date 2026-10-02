@@ -23,7 +23,7 @@ import structlog
 from sniffer.bot import journal
 from sniffer.bot.billing import OFFER
 from sniffer.bot.cards import render_cards
-from sniffer.bot.naming import category_noun
+from sniffer.bot.naming import budget_phrase, category_noun
 from sniffer.bot.store import Client, Dialogue, DialogueStore
 from sniffer.bot.threads import open_thread
 from sniffer.broker.usage import request_scope
@@ -302,20 +302,19 @@ class Conversation:
 
     async def _turn(self, client: Client, message: str, send: Send) -> None:
         dialogue = await self._store.load(client)
-        current = dialogue.passport
         if dialogue.starting_new:
             # Человек уже сказал `/new`. Ни одна эвристика ниже спрашивать его
             # второй раз не вправе: `restates` решает, что делать с сообщением
             # ВНУТРИ ветки, а не открывать ли новую. Иначе дословный повтор
             # прежней фразы после `/new` читался бы как повтор — то есть явное
             # решение человека молча отменялось бы похожестью слов.
-            fresh = await self._intake().parse(message)
-            # Разбор стоит столько же, по какому бы пути он ни шёл: без этой
-            # отметки у запросов через `/new` в дашборде не было бы `intake_ms`,
-            # и доля времени на разбор поехала бы вниз на ровном месте.
-            _lap("intake_ms")
-            await self._open(dialogue, fresh, send)
-            return
+            if await self._begin_requested(dialogue, message, send):
+                return
+            # Другое сообщение успело потратить то же `/new` и открыть ветку. Это
+            # сообщение теперь обычное и идёт в ту ветку, что уже открыта; снимок
+            # разговора выше устарел, поэтому читаем его заново.
+            dialogue = await self._store.load(client)
+        current = dialogue.passport
         if current is not None and (not dialogue.state.pending or dialogue.editing):
             refined = price_refinement(current.passport, message)
             if refined is not None:
@@ -376,17 +375,30 @@ class Conversation:
             return
         await self._open(dialogue, passport, send)
 
-    async def _open(self, dialogue: Dialogue, passport: Passport, send: Send) -> None:
+    async def _begin_requested(self, dialogue: Dialogue, message: str, send: Send) -> bool:
+        """Сообщение после `/new`: разобрать и открыть ветку. `False` — `/new` уже потрачен."""
+        fresh = await self._intake().parse(message)
+        # Разбор стоит столько же, по какому бы пути он ни шёл: без этой отметки у
+        # запросов через `/new` в дашборде не было бы `intake_ms`, и доля времени
+        # на разбор поехала бы вниз на ровном месте.
+        _lap("intake_ms")
+        return await self._open(dialogue, fresh, send)
+
+    async def _open(self, dialogue: Dialogue, passport: Passport, send: Send) -> bool:
         """Новая ветка: открыть, сказать про вытесненную и пойти обычным ходом.
 
         Один путь на оба способа завести ветку — `/new` и не признанное
         уточнением сообщение. Два пути разошлись бы ровно в том, о чём человеку
-        не говорят: про ушедший из списка поиск.
+        не говорят: про ушедший из списка поиск. `False` — ветку открыть не
+        вышло, потому что взведённое `/new` потратило другое сообщение.
         """
         opened = await open_thread(self._store, dialogue, passport)
+        if opened is None:
+            return False
         if opened.notice is not None:
             await send(Reply(opened.notice))
         await self._ask_or_search(opened.dialogue, send)
+        return True
 
     async def start_new(self, client: Client) -> None:
         """`/new`: следующее сообщение открывает ветку, а не уточняет активную.
@@ -742,10 +754,9 @@ def _accepted(passport: Passport) -> str:
     city = city_name(passport.city, "ru")
     if city:
         parts.append(city)
-    if passport.budget.max:
-        currency = passport.budget.currency.value if passport.budget.currency else ""
-        amount = f"{passport.budget.max:,.2f}".rstrip("0").rstrip(".").replace(",", " ")
-        parts.append(f"до {amount} {currency}".strip())
+    budget = budget_phrase(passport)
+    if budget:
+        parts.append(budget)
     transmission = passport.attributes.get("transmission")
     if transmission:
         parts.append(

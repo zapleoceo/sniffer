@@ -109,6 +109,9 @@ class Passport(BigIdMixin, Base):
         DateTime(timezone=True), nullable=False, server_default=NOW
     )
     is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=TRUE)
+    # Когда поиск использовали в последний раз: порядок списка `/requests`. Пусто
+    # у тех, кого не трогали с появления колонки, — у них порядок по created_at.
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class PassportEvent(BigIdMixin, Base):
