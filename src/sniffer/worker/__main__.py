@@ -6,11 +6,17 @@
 
 Обязательных настроек у воркера нет: `DATABASE_URL` имеет рабочее значение по
 умолчанию, а без базы он просто не найдёт задач и уснёт.
+
+Разовая операция живёт подкомандой того же модуля: `python -m sniffer.worker
+enrich` — проход догона по накопленным карточкам (`worker/enrich_cli.py`). Ей
+нужен ровно тот же образ и тот же код разбора, что у воронки.
 """
 
 from __future__ import annotations
 
 import asyncio
+import sys
+from collections.abc import Sequence
 
 import structlog
 
@@ -19,6 +25,7 @@ from sniffer.runtime.service import Service, idle_loop, run_service
 from sniffer.search.currency import usd_vnd_rate
 from sniffer.worker.archive import ArchivePipeline
 from sniffer.worker.chotot_sync import ChototSync
+from sniffer.worker.enrich_cli import EXIT_OK, EXIT_USAGE, run_enrich
 from sniffer.worker.expiry import Expiry
 from sniffer.worker.matcher import Matcher
 from sniffer.worker.quota_sweep import ReservationSweep
@@ -29,6 +36,13 @@ from sniffer.worker.screening import Screening
 log = structlog.get_logger(__name__)
 
 NAME = "worker"
+
+ENRICH_COMMAND = "enrich"
+USAGE = (
+    "Использование: python -m sniffer.worker [enrich [--dry-run] [--limit N] [--since-id ID]]\n"
+    "  без аргументов — обычный процесс воркера;\n"
+    f"  {ENRICH_COMMAND} — разовый проход догона по накопленным карточкам."
+)
 
 
 def missing_settings(_settings: Settings) -> list[str]:
@@ -105,5 +119,23 @@ async def _tick(
 
 SERVICE = Service(name=NAME, requires=missing_settings, run=run)
 
+
+def main(argv: Sequence[str]) -> int:
+    """Без аргументов — обычный процесс; `enrich ...` — разовый проход догона.
+
+    Разбор строгий: **любой первый аргумент, кроме `enrich`, — ошибка, а не
+    повод поднять сервис**. Опечатка в подкоманде молча уходила бы в демона:
+    аргумент проигнорирован, процесс живёт, владелец ждёт отчёт прохода, которого
+    не будет, и видит в логе обычный старт воркера.
+    """
+    if not argv:
+        run_service(SERVICE)
+        return EXIT_OK
+    if argv[0] == ENRICH_COMMAND:
+        return run_enrich(argv[1:])
+    print(f"Неизвестная подкоманда: {argv[0]!r}.\n{USAGE}", file=sys.stderr)
+    return EXIT_USAGE
+
+
 if __name__ == "__main__":
-    run_service(SERVICE)
+    raise SystemExit(main(sys.argv[1:]))
