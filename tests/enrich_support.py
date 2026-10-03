@@ -7,6 +7,7 @@ from decimal import Decimal
 from typing import Any
 
 from sniffer.domain.listing_patch import ListingWithText
+from sniffer.domain.prices import PriceFact
 from sniffer.domain.records import Listing
 
 POSTED = datetime(2026, 9, 1, tzinfo=UTC)
@@ -58,3 +59,33 @@ def row(
         ),
         text,
     )
+
+
+def fact(
+    amount: int,
+    *,
+    period: str | None = None,
+    currency: str = "VND",
+    source: str = "label",
+    up_to: int | None = None,
+) -> PriceFact:
+    """Найденная в тексте цена — как её отдал бы разбор, но заданная руками."""
+    return PriceFact("текст цены", amount, currency, period, source, up_to)
+
+
+class Parser:
+    """Разбор текста, подменённый заглушкой: отдаёт заданный факт и помнит вопросы.
+
+    Политика замены проверяется на заданных фактах, а не на живом разборе: правки
+    разбора её тесты не ломают.
+    """
+
+    def __init__(self, found: PriceFact | None) -> None:
+        self.found = found
+        self.asked: list[tuple[str | None, str | None]] = []
+
+    def __call__(
+        self, text: str, *, category: str | None = None, deal_type: str | None = None
+    ) -> PriceFact | None:
+        self.asked.append((category, deal_type))
+        return self.found
