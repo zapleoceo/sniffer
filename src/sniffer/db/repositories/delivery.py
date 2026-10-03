@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -114,7 +115,13 @@ class DeliveryRepository(Repository):
     async def take_pending(
         self, *, limit: int = 20, now: datetime | None = None
     ) -> list[OutboxMessage]:
-        """Что пора доставить. `SKIP LOCKED` — чтобы две копии не слали дважды."""
+        """Что пора доставить — только прочитать, без блокировки.
+
+        Блокировка здесь жила, пока вся пачка шла одной транзакцией: строки
+        были заперты на всё время прохода, а проход с паузой в секунду между
+        сообщениями — это десятки секунд. Теперь отправка идёт по одному
+        сообщению, и запирает строки `lock_pending` — ровно на время одной отправки.
+        """
         rows = await self._session.execute(
             select(models.Outbox, models.User.tg_user_id)
             .join(models.User, models.User.id == models.Outbox.user_id)
@@ -123,8 +130,30 @@ class DeliveryRepository(Repository):
                 models.Outbox.scheduled_at <= (now or datetime.now(UTC)),
             )
             .order_by(models.Outbox.scheduled_at, models.Outbox.id)
-            .with_for_update(of=models.Outbox, skip_locked=True)
             .limit(limit)
+        )
+        return [_outbox(row, tg_user_id) for row, tg_user_id in rows]
+
+    async def lock_pending(self, ids: Sequence[int], *, now: datetime) -> list[OutboxMessage]:
+        """Запереть строки одной отправки. `SKIP LOCKED` — чтобы две копии не слали дважды.
+
+        Перечитываем по `id`, а не доверяем тому, что вернул `take_pending`: пока
+        проход дошёл до этой строки, другая копия могла её отправить или отложить.
+        Поэтому условия повторены: ушедшая и отложенная строки сюда не попадают, а
+        занятая чужой транзакцией пропускается, а не ожидается.
+        """
+        if not ids:
+            return []
+        rows = await self._session.execute(
+            select(models.Outbox, models.User.tg_user_id)
+            .join(models.User, models.User.id == models.Outbox.user_id)
+            .where(
+                models.Outbox.id.in_(list(ids)),
+                models.Outbox.status == OUTBOX_PENDING,
+                models.Outbox.scheduled_at <= now,
+            )
+            .order_by(models.Outbox.scheduled_at, models.Outbox.id)
+            .with_for_update(of=models.Outbox, skip_locked=True)
         )
         return [_outbox(row, tg_user_id) for row, tg_user_id in rows]
 

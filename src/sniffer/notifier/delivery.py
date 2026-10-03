@@ -4,6 +4,11 @@
 процесса, поэтому очередь лежит в таблице, а не в памяти. Почему отдельным
 процессом: сорок сообщений подряд отключают бота в первые сутки, и темп
 доставки нельзя ставить в зависимость от того, занят ли бот разговором.
+
+Транзакция — на ОДНО сообщение (на одну подборку, если это дайджест). Строки
+запираются перед отправкой и помечаются отправленными сразу после ответа
+Telegram: убитый посреди прохода процесс теряет не пачку, а не больше одного
+сообщения, а `sent_at` — момент подтверждения Telegram, а не начало прохода.
 """
 
 from __future__ import annotations
@@ -12,13 +17,12 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from html import escape
-from typing import Any
+from typing import Any, NamedTuple
 
 import structlog
 
-from sniffer.db.engine import session_scope
-from sniffer.db.repositories.delivery import DeliveryRepository
 from sniffer.domain.records import OutboxMessage
+from sniffer.notifier.ports import Scope, Work, work_scope
 
 log = structlog.get_logger(__name__)
 
@@ -34,72 +38,101 @@ MAX_ATTEMPTS = 3
 RETRY_AFTER = timedelta(minutes=15)
 
 Sender = Callable[[int, str], Awaitable[None]]
+Clock = Callable[[], datetime]
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+class Step(NamedTuple):
+    """Итог одной отправки: сколько сообщений ушло и звали ли мы Bot API."""
+
+    sent: int
+    called: bool
 
 
 class Delivery:
     """Один проход очереди. Возврат — сколько сообщений ушло."""
 
-    def __init__(self, send: Sender, *, pause_s: float = SEND_PAUSE_S) -> None:
+    def __init__(
+        self,
+        send: Sender,
+        *,
+        pause_s: float = SEND_PAUSE_S,
+        clock: Clock = _utcnow,
+        scope: Scope = work_scope,
+    ) -> None:
         self._send = send
         self._pause_s = pause_s
+        self._clock = clock
+        self._scope = scope
 
     async def tick(self, *, now: datetime | None = None) -> int:
-        moment = now or datetime.now(UTC)
-        sent = 0
-        async with session_scope() as session:
-            repo = DeliveryRepository(session)
-            groups = _groups(await repo.take_pending(limit=BATCH, now=moment))
-            for index, messages in enumerate(groups):
-                if index:
-                    await asyncio.sleep(self._pause_s)
-                sent += await self._deliver_many(repo, messages, moment=moment)
-            await session.commit()
+        moment = now or self._clock()
+        async with self._scope() as work:
+            # Только чтение: коммита нет, и по коду видно, что проход ничего не менял.
+            pending = await work.queue.take_pending(limit=BATCH, now=moment)
+        sent, called = 0, False
+        for messages in _groups(pending):
+            if called:
+                # Пауза нужна между обращениями к Bot API. Строка, которую успела
+                # забрать другая копия, к Telegram не ходила, и ждать после неё незачем.
+                await asyncio.sleep(self._pause_s)
+            step = await self._deliver(messages, moment=moment)
+            sent, called = sent + step.sent, step.called
         return sent
 
-    async def _deliver(
-        self, repo: DeliveryRepository, message: OutboxMessage, *, moment: datetime
-    ) -> bool:
-        return bool(await self._deliver_many(repo, [message], moment=moment))
+    async def _deliver(self, messages: list[OutboxMessage], *, moment: datetime) -> Step:
+        async with self._scope() as work:
+            held = await work.queue.lock_pending([message.id for message in messages], now=moment)
+            if not held:
+                # Другая копия успела раньше или строку отложили: слать нечего.
+                return Step(sent=0, called=False)
+            try:
+                await self._send(held[0].recipient_id, _text(held))
+            except Exception as exc:
+                # Широкий except намеренно: причин не доставить сообщение столько
+                # же, сколько состояний у чужого сервиса, и перечислять их значит
+                # однажды уронить весь проход на неназванной. Решает не тип ошибки,
+                # а счётчик попыток.
+                await self._postpone(work, held, exc, moment=moment)
+                return Step(sent=0, called=True)
+            # Время берём ПОСЛЕ ответа Telegram: это момент отправки, а не начало
+            # прохода, у которого за двадцать сообщений набегают десятки секунд.
+            confirmed = self._clock()
+            for message in held:
+                await work.queue.mark_sent(message.id, now=confirmed)
+            await work.commit()
+        return Step(sent=len(held), called=True)
 
-    async def _deliver_many(
-        self,
-        repo: DeliveryRepository,
-        messages: list[OutboxMessage],
-        *,
-        moment: datetime,
-    ) -> int:
-        if not messages:
-            return 0
-        text = render(messages[0].payload)
-        if len(messages) > 1:
-            text = render_digest([message.payload for message in messages])
-        try:
-            await self._send(messages[0].recipient_id, text)
-        except Exception as exc:
-            # Широкий except намеренно: причин не доставить сообщение столько
-            # же, сколько состояний у чужого сервиса, и перечислять их значит
-            # однажды уронить весь проход на неназванной. Решает не тип ошибки,
-            # а счётчик попыток.
-            for message in messages:
-                if message.attempts + 1 >= MAX_ATTEMPTS:
-                    await repo.give_up(message.id)
-                    log.warning(
-                        "notifier.gave_up",
-                        message=message.id,
-                        attempts=message.attempts + 1,
-                        error=f"{type(exc).__name__}: {exc}",
-                    )
-                    continue
-                await repo.mark_failed(message.id, retry_at=moment + RETRY_AFTER)
-            log.info(
-                "notifier.retry_later",
-                messages=[message.id for message in messages],
-                error=f"{type(exc).__name__}: {exc}",
-            )
-            return 0
+    async def _postpone(
+        self, work: Work, messages: list[OutboxMessage], exc: Exception, *, moment: datetime
+    ) -> None:
         for message in messages:
-            await repo.mark_sent(message.id, now=moment)
-        return len(messages)
+            if message.attempts + 1 >= MAX_ATTEMPTS:
+                await work.queue.give_up(message.id)
+                log.warning(
+                    "notifier.gave_up",
+                    message=message.id,
+                    attempts=message.attempts + 1,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                continue
+            await work.queue.mark_failed(message.id, retry_at=moment + RETRY_AFTER)
+        await work.commit()
+        log.info(
+            "notifier.retry_later",
+            messages=[message.id for message in messages],
+            error=f"{type(exc).__name__}: {exc}",
+        )
+
+
+def _text(messages: list[OutboxMessage]) -> str:
+    """Текст одной отправки: подборка для нескольких карточек, иначе одна карточка."""
+    if len(messages) > 1:
+        return render_digest([message.payload for message in messages])
+    return render(messages[0].payload)
 
 
 def render(payload: dict[str, Any]) -> str:

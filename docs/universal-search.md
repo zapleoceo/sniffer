@@ -47,11 +47,16 @@ listings → matcher → notifications + outbox → notifier → Telegram Bot AP
 - подписки блокируются `FOR UPDATE SKIP LOCKED`, поэтому два matcher не могут
   одновременно занять один дневной лимит;
 - `notifications(subscription_id, listing_id)` остаётся дедупом;
-- outbox берётся notifier через `FOR UPDATE SKIP LOCKED`.
+- outbox читается notifier без блокировок, а строки ОДНОЙ отправки (сообщения или
+  подборки) запираются через `FOR UPDATE SKIP LOCKED` перед обращением к Bot API
+  и отпускаются коммитом сразу после отметки «отправлено»: транзакция на
+  сообщение, а не на пачку.
 
 Доставка Bot API имеет семантику **at least once**. Падение после успешного
-HTTP-вызова и до commit может дать повтор: Bot API не принимает наш
-идемпотентный ключ. Обещать exactly once здесь нельзя.
+HTTP-вызова и до commit может дать повтор, но не больше чем одного сообщения
+(при коммите на пачку повторялась вся пачка): Bot API не принимает наш
+идемпотентный ключ. Обещать exactly once здесь нельзя. `outbox.sent_at` и
+`notifications.sent_at` — момент подтверждения Telegram, а не начало прохода.
 
 ## Курсор подписки
 

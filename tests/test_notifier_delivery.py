@@ -1,164 +1,229 @@
-"""Доставка из очереди: троттлинг, повтор, отказ — и экранирование чужого текста."""
+"""Доставка из очереди: транзакция на сообщение, честный `sent_at`, повтор и отказ.
+
+Очередь здесь — `tests/notifier_support.py`: таблица в памяти с настоящей границей
+транзакции (чего не закоммитили, того «в базе» нет). Подмена честна ровно в этом, и
+именно поэтому тесты ловят прежний один-коммит-на-пачку: на нём первое сообщение
+после аварии исчезало бы вместе со всем остальным.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
+import asyncio
+import inspect
+from collections.abc import Callable
+from datetime import timedelta
+from typing import Any
 
 import pytest
 
-from sniffer.domain.records import OutboxMessage
-from sniffer.notifier.delivery import MAX_ATTEMPTS, Delivery, render
-
-NOW = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
-
-PAYLOAD = {
-    "listing_id": 1,
-    "title": "Honda Vision 2021",
-    "summary": "Автомат, документы есть",
-    "url": "https://t.me/c/1/1",
-    "price_amount": "15000000",
-    "price_currency": "VND",
-    "posted_at": NOW.isoformat(),
-}
-
-
-@dataclass
-class FakeRepo:
-    """Очередь без базы: помнит, что доставка с ней сделала."""
-
-    pending: list[OutboxMessage] = field(default_factory=list)
-    sent: list[int] = field(default_factory=list)
-    retried: list[tuple[int, datetime]] = field(default_factory=list)
-    dropped: list[int] = field(default_factory=list)
-
-    async def take_pending(self, *, limit: int, now: datetime) -> list[OutboxMessage]:
-        return self.pending[:limit]
-
-    async def mark_sent(self, message_id: int, *, now: datetime) -> None:
-        self.sent.append(message_id)
-
-    async def mark_failed(self, message_id: int, *, retry_at: datetime) -> None:
-        self.retried.append((message_id, retry_at))
-
-    async def give_up(self, message_id: int) -> None:
-        self.dropped.append(message_id)
+from sniffer.db.repositories.delivery import DeliveryRepository
+from sniffer.notifier.delivery import MAX_ATTEMPTS, RETRY_AFTER, Delivery, render
+from sniffer.notifier.ports import Queue
+from tests.notifier_support import (
+    PAYLOAD,
+    START,
+    Boom,
+    Clock,
+    Row,
+    Store,
+    Telegram,
+    Txn,
+    digest_row,
+)
 
 
-def message(identifier: int = 1, *, attempts: int = 0) -> OutboxMessage:
-    return OutboxMessage(
-        id=identifier, user_id=7, recipient_id=42, payload=PAYLOAD, attempts=attempts
-    )
+@pytest.fixture(autouse=True)
+def no_waiting(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Пауза между сообщениями в тестах не нужна, а ждать её по-настоящему нельзя."""
+
+    async def instantly(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("asyncio.sleep", instantly)
 
 
-async def deliver(repo: FakeRepo, send: object, monkeypatch: pytest.MonkeyPatch) -> int:
-    """Доставка с подменённой сессией: проверяем поведение, а не SQL."""
-    from sniffer.notifier import delivery as module
-
-    class Session:
-        async def commit(self) -> None:
-            return None
-
-    class Scope:
-        async def __aenter__(self) -> Session:
-            return Session()
-
-        async def __aexit__(self, *_: object) -> None:
-            return None
-
-    monkeypatch.setattr(module, "session_scope", lambda: Scope())
-    monkeypatch.setattr(module, "DeliveryRepository", lambda _session: repo)
-    monkeypatch.setattr("asyncio.sleep", _no_sleep)
-    return await Delivery(send, pause_s=0.0).tick(now=NOW)  # type: ignore[arg-type]
+def deliver(
+    store: Store, clock: Clock, *outcomes: BaseException | None
+) -> tuple[Delivery, Telegram]:
+    telegram = Telegram(store, clock, *outcomes)
+    return Delivery(telegram, pause_s=0.0, clock=clock, scope=store.scope), telegram
 
 
-async def _no_sleep(_seconds: float) -> None:
-    return None
+async def test_a_delivered_message_leaves_the_queue() -> None:
+    store, clock = Store([Row(1)]), Clock()
+    delivery, telegram = deliver(store, clock)
+
+    assert await delivery.tick() == 1
+
+    assert store.row(1).status == "sent" and store.row(1).attempts == 0
+    assert telegram.recipients == [42] and "Honda Vision 2021" in telegram.texts[0]
 
 
-async def test_a_delivered_message_leaves_the_queue(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: list[tuple[int, str]] = []
-
-    async def send(user_id: int, text: str) -> None:
-        seen.append((user_id, text))
-
-    repo = FakeRepo(pending=[message()])
-
-    assert await deliver(repo, send, monkeypatch) == 1
-    assert repo.sent == [1] and not repo.retried
-    assert seen[0][0] == 42 and "Honda Vision 2021" in seen[0][1]
-
-
-async def test_a_failed_send_comes_back_later_instead_of_vanishing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_a_failed_send_comes_back_later_instead_of_vanishing() -> None:
     """Недоступный Telegram — причина подождать, а не выбросить карточку."""
+    store, clock = Store([Row(1)]), Clock()
+    delivery, _ = deliver(store, clock, ConnectionError("сеть отвалилась"))
 
-    async def boom(_user_id: int, _text: str) -> None:
-        raise ConnectionError("сеть отвалилась")
+    assert await delivery.tick() == 0
 
-    repo = FakeRepo(pending=[message()])
-
-    assert await deliver(repo, boom, monkeypatch) == 0
-    assert repo.retried and repo.retried[0][1] > NOW
-    assert not repo.sent and not repo.dropped
-
-
-async def test_after_the_last_attempt_the_message_is_given_up(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Три причины подряд означают, что клиент заблокировал бота."""
-
-    async def boom(_user_id: int, _text: str) -> None:
-        raise RuntimeError("bot was blocked by the user")
-
-    repo = FakeRepo(pending=[message(attempts=MAX_ATTEMPTS - 1)])
-
-    await deliver(repo, boom, monkeypatch)
-
-    assert repo.dropped == [1] and not repo.retried
+    row = store.row(1)
+    assert row.status == "pending" and row.attempts == 1
+    assert row.scheduled_at == START + RETRY_AFTER
 
 
-async def test_one_broken_message_does_not_stop_the_rest(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_after_the_last_attempt_the_message_is_given_up() -> None:
+    """Попытки конечны: бесконечный повтор — это тот же спам, только позже."""
+    store, clock = Store([Row(1, attempts=MAX_ATTEMPTS - 1)]), Clock()
+    delivery, _ = deliver(store, clock, RuntimeError("не доставить"))
+
+    await delivery.tick()
+
+    assert store.row(1).status == "failed"
+
+
+async def test_one_broken_message_does_not_stop_the_rest() -> None:
     """Проход обязан дойти до конца очереди, а не встать на первой ошибке."""
+    store = Store([Row(1, recipient_id=0), Row(2)])
+    clock = Clock()
+    delivery, _ = deliver(store, clock, ValueError("нельзя"))
 
-    async def send(user_id: int, _text: str) -> None:
-        if user_id == 0:
-            raise ValueError("нельзя")
+    assert await delivery.tick() == 1
 
-    broken = OutboxMessage(id=1, user_id=7, recipient_id=0, payload=PAYLOAD)
-    repo = FakeRepo(pending=[broken, message(2)])
-
-    assert await deliver(repo, send, monkeypatch) == 1
-    assert repo.sent == [2]
+    assert (store.row(1).status, store.row(2).status) == ("pending", "sent")
 
 
-async def test_digest_cards_are_sent_as_one_message(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: list[str] = []
+async def test_digest_cards_are_sent_as_one_message() -> None:
+    store = Store([digest_row(1, title="First"), digest_row(2, title="Second")])
+    clock = Clock()
+    delivery, telegram = deliver(store, clock)
 
-    async def send(_user_id: int, text: str) -> None:
-        seen.append(text)
+    assert await delivery.tick() == 2
 
-    first = OutboxMessage(
-        id=1,
-        user_id=7,
-        recipient_id=42,
-        payload={**PAYLOAD, "delivery_mode": "digest", "title": "First"},
-    )
-    second = OutboxMessage(
-        id=2,
-        user_id=7,
-        recipient_id=42,
-        payload={**PAYLOAD, "delivery_mode": "digest", "title": "Second"},
-    )
-    repo = FakeRepo(pending=[first, second])
+    assert len(telegram.texts) == 1
+    assert "First" in telegram.texts[0] and "Second" in telegram.texts[0]
+    assert (store.row(1).status, store.row(2).status) == ("sent", "sent")
 
-    assert await deliver(repo, send, monkeypatch) == 2
-    assert len(seen) == 1
-    assert "First" in seen[0] and "Second" in seen[0]
-    assert repo.sent == [1, 2]
+
+# ── транзакция на сообщение ─────────────────────────────────────────────────
+
+
+async def test_every_message_is_committed_before_the_next_one_is_sent() -> None:
+    """Прежний коммит стоял в конце прохода: убитый процесс забывал всю пачку."""
+    store, clock = Store([Row(1), Row(2, user_id=8, recipient_id=43)]), Clock()
+    delivery, _ = deliver(store, clock)
+
+    await delivery.tick()
+
+    assert store.events == [
+        "lock:1",
+        "send:42",
+        "mark_sent:1",
+        "commit",
+        "lock:2",
+        "send:43",
+        "mark_sent:2",
+        "commit",
+    ]
+
+
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt(), asyncio.CancelledError()])
+async def test_a_crash_between_two_messages_keeps_the_first_one_sent(
+    interrupt: BaseException,
+) -> None:
+    """Процесс убили на втором сообщении: первое уже ушло и обязано остаться помеченным."""
+    store = Store([Row(1), Row(2, user_id=8, recipient_id=43)])
+    clock = Clock()
+    delivery, _ = deliver(store, clock, None, interrupt)
+
+    with pytest.raises(type(interrupt)):
+        await delivery.tick()
+
+    assert store.row(1).status == "sent", "отправленное потеряно: коммит был один на проход"
+    assert store.row(2).status == "pending" and store.row(2).attempts == 0
+
+
+async def test_a_failure_of_one_message_does_not_roll_back_the_ones_already_sent() -> None:
+    store = Store([Row(1), Row(2, user_id=8, recipient_id=43), Row(3, user_id=9, recipient_id=44)])
+    clock = Clock()
+    delivery, _ = deliver(store, clock, None, Boom("сбой на втором"))
+
+    assert await delivery.tick() == 2
+
+    assert [store.row(i).status for i in (1, 2, 3)] == ["sent", "pending", "sent"]
+    assert "rollback" not in store.events
+
+
+async def test_sent_at_is_the_moment_telegram_confirmed_not_the_start_of_the_pass() -> None:
+    """За проход из нескольких сообщений набегают секунды: метка у каждого своя."""
+    rows = [Row(1), Row(2, user_id=8, recipient_id=43), Row(3, user_id=9, recipient_id=44)]
+    store, clock = Store(rows), Clock()
+    delivery, _ = deliver(store, clock)
+
+    await delivery.tick()
+
+    stamps = [store.row(i).sent_at for i in (1, 2, 3)]
+    assert stamps == [START + timedelta(seconds=n) for n in (1, 2, 3)]
+
+
+async def test_every_card_of_a_digest_gets_the_moment_of_its_confirmation() -> None:
+    store = Store([digest_row(1), digest_row(2)])
+    clock = Clock()
+    delivery, _ = deliver(store, clock)
+
+    await delivery.tick()
+
+    assert store.row(1).sent_at == store.row(2).sent_at == START + timedelta(seconds=1)
+
+
+async def test_a_row_taken_by_another_copy_is_not_sent_and_costs_no_pause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Вторая копия нотифаера берёт строку первой: слать второй раз нельзя."""
+    store = Store([Row(1), Row(2, user_id=8, recipient_id=43)])
+    store.locked_elsewhere = {1}
+    pauses: list[float] = []
+
+    async def record(seconds: float) -> None:
+        pauses.append(seconds)
+
+    monkeypatch.setattr("asyncio.sleep", record)
+    clock = Clock()
+    delivery, telegram = deliver(store, clock)
+
+    assert await delivery.tick() == 1
+
+    assert telegram.recipients == [43] and store.row(1).status == "pending"
+    assert pauses == [], "пауза после строки, к Telegram не ходившей, — потерянное время"
+
+
+async def test_a_row_sent_by_another_copy_after_planning_is_skipped() -> None:
+    store = Store([Row(1)])
+
+    def other_copy_sends_first(shared: Store) -> None:
+        shared.rows[1].status = "sent"
+
+    store.before_lock = other_copy_sends_first
+    clock = Clock()
+    delivery, telegram = deliver(store, clock)
+
+    assert await delivery.tick() == 0
+    assert telegram.texts == []
+
+
+async def test_a_pause_separates_two_requests_to_telegram(monkeypatch: pytest.MonkeyPatch) -> None:
+    pauses: list[float] = []
+
+    async def record(seconds: float) -> None:
+        pauses.append(seconds)
+
+    monkeypatch.setattr("asyncio.sleep", record)
+    store = Store([Row(1), Row(2, user_id=8, recipient_id=43), Row(3, user_id=9, recipient_id=44)])
+    clock = Clock()
+    telegram = Telegram(store, clock)
+
+    await Delivery(telegram, pause_s=2.5, clock=clock, scope=store.scope).tick()
+
+    assert pauses == [2.5, 2.5], "между тремя сообщениями две паузы, не три и не ноль"
 
 
 # ── разметка ────────────────────────────────────────────────────────────────
@@ -193,3 +258,26 @@ def test_collection_result_is_structured_and_escapes_every_field() -> None:
     assert "Нашлось &lt;одно&gt;" in result
     assert "<Honda>" not in result and "&lt;Honda&gt;" in result
     assert "7 &lt; 8 млн" in result
+
+
+# ── подмена очереди не врёт про настоящую ───────────────────────────────────
+
+
+def _queue_methods() -> list[str]:
+    return [name for name, member in vars(Queue).items() if inspect.iscoroutinefunction(member)]
+
+
+def _shape(function: Callable[..., Any]) -> list[tuple[str, object]]:
+    parameters = inspect.signature(function).parameters.values()
+    return [(p.name, p.kind) for p in parameters if p.name != "self"]
+
+
+def test_the_fake_queue_has_the_same_methods_and_signatures_as_the_real_one() -> None:
+    """Заглушка, принимающая что угодно, делает тест зелёным при любой ошибке вызова.
+
+    Правило 5 из CLAUDE.md: ловится тем же способом, что и всё остальное — сверкой
+    с настоящим. Репозиторий и подмена обязаны отвечать на одни и те же вызовы.
+    """
+    assert _queue_methods(), "у протокола нет методов: сверять нечего"
+    for name in _queue_methods():
+        assert _shape(getattr(Txn, name)) == _shape(getattr(DeliveryRepository, name)), name
