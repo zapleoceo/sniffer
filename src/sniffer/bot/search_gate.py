@@ -20,6 +20,7 @@ from sniffer.bot import tab_flow, topics, watch_flow
 from sniffer.bot import watch_panel as panel
 from sniffer.bot.conversation import Conversation
 from sniffer.bot.store import Client
+from sniffer.bot.watch_button import limit_markup, replace_markup
 
 
 class Start(StrEnum):
@@ -33,7 +34,11 @@ async def start_new_search(
 ) -> Start:
     allowed, view = await watch_flow.can_open_new(client)
     if not allowed and view is not None:
-        await message.answer(panel.limit_text(view), reply_markup=panel.limit_markup())
+        # Единственный поиск (бесплатный аккаунт) можно заменить прямо здесь: «/new» без
+        # этого только отказывал, а человек пришёл именно за другим предметом.
+        only = view.items[0].root if view.used == 1 and len(view.items) == 1 else None
+        markup = limit_markup() if only is None else replace_markup(only)
+        await message.answer(panel.limit_text(view), reply_markup=markup)
         return Start.REFUSED
     if prefer_tab and topics.active() and message.bot is not None:
         if await tab_flow.create_blank(message.bot, client):

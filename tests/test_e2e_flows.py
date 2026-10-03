@@ -10,6 +10,7 @@ import re
 from collections.abc import Iterator
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
 import pytest
 from aiogram.exceptions import TelegramBadRequest
@@ -22,7 +23,7 @@ from aiogram.methods import (
 from aiogram.types import ReplyKeyboardMarkup
 
 from sniffer.bot import billing_wording as words
-from sniffer.bot import paging, threads, wording, wording_plan
+from sniffer.bot import paging, threads, watch_flow, wording, wording_plan
 from sniffer.bot import voice as voice_input
 from sniffer.bot.billing import InvoicePayload
 from sniffer.bot.quota import Account
@@ -291,11 +292,6 @@ async def test_a_free_account_gets_one_search_and_the_second_is_refused_in_words
     assert len({r.root for r in flow.store.rows}) == 1, "вторая ветка не родилась"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-2: отказ по обычному тексту уходит без кнопки «Мои слежения», а через "
-    "/new и кнопку — с ней; `Conversation._open` шлёт голый `Reply`",
-)
 async def test_the_refusal_by_plain_text_carries_the_panel_button_like_the_other_paths(
     flow: Flow,
 ) -> None:
@@ -323,6 +319,8 @@ async def test_new_by_command_and_by_button_are_refused_before_asking_for_the_te
         )
         label, data, _ = e2e.buttons(refused[0])[0]
         assert label == "🔔 Мои слежения" and str(data).startswith("wch:")
+        # Единственный поиск можно заменить прямо в отказе, а не только удалить через панель.
+        assert [b[0] for b in e2e.buttons(refused[0])[1:]] == ["🔁 Заменить", "Оставить"]
     assert len({r.root for r in flow.store.rows}) == 1
 
 
@@ -842,11 +840,6 @@ async def test_a_quota_ledger_failure_is_an_honest_message_not_cards_past_the_li
     assert wording_plan.QUOTA_UNAVAILABLE in joined and "открыть оригинал" not in joined
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-1: подсказка выдачи советует дописать «honda lead», но такое сообщение "
-    "открывает НОВЫЙ поиск, и бесплатному клиенту (предел 1) отказывают",
-)
 async def test_the_refinement_the_header_suggests_is_not_refused_as_a_second_search(
     flow: Flow,
 ) -> None:
@@ -879,11 +872,6 @@ async def test_the_greeting_states_the_money_rule_with_the_numbers_of_the_plan(f
     assert "повторно не считается" in text
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-4: приветствие зовёт начинать каждую вещь с /new, а бесплатный аккаунт держит "
-    "один поиск (plans.FREE_SEARCHES); о пределе поисков приветствие молчит",
-)
 async def test_the_greeting_does_not_promise_many_searches_to_a_one_search_account(
     flow: Flow,
 ) -> None:
@@ -908,3 +896,65 @@ async def test_the_owner_has_no_quota_line_and_no_limit(flow: Flow) -> None:
     assert "открыть оригинал" in page and "осталось" not in page.lower()
     plan = await flow.command("/plan", user=e2e.OWNER)
     assert plan, "у владельца /plan отвечает"
+
+
+async def test_replace_after_new_removes_the_only_search_and_asks_what_to_look_for(
+    flow: Flow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    flow.found = e2e.lots(1, 3)
+    await flow.say("ищу скутер в Нячанге")
+    archived: list[int] = []
+
+    async def archive(_client: Any, root: int) -> bool:
+        archived.append(root)
+        return True
+
+    monkeypatch.setattr(watch_flow, "archive", archive)
+    refused = await flow.command("/new")
+    data = e2e.button(refused, "Заменить")
+
+    calls = await flow.tap(data)
+
+    assert len(archived) == 1
+    assert "Прежний поиск убран" in " ".join(e2e.texts(calls))
+
+
+async def test_keep_after_new_leaves_the_search_alone(
+    flow: Flow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    flow.found = e2e.lots(1, 3)
+    await flow.say("ищу скутер в Нячанге")
+
+    async def archive(*_a: Any, **_k: Any) -> bool:
+        raise AssertionError("«Оставить» не должно ничего убирать")
+
+    monkeypatch.setattr(watch_flow, "archive", archive)
+    refused = await flow.command("/new")
+
+    calls = await flow.tap(e2e.button(refused, "Оставить"))
+
+    assert "Оставил текущий поиск" in " ".join(e2e.texts(calls))
+    assert len({r.root for r in flow.store.rows}) == 1
+
+
+@pytest.mark.parametrize("note", ["honda lead", "автомат", "в Нячанге", "до 300 долларов"])
+async def test_an_addendum_under_the_results_refines_the_same_branch(flow: Flow, note: str) -> None:
+    flow.found = wide_market()
+    await settle(flow, "ищу скутер в Нячанге")
+
+    calls = await flow.say(note)
+
+    assert REFUSED_FREE not in e2e.texts(calls)
+    assert len({r.root for r in flow.store.rows}) == 1
+
+
+@pytest.mark.parametrize("subject", ["ищу квартиру в Нячанге", "ищу скутер в Дананге"])
+async def test_a_new_subject_or_city_is_still_a_new_search_and_hits_the_free_limit(
+    flow: Flow, subject: str
+) -> None:
+    flow.found = wide_market()
+    await settle(flow, "ищу скутер в Нячанге")
+
+    calls = await flow.say(subject)
+
+    assert REFUSED_FREE in e2e.texts(calls)

@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from aiogram.types import InlineKeyboardMarkup
 
+from sniffer.bot import watch_button as button
 from sniffer.bot import watch_panel as panel
 from sniffer.bot.slot_wording import FOLLOW_LABEL
 from sniffer.domain import plans
@@ -20,12 +21,12 @@ def search(root: int, monitoring: str = "off", city: str = "nha_trang") -> Query
     return QueryOverview(root=root, passport=passport, monitoring=monitoring, expires_at=expires)
 
 
-def data(markup: InlineKeyboardMarkup) -> list[panel.WatchCallback | str]:
-    out: list[panel.WatchCallback | str] = []
+def data(markup: InlineKeyboardMarkup) -> list[button.WatchCallback | str]:
+    out: list[button.WatchCallback | str] = []
     for row in markup.inline_keyboard:
         for b in row:
             cb = b.callback_data or ""
-            out.append(panel.WatchCallback.unpack(cb) if cb.startswith("wch:") else cb)
+            out.append(button.WatchCallback.unpack(cb) if cb.startswith("wch:") else cb)
     return out
 
 
@@ -106,7 +107,7 @@ def test_the_limit_message_mentions_the_paid_limit_only_to_free_accounts() -> No
     assert "до 10" in free and "до 10" not in paid
     assert free.startswith("У вас уже 1 поиск — поставьте на паузу или удалите один")
     assert paid.startswith("У вас уже 10 поисков — ")
-    assert any(a.a == panel.LIST for a in data(panel.limit_markup()) if not isinstance(a, str))
+    assert any(a.a == button.LIST for a in data(button.limit_markup()) if not isinstance(a, str))
 
 
 def test_names_with_markup_are_escaped_in_the_text_but_not_in_buttons() -> None:

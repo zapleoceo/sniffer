@@ -6,7 +6,7 @@ import re
 
 from sniffer.domain.dialogue import apply_answer
 from sniffer.domain.passport import Passport
-from sniffer.search.intake_rules import detect_intent, parse_query
+from sniffer.search.intake_rules import detect_category, detect_intent, parse_query
 
 # Only a complete price phrase is an implicit edit. An unknown noun such as
 # «лодку до 500» must not silently change the selected scooter request.
@@ -16,6 +16,9 @@ _PRICE_ONLY = re.compile(
     r"(?:usd|vnd|eur|rub|доллар\w*|донг\w*|руб\w*|евро|[$€₫])?",
     re.IGNORECASE,
 )
+
+
+_PLACE = re.compile(r"\b(?:в|во|на)\s+[^\W\d_]{3,}", re.IGNORECASE)
 
 
 def price_refinement(current: Passport, text: str) -> Passport | None:
@@ -66,3 +69,44 @@ def merge_edit(current: Passport, fresh: Passport) -> Passport:
 def _history(current: Passport, text: str) -> str:
     original = current.raw_query.split("\nПоследнее уточнение", 1)[0][:300]
     return f"{original}\nПоследнее уточнение (заменяет прежние условия): {text[:150]}"
+
+
+def refines(current: Passport, fresh: Passport) -> bool:
+    """Сообщение уточняет ту же ветку, а не открывает новую.
+
+    Предмет и город называют предмет поиска: пока ни то ни другое не сменилось, «honda lead»,
+    «автомат», «в Нячанге» под выдачей — правка текущего запроса. Иначе рекомендованное
+    самим заголовком выдачи уточнение упиралось бы в предел 1 поиск у бесплатного аккаунта.
+    Пустой разбор («привет») уточнением не считается: ему нечего менять в ветке.
+    """
+    if current.category is None:
+        return False
+    if fresh.category not in (None, current.category):
+        return False
+    if fresh.city not in (None, current.city):
+        return False
+    if fresh.city is None and _names_unknown_place(fresh):
+        return False
+    return bool(
+        fresh.attributes
+        or fresh.budget.max is not None
+        or fresh.category is not None
+        or fresh.city is not None
+    )
+
+
+def _names_unknown_place(fresh: Passport) -> bool:
+    """«ищу скутер в куангнгае»: предмет назван заново и с чужим местом, которого словарь не знает.
+
+    Город не распознан, но это не «молчание о городе»: человек назвал другое место, и просьба
+    новая. Голое «honda lead» или «автомат» предлога места не несут.
+    """
+    return (
+        detect_category(fresh.raw_query) is not None and _PLACE.search(fresh.raw_query) is not None
+    )
+
+
+def refine(current: Passport, fresh: Passport, text: str) -> Passport:
+    """Уточнение сохраняет прежние условия и историю формулировки, как правка цены."""
+    revised = merge_edit(current, fresh)
+    return revised.model_copy(update={"raw_query": _history(current, text)})

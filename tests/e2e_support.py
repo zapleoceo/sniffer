@@ -312,13 +312,16 @@ def build(monkeypatch: pytest.MonkeyPatch, *, planner: bool = True) -> Iterator[
         return Account(user_id=uid, tg_user_id=client.tg_user_id)
 
     async def can_open(client: Any) -> tuple[bool, PanelView]:
-        view = limit.view_of_tg(client.tg_user_id)
-        return view.used < view.cap, view
+        # Как настоящая панель: со списком поисков, из него отказ берёт корень для «Заменить».
+        return await view_with_items(client)
 
-    async def panel(client: Any, **_k: Any) -> PanelView:
+    async def view_with_items(client: Any) -> tuple[bool, PanelView]:
         view = limit.view_of_tg(client.tg_user_id)
         items = await store.live_threads(await store.load(client))
-        return PanelView(items, view.paid_slots, 0, view.used, view.cap)
+        return view.used < view.cap, PanelView(items, view.paid_slots, 0, view.used, view.cap)
+
+    async def panel(client: Any, **_k: Any) -> PanelView:
+        return (await view_with_items(client))[1]
 
     async def select_ok(*_a: Any, **_k: Any) -> bool:
         return True

@@ -26,6 +26,7 @@ from sniffer.bot.conversation import Reply
 from sniffer.bot.paging import MoreOffer, all_label, more_label
 from sniffer.bot.slot_wording import FOLLOW_LABEL
 from sniffer.bot.threads import labels
+from sniffer.bot.watch_button import limit_markup
 from sniffer.config import get_settings
 from sniffer.domain.records import QueryOverview
 
@@ -181,6 +182,8 @@ def markup(reply: Reply) -> InlineKeyboardMarkup | None:
                 ]
             )
         return InlineKeyboardMarkup(inline_keyboard=rows)
+    if reply.offer_panel:
+        return limit_markup()
     if reply.offer_plan:
         # Цена на самой кнопке (R2 §3.5): кнопка, ведущая к деньгам без цифры, — тёмный
         # паттерн. Рядом — выход без оплаты: «ваши поиски» остаются доступны.
