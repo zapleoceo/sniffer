@@ -197,7 +197,9 @@ jobs:
           exit 15
 
       # always(): при упавшем деплое этот вывод нужнее всего.
-      - name: Состояние и логи
+      # Строки логов контейнеров сюда не попадают: репозиторий публичный (см. log_summary
+      # в infra/deploy.sh). Только состояние и счётчики.
+      - name: Состояние и сводка логов
         if: always()
         shell: bash
         run: |
@@ -206,7 +208,7 @@ jobs:
           [ -f "$KEY" ] || { echo "ключа нет — соединение не поднималось"; exit 0; }
           ssh -i "$KEY" -p "$SSH_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
               -o StrictHostKeyChecking=yes "$SSH_USER@$SSH_HOST" \
-              "cd '$DEPLOY_PATH' && docker compose ps && echo && df -h . && echo && free -m && echo && docker compose logs --tail 50 --no-color --timestamps" \
+              "cd '$DEPLOY_PATH' && docker compose ps && echo && df -h . && echo && free -m && echo && (bash infra/deploy.sh --summary || echo 'сводка логов недоступна: на сервере старая версия deploy.sh')" \
               </dev/null || echo "не смог снять состояние с сервера"
 
       - name: Убрать ключ
