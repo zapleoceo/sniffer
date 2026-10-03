@@ -236,7 +236,9 @@ def test_a_sentinel_is_called_from_exactly_one_place_and_it_is_the_loop() -> Non
     loop = function_source(script(), "check_schema_sentinels")
 
     assert len(calls) == 1 and calls[0].strip() in loop, (
-        "часовые заводятся строками `schema_sentinels`, а не вызовами: " + str(calls)
+        "часовые заводятся строками `schema_sentinels`, а не вызовами: перенесите "
+        + str(calls)
+        + " в таблицу строкой `<таблица> <колонка>` (или `<таблица>`)"
     )
 
 
