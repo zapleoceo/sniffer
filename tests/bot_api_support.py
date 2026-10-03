@@ -21,7 +21,10 @@ from aiogram.client.session.base import BaseSession
 from aiogram.exceptions import TelegramAPIError
 from aiogram.methods import SendMessage, TelegramMethod
 
-TOKEN = "123456:AAsniffer-test-bot-token"
+from tests.conftest import BOT_TOKEN
+
+# Один выдуманный токен на все тесты: настоящему в репозитории места нет.
+TOKEN = BOT_TOKEN
 
 
 class Reply(NamedTuple):
