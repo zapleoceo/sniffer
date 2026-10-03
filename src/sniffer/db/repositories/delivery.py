@@ -75,6 +75,7 @@ class DeliveryRepository(Repository):
         score: float,
         payload: dict[str, Any],
         scheduled_at: datetime | None = None,
+        now: datetime | None = None,
     ) -> bool:
         """Поставить карточку в очередь и запомнить, что она отправлена.
 
@@ -88,11 +89,22 @@ class DeliveryRepository(Repository):
         часов БАЗЫ, то есть проход не может ни отложить доставку (дайджест на
         вечер), ни быть проверен на заданном времени — он зависит от того, что
         показывают чужие часы в момент вставки.
+
+        Тем же правилом `now` задаёт и `notifications.created_at`. Суточный слот
+        занимает именно он, а проход считает остаток слотов от СВОЕЙ полуночи:
+        слот со временем с часов базы и граница суток по часам прохода — это два
+        «сейчас», и при проходе на заданном времени лимит считался бы по чужому.
         """
+        moment = now or datetime.now(UTC)
         table = cast(Table, models.Notification.__table__)
         noted = await self._session.execute(
             pg_insert(table)
-            .values(subscription_id=subscription_id, listing_id=listing_id, score=score)
+            .values(
+                subscription_id=subscription_id,
+                listing_id=listing_id,
+                score=score,
+                created_at=moment,
+            )
             .on_conflict_do_nothing(index_elements=["subscription_id", "listing_id"])
             .returning(table.c.id)
         )
@@ -105,7 +117,7 @@ class DeliveryRepository(Repository):
                 subscription_id=subscription_id,
                 notification_id=notification_id,
                 payload=payload,
-                scheduled_at=scheduled_at or datetime.now(UTC),
+                scheduled_at=scheduled_at or moment,
             )
         )
         await self._session.flush()
@@ -296,14 +308,16 @@ class DeliveryRepository(Repository):
         row = found.first()
         return _subscription(row[0], row[1]) if row is not None else None
 
-    async def set_active(self, *, user_id: int, passport_root: int, active: bool) -> bool:
+    async def set_active(
+        self, *, user_id: int, passport_root: int, active: bool, now: datetime | None = None
+    ) -> bool:
         """Поставить мониторинг на паузу или возобновить оплаченный."""
         changed = await self._session.execute(
             update(models.Subscription)
             .where(
                 models.Subscription.user_id == user_id,
                 models.Subscription.passport_root == passport_root,
-                models.Subscription.expires_at > datetime.now(UTC),
+                models.Subscription.expires_at > (now or datetime.now(UTC)),
             )
             .values(is_active=active)
             .returning(models.Subscription.id)

@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -37,23 +38,35 @@ SUBSCRIPTIONS_PER_TICK = 50
 DIGEST_HOUR = 18
 LOCAL_ZONE = ZoneInfo("Asia/Ho_Chi_Minh")
 
+# Порт часов. Проход живёт ОДНИМ моментом: срок подписки, окно карточек, граница суток
+# и время постановки в очередь считаются от него, а не от часов, которые каждый вызов
+# снимает сам. Иначе проход «на заданном времени» (тест, догон после простоя)
+# судил бы подписки по одному «сейчас», а карточки — по другому.
+Clock = Callable[[], datetime]
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
 
 class Matcher:
     """Один проход сопоставления. Возврат — сколько карточек поставлено в очередь."""
 
-    def __init__(self, *, usd_vnd: float | None = None) -> None:
+    def __init__(self, *, usd_vnd: float | None = None, clock: Clock = _utc_now) -> None:
         # Курс нужен, чтобы долларовый бюджет стал потолком в донгах. Нет курса
         # — потолка нет, и подписка проверяет только смысл: занижать бюджет
         # выдуманным курсом хуже, чем не сужать вовсе.
         self._usd_vnd = usd_vnd
+        self._clock = clock
 
     async def tick(self, *, now: datetime | None = None) -> int:
-        moment = now or datetime.now(UTC)
+        moment = now or self._clock()
         queued = 0
         async with session_scope() as session:
             delivery = DeliveryRepository(session)
             listings = ListingRepository(session)
-            for subscription in await delivery.active_subscriptions(limit=SUBSCRIPTIONS_PER_TICK):
+            due = await delivery.active_subscriptions(limit=SUBSCRIPTIONS_PER_TICK, now=moment)
+            for subscription in due:
                 queued += await self._for_subscription(
                     subscription, delivery, listings, moment=moment
                 )
@@ -112,6 +125,7 @@ class Matcher:
                 score=relevance,
                 payload=_payload(listing, delivery_mode=delivery_mode),
                 scheduled_at=_scheduled(subscription, moment, relevance),
+                now=moment,
             )
             if added:
                 queued += 1
