@@ -115,8 +115,7 @@ async def _seed(
 
 async def _row(session: AsyncSession, listing_id: int) -> models.Listing:
     """Строка такой, какая она в базе СЕЙЧАС, а не в памяти сессии."""
-    session.expire_all()
-    row = await session.get(models.Listing, listing_id)
+    row = await session.get(models.Listing, listing_id, populate_existing=True)
     assert row is not None
     return row
 

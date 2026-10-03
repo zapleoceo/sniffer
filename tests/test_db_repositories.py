@@ -1023,6 +1023,11 @@ async def _live(session: AsyncSession, *, now: datetime | None = None) -> list[S
     return claimed.ready
 
 
+async def _screen_all(session: AsyncSession) -> None:
+    """Карточки уже проверены: тест отбора слота не должен ждать вердикта ИИ-проверки."""
+    await session.execute(update(models.Listing).values(screened_at=NOW))
+
+
 async def _subscriber(session: AsyncSession, passport: Passport) -> tuple[int, int]:
     """Клиент с подпиской на текущую версию паспорта. Возврат: (user_id, sub_id)."""
     user = await UserRepository(session).get_or_create(555, username="подписчик")
@@ -1151,6 +1156,7 @@ async def test_a_new_listing_reaches_the_subscriber_queue(
             posted_at=NOW,
         )
     )
+    await _screen_all(db_session)
     await db_session.commit()
 
     monkeypatch.setattr(module, "session_scope", lambda: _borrowed(db_session))
@@ -1190,6 +1196,7 @@ async def test_a_listing_from_another_city_is_not_sent(
             posted_at=NOW,
         )
     )
+    await _screen_all(db_session)
     await db_session.commit()
 
     monkeypatch.setattr(module, "session_scope", lambda: _borrowed(db_session))
@@ -1202,6 +1209,7 @@ async def test_matcher_advances_past_a_rejected_page(
 ) -> None:
     """Неподходящая первая страница не должна навсегда закрывать следующую."""
     from sniffer.worker import monitor as module
+    from sniffer.worker import monitor_scope
 
     passport = Passport(
         intent=Intent.BUY,
@@ -1228,10 +1236,11 @@ async def test_matcher_advances_past_a_rejected_page(
                 posted_at=NOW,
             )
         )
+    await _screen_all(db_session)
     await db_session.commit()
 
     monkeypatch.setattr(module, "session_scope", lambda: _borrowed(db_session))
-    monkeypatch.setattr(module, "LISTINGS_PER_SUBSCRIPTION", 1)
+    monkeypatch.setattr(monitor_scope, "LISTINGS_PER_SUBSCRIPTION", 1)
 
     assert await module.MonitorAgent().tick(now=NOW) == 0
     state = (await _live(db_session, now=NOW))[0]

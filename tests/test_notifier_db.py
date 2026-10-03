@@ -475,6 +475,7 @@ async def test_a_block_reported_by_telegram_is_recorded_at_its_own_moment(
     monkeypatch.setattr(reachability, "session_scope", lambda: _own_session(db_engine))
     async with _own_session(db_engine) as setup:
         (user_id,) = await _clients(setup, 1)
+        await setup.commit()
 
     await reachability.record(900, blocked=True, at=NOW - timedelta(hours=3))
 

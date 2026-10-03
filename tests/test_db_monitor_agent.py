@@ -74,6 +74,12 @@ async def _slot(
     return user.id, row.id
 
 
+async def _root(session: AsyncSession, user_id: int) -> int:
+    """Корень ещё одной цепочки паспорта: слот без живого паспорта монитор не видит."""
+    stored = await PassportRepository(session).save_new(user_id, _passport(), move_pointer=False)
+    return stored.id
+
+
 async def _card(session: AsyncSession, number: int, **attributes: Any) -> Listing:
     posted = _now()
     (raw_id,) = await RawMessageRepository(session).add_many(
@@ -353,9 +359,11 @@ async def test_ranked_slots_list_only_the_entitled_ones_oldest_first(
 ) -> None:
     now = _now()
     user_id, first = await _slot(db_session, 9191)
-    second = models.Subscription(user_id=user_id, passport_root=first + 1000)
+    second = models.Subscription(user_id=user_id, passport_root=await _root(db_session, user_id))
     expired = models.Subscription(
-        user_id=user_id, passport_root=first + 2000, expires_at=now - timedelta(days=1)
+        user_id=user_id,
+        passport_root=await _root(db_session, user_id),
+        expires_at=now - timedelta(days=1),
     )
     db_session.add_all([second, expired])
     await db_session.flush()
@@ -432,7 +440,9 @@ async def test_mark_lapsed_starts_the_pause_at_the_end_of_the_term_once(
 async def test_ranked_slots_follow_priority_before_id(db_session: AsyncSession) -> None:
     now = _now()
     user_id, older = await _slot(db_session, 9311)
-    newer = models.Subscription(user_id=user_id, passport_root=older + 1000, priority=-1)
+    newer = models.Subscription(
+        user_id=user_id, passport_root=await _root(db_session, user_id), priority=-1
+    )
     db_session.add(newer)
     await db_session.flush()
     await db_session.commit()

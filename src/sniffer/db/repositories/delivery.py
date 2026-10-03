@@ -18,6 +18,7 @@ from sqlalchemy import (
     ColumnElement,
     DateTime,
     Table,
+    Text,
     and_,
     exists,
     func,
@@ -26,7 +27,8 @@ from sqlalchemy import (
     select,
     update,
 )
-from sqlalchemy.dialects.postgresql import REAL
+from sqlalchemy import cast as sa_cast
+from sqlalchemy.dialects.postgresql import ARRAY, REAL
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from sniffer.db import models
@@ -313,7 +315,13 @@ class DeliveryRepository(Repository):
         result = await self._session.execute(
             update(models.Outbox)
             .where(models.Outbox.subscription_id == subscription_id, pending, notice)
-            .values(payload=func.jsonb_set(models.Outbox.payload, "{count}", func.to_jsonb(count)))
+            .values(
+                payload=func.jsonb_set(
+                    models.Outbox.payload,
+                    sa_cast(literal("{count}"), ARRAY(Text)),
+                    func.to_jsonb(count),
+                )
+            )
             .returning(models.Outbox.id)
             .execution_options(synchronize_session=False)
         )

@@ -88,7 +88,7 @@ async def _card(
             )
         ]
     )
-    return await ListingRepository(session).add(
+    card = await ListingRepository(session).add(
         Listing(
             raw_message_id=raw_id,
             deal_type="sell",
@@ -102,6 +102,12 @@ async def _card(
             price_currency="VND" if price is not None else None,
         )
     )
+    # Карточка из архива Telegram без вердикта ИИ-проверки пять минут держит курсор (VERDICT_WAIT).
+    # Здесь проверяется отбор слота, а не ожидание вердикта, поэтому карточка уже проверена.
+    await session.execute(
+        update(models.Listing).where(models.Listing.id == card.id).values(screened_at=_now())
+    )
+    return card
 
 
 @asynccontextmanager
@@ -606,7 +612,10 @@ async def test_cancelling_does_not_wait_for_a_row_the_notifier_is_sending(
         await setup.commit()
 
     async with sessions() as notifier, sessions() as matcher:
-        taken = await DeliveryRepository(notifier).take_pending(now=now)
+        # Строку запирает `lock_pending`, а не `take_pending`: тот только читает.
+        deliveries = DeliveryRepository(notifier)
+        pending = await deliveries.take_pending(now=now)
+        taken = await deliveries.lock_pending([item.id for item in pending], now=now)
         assert len(taken) == 1, "нотифаер взял строку в отправку и держит её"
 
         cancelled = await asyncio.wait_for(
