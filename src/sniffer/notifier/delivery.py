@@ -27,6 +27,7 @@ from typing import Any, NamedTuple
 import structlog
 
 from sniffer.domain.records import OutboxMessage
+from sniffer.notifier.digest import SEPARATOR, header, split
 from sniffer.notifier.outcome import Failure, classify
 from sniffer.notifier.policy import MAX_ATTEMPTS, Action, Policy, Verdict, decide
 from sniffer.notifier.ports import Scope, Work, work_scope
@@ -41,6 +42,9 @@ __all__ = ["BATCH", "MAX_ATTEMPTS", "Delivery", "Sender", "render", "render_dige
 SEND_PAUSE_S = 1.0
 BATCH = 20
 BLOCKED_NOTE = "bot_blocked"
+# Заголовок писал незнакомый человек и длиной он не ограничен: без потолка одна
+# карточка с заголовком на тысячи знаков занимала бы целое сообщение.
+TITLE_LIMIT = 200
 
 Sender = Callable[[int, str], Awaitable[None]]
 Clock = Callable[[], datetime]
@@ -56,6 +60,14 @@ class Step(NamedTuple):
     sent: int
     called: bool
     halt: bool = False
+
+
+class Unit(NamedTuple):
+    """Что уходит одним сообщением Telegram: строки очереди и место в подборке."""
+
+    messages: list[OutboxMessage]
+    part: int = 1
+    parts: int = 1
 
 
 class Delivery:
@@ -98,24 +110,25 @@ class Delivery:
             pending = await work.queue.take_pending(limit=BATCH, now=moment)
             await work.commit()
         sent, called = 0, False
-        for messages in _groups(pending):
+        for unit in _units(pending):
             if called:
                 # Пауза нужна между обращениями к Bot API. Строка, которую успела
                 # забрать другая копия, к Telegram не ходила, и ждать после неё незачем.
                 await asyncio.sleep(self._pause_s)
-            step = await self._deliver(messages, moment=moment)
+            step = await self._deliver(unit, moment=moment)
             sent, called = sent + step.sent, step.called
             if step.halt:
                 break
         return sent
 
-    async def _deliver(self, messages: list[OutboxMessage], *, moment: datetime) -> Step:
+    async def _deliver(self, unit: Unit, *, moment: datetime) -> Step:
         async with self._scope() as work:
-            held = await work.queue.lock_pending([message.id for message in messages], now=moment)
+            ids = [message.id for message in unit.messages]
+            held = await work.queue.lock_pending(ids, now=moment)
             if not held:
                 # Другая копия успела раньше или строку отложили: слать нечего.
                 return Step(sent=0, called=False)
-            failure = await self._attempt(held)
+            failure = await self._attempt(Unit(held, unit.part, unit.parts))
             if failure is not None:
                 return await self._fail(work, held, failure)
             # Время берём ПОСЛЕ ответа Telegram: это момент отправки, а не начало
@@ -126,7 +139,7 @@ class Delivery:
             await work.commit()
         return Step(sent=len(held), called=True)
 
-    async def _attempt(self, messages: list[OutboxMessage]) -> Failure | None:
+    async def _attempt(self, unit: Unit) -> Failure | None:
         """Шаги отправки под одной охраной, последний `except` — корень иерархии.
 
         Чужой код здесь два: сборка текста из данных очереди и сам Bot API. Что бы
@@ -134,8 +147,8 @@ class Delivery:
         этого просьба остановиться, решает `classify`: шаг не выбирает сам.
         """
         try:
-            text = _text(messages)
-            await self._send(messages[0].recipient_id, text)
+            text = _text(unit)
+            await self._send(unit.messages[0].recipient_id, text)
         except BaseException as exc:
             return classify(exc)
         return None
@@ -174,11 +187,12 @@ class Delivery:
         log.warning("notifier.gave_up", message=message.id, attempts=attempts, error=verdict.note)
 
 
-def _text(messages: list[OutboxMessage]) -> str:
-    """Текст одной отправки: подборка для нескольких карточек, иначе одна карточка."""
-    if len(messages) > 1:
-        return render_digest([message.payload for message in messages])
-    return render(messages[0].payload)
+def _text(unit: Unit) -> str:
+    """Текст одной отправки: подборка, если карточек несколько или это часть подборки."""
+    if len(unit.messages) > 1 or unit.parts > 1:
+        payloads = [message.payload for message in unit.messages]
+        return render_digest(payloads, part=unit.part, parts=unit.parts)
+    return render(unit.messages[0].payload)
 
 
 def render(payload: dict[str, Any]) -> str:
@@ -189,7 +203,7 @@ def render(payload: dict[str, Any]) -> str:
     """
     if payload.get("kind") == "collection_result":
         return _collection_result(payload)
-    title = escape(str(payload.get("title") or "без заголовка"))
+    title = escape(_clip(str(payload.get("title") or "без заголовка"), TITLE_LIMIT))
     url = escape(str(payload.get("url") or ""))
     price = _price(payload)
     lines = [f"<b>{title}</b>", price]
@@ -199,6 +213,11 @@ def render(payload: dict[str, Any]) -> str:
     if url:
         lines.append(f'<a href="{url}">открыть оригинал</a>')
     return "\n".join(line for line in lines if line)
+
+
+def _clip(text: str, limit: int) -> str:
+    """Обрезка ДО экранирования: после неё `&amp;` пополам не режется."""
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def _collection_result(payload: dict[str, Any]) -> str:
@@ -211,22 +230,32 @@ def _collection_result(payload: dict[str, Any]) -> str:
     return "\n\n".join([intro, *cards])
 
 
-def render_digest(payloads: list[dict[str, Any]]) -> str:
+def render_digest(payloads: list[dict[str, Any]], *, part: int = 1, parts: int = 1) -> str:
     """Одна подборка вместо серии сообщений в одну секунду."""
     cards = [render(payload) for payload in payloads]
-    return "<b>Новые находки по вашему запросу</b>\n\n" + "\n\n".join(cards)
+    return header(part, parts) + SEPARATOR + SEPARATOR.join(cards)
 
 
-def _groups(messages: list[OutboxMessage]) -> list[list[OutboxMessage]]:
-    grouped: list[list[OutboxMessage]] = []
-    digest_by_user: dict[int, list[OutboxMessage]] = {}
+def _units(messages: list[OutboxMessage]) -> list[Unit]:
+    """Что уходит за проход и в каком порядке: одиночные карточки, затем подборки клиентов.
+
+    Подборка клиента режется на сообщения по границе карточки (`digest.split`),
+    поэтому текст карточек здесь собирается заранее — чтобы измерить. `render` не
+    бросает на чужих данных (это проверяет тест), иначе одна плохая карточка роняла
+    бы планирование всего прохода, а не только свою отправку под охраной.
+    """
+    units: list[Unit] = []
+    digests: dict[int, list[OutboxMessage]] = {}
     for message in messages:
         if message.payload.get("delivery_mode") == "digest":
-            digest_by_user.setdefault(message.user_id, []).append(message)
+            digests.setdefault(message.user_id, []).append(message)
         else:
-            grouped.append([message])
-    grouped.extend(digest_by_user.values())
-    return grouped
+            units.append(Unit([message]))
+    for batch in digests.values():
+        parts = split([render(message.payload) for message in batch])
+        for number, group in enumerate(parts, start=1):
+            units.append(Unit([batch[index] for index in group], number, len(parts)))
+    return units
 
 
 def _price(payload: dict[str, Any]) -> str:
@@ -238,5 +267,6 @@ def _price(payload: dict[str, Any]) -> str:
         return "цена не указана"
     currency = str(payload.get("price_currency") or "").strip()
     whole = amount.split(".")[0]
-    pretty = f"{int(whole):,}".replace(",", " ") if whole.isdigit() else escape(whole)
+    digits = whole.isascii() and whole.isdigit()  # у «²» isdigit() истинно, а int() падает
+    pretty = f"{int(whole):,}".replace(",", " ") if digits else escape(whole)
     return escape(f"{pretty} {currency}".strip())
