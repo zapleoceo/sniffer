@@ -32,6 +32,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sniffer.db import models
 from sniffer.db.mappers import to_subscription_state
 from sniffer.db.repositories.base import Repository
+from sniffer.domain.monitoring import OVERFLOW_KIND
 from sniffer.domain.records import OutboxMessage, Payment, SubscriptionState
 
 OUTBOX_PENDING = "pending"
@@ -203,6 +204,71 @@ class DeliveryRepository(Repository):
                 .where(models.Notification.id == notification_id)
                 .values(sent_at=moment)
             )
+            await self._confirm_monitor_view(notification_id, moment)
+
+    async def _confirm_monitor_view(self, notification_id: int, moment: datetime) -> None:
+        """Карточка слежения дошла: строка журнала показов становится показом.
+
+        Строку (`channel='monitor'`, в потолок периода не входит) монитор писал при постановке
+        в очередь; пока сообщение не ушло, это резерв, и воркер его по таймеру не снимает —
+        слежение может ждать часы (тихие часы, дайджест). Ключ — клиент и карточка: период
+        здесь не нужен, у пары в журнале одна непустая строка.
+        """
+        owner = (
+            select(models.Subscription.user_id, models.Notification.listing_id)
+            .join(
+                models.Subscription, models.Subscription.id == models.Notification.subscription_id
+            )
+            .where(models.Notification.id == notification_id)
+            .subquery()
+        )
+        await self._session.execute(
+            update(models.OfferView)
+            .where(
+                models.OfferView.channel == "monitor",
+                models.OfferView.delivered_at.is_(None),
+                models.OfferView.user_id == select(owner.c.user_id).scalar_subquery(),
+                models.OfferView.listing_id == select(owner.c.listing_id).scalar_subquery(),
+            )
+            .values(delivered_at=moment)
+            .execution_options(synchronize_session=False)
+        )
+
+    async def enqueue_notice(
+        self,
+        *,
+        subscription_id: int,
+        user_id: int,
+        payload: dict[str, Any],
+        scheduled_at: datetime,
+    ) -> None:
+        """Служебное сообщение слота (сводка «ещё N»): строка очереди без карточки.
+
+        Без `notifications`: дедуп и суточный потолок считают карточки, а сводка — не
+        карточка и ни одного из суточных слотов не занимает.
+        """
+        self._session.add(
+            models.Outbox(
+                user_id=user_id,
+                subscription_id=subscription_id,
+                payload=payload,
+                scheduled_at=scheduled_at,
+            )
+        )
+        await self._session.flush()
+
+    async def bump_overflow_notice(self, subscription_id: int, *, count: int) -> int:
+        """Уточнить число в сводке «ещё N», которая ещё не ушла. Возвращает, сколько строк."""
+        pending = models.Outbox.status == OUTBOX_PENDING
+        notice = models.Outbox.payload["kind"].astext == OVERFLOW_KIND
+        result = await self._session.execute(
+            update(models.Outbox)
+            .where(models.Outbox.subscription_id == subscription_id, pending, notice)
+            .values(payload=func.jsonb_set(models.Outbox.payload, "{count}", func.to_jsonb(count)))
+            .returning(models.Outbox.id)
+            .execution_options(synchronize_session=False)
+        )
+        return len(result.all())
 
     async def mark_failed(
         self, message_id: int, *, retry_at: datetime, error: str | None = None

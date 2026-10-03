@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 
 import structlog
 
@@ -27,7 +27,7 @@ from sniffer.worker.archive import ArchivePipeline
 from sniffer.worker.chotot_sync import ChototSync
 from sniffer.worker.enrich_cli import EXIT_OK, EXIT_USAGE, run_enrich
 from sniffer.worker.expiry import Expiry
-from sniffer.worker.matcher import Matcher
+from sniffer.worker.monitor import MonitorAgent
 from sniffer.worker.quota_sweep import ReservationSweep
 from sniffer.worker.recategorize import Recategorize
 from sniffer.worker.retention import Retention
@@ -49,72 +49,106 @@ def missing_settings(_settings: Settings) -> list[str]:
     return []
 
 
-def build_matcher() -> Matcher:
-    """Матчер со всем, что ему нужно снаружи.
+def build_monitor() -> MonitorAgent:
+    """Агент слежения со всем, что ему нужно снаружи.
 
-    Курс — зависимость, которую матчеру ДАЮТ: в тесте он собирается без сети. Но и забыть её
-    здесь нельзя: матчер без источника курса держит каждую подписку с долларовым бюджетом
-    в ожидании вечно. Прежний `Matcher()` без курса молча не сужал бюджет вовсе (D2: у 10
-    из 14 бюджетных паспортов в базе бюджет в USD, замер 03.10.2026), и ни один модульный
-    тест этого не видел — дефект сидел в проводке, а не в самом матчере. Поэтому проводка
-    вынесена в функцию, и её проверяет отдельный тест.
+    Курс — зависимость, которую агенту ДАЮТ: в тесте он собирается без сети. Но и забыть её
+    здесь нельзя: агент без источника курса держит каждый слот с долларовым бюджетом в
+    ожидании вечно. Прежний `Matcher()` без курса молча не сужал бюджет вовсе (D2: у 10 из 14
+    бюджетных паспортов в базе бюджет в USD, замер 03.10.2026), и ни один модульный тест этого
+    не видел — дефект сидел в проводке, а не в самом матчере. Поэтому проводка вынесена в
+    функцию, и её проверяет отдельный тест.
     """
-    return Matcher(rate=usd_vnd_rate)
+    return MonitorAgent(rate=usd_vnd_rate)
+
+
+# Как часто агент слежения смотрит, не появилось ли новое. Секунды, а не 15 минут коллектора:
+# пока в базе нет карточек новее курсора слота, проход стоит один запрос `max(id)`, а когда
+# появились — клиент получает их «как только попало в базу», а не в следующий цикл воронки.
+MONITOR_POLL_S = 5.0
+# Пауза после сбоя прохода агента: «упал — залогировал — подождал — снова», а не падение
+# всего процесса вместе с воронкой.
+MONITOR_RETRY_S = 30.0
+
+
+async def guarded(tick: Callable[[], Awaitable[int]], *, name: str) -> int:
+    """Проход, который не роняет задачу: сбой в журнал, работа продолжается.
+
+    Охрана до `Exception`, не до `BaseException`: остановка процесса (`CancelledError`) —
+    не сбой, и глотать её нельзя. Сам слот агента уже изолирован своим SAVEPOINT; здесь
+    ловится то, что вне слотов (база недоступна, `claim_due`), и оно не должно ронять
+    воронку, которая живёт в соседней задаче того же процесса.
+    """
+    try:
+        return await tick()
+    except Exception as exc:
+        log.error("worker.task_failed", task=name, error=f"{type(exc).__name__}: {exc}"[:300])
+        await asyncio.sleep(MONITOR_RETRY_S)
+        return 0
 
 
 async def run(stop: asyncio.Event) -> None:
     log.info("worker.started")
     retention = Retention()
     archive = ArchivePipeline()
-    matcher = build_matcher()
+    monitor = build_monitor()
     chotot = ChototSync()
     expiry = Expiry()
     recategorize = Recategorize()
     screening = Screening()
     reservations = ReservationSweep()
-    await idle_loop(
-        stop,
-        lambda: _tick(
-            retention, archive, matcher, chotot, expiry, recategorize, screening, reservations
+    # Две независимые задачи одного процесса: воронка (источники, гашение, ИИ-проверка) и
+    # агент слежения. ИИ-проверка держит проход до двух минут на пачку, и в одной цепочке
+    # `await` она задерживала бы слежение; сбой одного, в свою очередь, не должен
+    # останавливать другого.
+    await asyncio.gather(
+        idle_loop(
+            stop,
+            lambda: _tick(
+                retention, archive, chotot, expiry, recategorize, screening, reservations
+            ),
+            service=NAME,
         ),
-        service=NAME,
+        idle_loop(
+            stop,
+            lambda: guarded(monitor.tick, name="monitor"),
+            service="monitor",
+            poll_interval_s=MONITOR_POLL_S,
+        ),
     )
 
 
 async def _tick(
     retention: Retention,
     archive: ArchivePipeline,
-    matcher: Matcher,
     chotot: ChototSync,
     expiry: Expiry,
     recategorize: Recategorize,
     screening: Screening,
     reservations: ReservationSweep,
 ) -> int:
-    """Сколько работы сделали за проход.
+    """Сколько работы сделали за проход воронки.
 
     Возврат числа, а не флага, нужен циклу: пока пачки полные, спать незачем.
     """
-    # Порядок обязателен: сопоставление обязано видеть карточки, созданные
-    # этим же проходом, иначе подписчик узнаёт о находке на четверть часа позже
-    # без всякой причины. Доска — тем же процессом и перед сопоставлением по
+    # Порядок обязателен: гашение и пересчёт — после источников, чтобы видеть
+    # карточки этого же прохода. Доска — тем же процессом и перед гашением по
     # той же причине: карточка Chotot — такая же строка `listings`.
     synced = await chotot.tick()
     processed = await archive.tick()
-    # Гашение устаревшего — до сопоставления: подписчику не уходит карточка,
-    # которая в этом же проходе перестала быть актуальной.
+    # Гашение устаревшего: слежение (отдельная задача) не ставит в очередь карточку, которая
+    # уже перестала быть актуальной, — `is_active` читается самим запросом отбора.
     expired = await expiry.tick()
-    # Пересчёт категорий у накопленного — тоже до сопоставления: подписчику
-    # квартиры не уходит карточка, которая этим проходом перестала быть байком.
+    # Пересчёт категорий у накопленного: слот судит карточку по её текущей категории.
     expired += await recategorize.tick()
-    # Проверка моделью — тоже до сопоставления: подписчику не уходит «обмен
-    # валют», который модель этим проходом признала не товаром.
+    # Проверка моделью: слежение не берёт карточку из архива Telegram, пока вердикта нет
+    # (`first_unready_id`), — позиция в этой цепочке больше ничего не гарантирует, гарантия
+    # теперь данные, а не порядок вызовов.
     expired += await screening.tick()
-    matched = await matcher.tick()
     # Резервы показов снимаются независимо от воронки: это не карточки, а слоты квоты
     # людей, которым сообщение не дошло, и ждать конца воронки им незачем.
     swept = await reservations.tick()
-    return synced + processed + expired + matched + swept + await retention.tick()
+    return synced + processed + expired + swept + await retention.tick()
 
 
 SERVICE = Service(name=NAME, requires=missing_settings, run=run)

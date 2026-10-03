@@ -16,10 +16,15 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 from math import exp
 
-from sniffer.domain.passport import Currency, Passport, counterpart_deal_type
+from sniffer.domain.match_filter import build_match_filter, ceiling_vnd
+from sniffer.domain.passport import (
+    Currency,
+    Passport,
+    engine_cc_bounds,
+    with_default_attributes,
+)
 from sniffer.domain.records import Listing, MatchFilter
 
 # Насколько старая карточка ещё годится в подписку. Тот же порог, что у
@@ -28,6 +33,14 @@ MATCH_MAX_AGE_DAYS = 14
 # Порог показа. Ниже — карточка формально подходит, но клиенту не полезна:
 # подписка шлёт сама, без спроса, и цена ошибки здесь выше, чем в поиске.
 MATCH_MIN_SCORE = 0.55
+# Насколько новой карточка должна быть В МОМЕНТ слежения. Слежение обещает НОВОЕ: карточка
+# с `posted_at` вчерашней давности, получившая свежий id при доборе архива или пересчёте,
+# новой не является, и счёт оценки её не остановит — при цене в бюджете и совпавшем
+# атрибуте он не падает ниже порога при любой давности (D10).
+MONITOR_MAX_AGE = timedelta(hours=24)
+# Свойства паспорта, чьё сравнение у слежения НЕ равенство: объём идёт полосой, направление
+# — служебное, модель судится словами. Равенство по ним резало бы «от 250» и «200 ±25%» (D3).
+_NOT_EQUALITY = frozenset({"engine_cc", "engine_cc_dir", "model"})
 
 
 def filter_for(
@@ -37,18 +50,18 @@ def filter_for(
 
     Без города и категории отбор превращается в «покажи всё подряд», а
     подписка на всё подряд — это спам, за который бота отключают в первые сутки.
+    Остальное собирает тот же построитель, что у диалога: критерии двух путей одни.
     """
     if not passport.city or passport.category is None:
         return None
     moment = now or datetime.now(UTC)
-    return MatchFilter(
+    return build_match_filter(
         city=passport.city,
         category=passport.category.value,
-        # Паспорт описывает сторону клиента, карточка — сторону автора
-        # объявления. Покупателю нужен продавец, арендатору — арендодатель.
-        deal_type=counterpart_deal_type(passport.intent),
-        max_price_vnd=_ceiling(passport, usd_vnd),
+        intent=passport.intent,
+        ceiling=ceiling_vnd(passport.budget, usd_vnd),
         since=moment - timedelta(days=MATCH_MAX_AGE_DAYS),
+        attributes=passport.attributes,
     )
 
 
@@ -68,6 +81,9 @@ def score(listing: Listing, passport: Passport, *, now: datetime | None = None) 
 
 
 def worth_sending(listing: Listing, passport: Passport, *, now: datetime | None = None) -> bool:
+    moment = now or datetime.now(UTC)
+    if _age(listing, moment) > MONITOR_MAX_AGE:
+        return False
     wanted_model = str(passport.attributes.get("model") or "")
     if wanted_model and not _listing_has_model(listing, wanted_model):
         return False
@@ -90,12 +106,33 @@ def _model_words(value: str) -> str:
 
 
 def _known_attribute_conflicts(listing: Listing, passport: Passport) -> bool:
-    """Автоуведомление не шлёт известное противоречие явному требованию."""
-    for field, wanted in passport.attributes.items():
+    """Слежение не шлёт известное противоречие явному требованию.
+
+    Требования те же, что у диалога: умолчание категории (байк без слова «электро» —
+    бензиновый) и полоса объёма вместо равенства. Неизвестное свойство не мешает.
+    """
+    wanted_all = with_default_attributes(
+        passport.category.value if passport.category else None, passport.attributes
+    )
+    low, high = engine_cc_bounds(wanted_all.get("engine_cc"), wanted_all.get("engine_cc_dir"))
+    actual_cc = listing.attributes.get("engine_cc")
+    if isinstance(actual_cc, int | float) and not isinstance(actual_cc, bool):
+        if (low is not None and actual_cc < low) or (high is not None and actual_cc > high):
+            return True
+    for field, wanted in wanted_all.items():
+        if field in _NOT_EQUALITY:
+            continue
         actual = listing.attributes.get(field)
         if actual not in (None, "") and str(actual).casefold() != str(wanted).casefold():
             return True
     return False
+
+
+def _age(listing: Listing, now: datetime) -> timedelta:
+    posted = listing.posted_at
+    if posted.tzinfo is None:
+        posted = posted.replace(tzinfo=UTC)
+    return now - posted
 
 
 def _freshness(listing: Listing, now: datetime) -> float:
@@ -122,7 +159,7 @@ def _price_fit(listing: Listing, passport: Passport) -> float:
 
 def _attribute_fit(listing: Listing, passport: Passport) -> float:
     """Доля совпавших атрибутов паспорта. Пустой паспорт — половина."""
-    wanted = passport.attributes
+    wanted = {k: v for k, v in passport.attributes.items() if k not in _NOT_EQUALITY}
     if not wanted:
         return 0.5
     have = listing.attributes
@@ -139,25 +176,13 @@ def needs_usd_rate(passport: Passport) -> bool:
     """Бюджет в долларах с потолком: без курса он не становится потолком в донгах.
 
     Объявления написаны в донгах, и отбор по долларовому бюджету без курса вырождается
-    в «любая цена подходит» (`_ceiling` ниже отдаёт `None`, а `_price_fit` ставит
+    в «любая цена подходит» (`ceiling_vnd` отдаёт `None`, а `_price_fit` ставит
     единицу любой известной цене). Для разового поиска это терпимо — клиент видит
     выдачу и решает сам. Подписка шлёт без спроса: дорогое она бы отправила как
     «идеально в бюджете». Поэтому тот, кто зовёт подбор для подписки, обязан по этому
     признаку дождаться курса, а не звать `filter_for` без него.
 
-    Условие то же, что в ветке USD у `_ceiling`: тест держит их вместе.
+    Условие то же, что в ветке USD у `domain.match_filter.ceiling_vnd`: тест держит их вместе.
     """
     budget = passport.budget
     return budget.max is not None and budget.currency is Currency.USD
-
-
-def _ceiling(passport: Passport, usd_vnd: float | None) -> Decimal | None:
-    budget = passport.budget
-    if budget.max is None:
-        return None
-    if budget.currency is Currency.VND:
-        return Decimal(str(budget.max))
-    if budget.currency is Currency.USD and usd_vnd is not None:
-        return Decimal(str(budget.max * usd_vnd))
-    # Валюта известна, курса нет: врать про потолок нельзя, лучше не сужать.
-    return None

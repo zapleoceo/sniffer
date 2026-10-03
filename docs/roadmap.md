@@ -178,7 +178,7 @@ Telegram с названием у него на руках нет. Ни на ч�
 | таблицы `sources`, `listing_verifications`, `usage_counters`, `payments`, `price_history`, `users.tier` | описаны в spec-v2, в `001_init.sql` отсутствуют |
 | `pipeline/archive.py` · `worker/archive.py` | сделано: конкурентный claim, гейт, явные атрибуты, advisory-lock дедуп кросспоста |
 | `matching/` | паспорт → условия отбора и оценка находки; SQL в `db`, спецификация в `domain` |
-| `worker/matcher.py` | новые карточки → подходящие подписки → `outbox`, с суточным лимитом |
+| `worker/monitor.py` | новые карточки → подходящие подписки → `outbox`, с суточным лимитом |
 | `notifier/delivery.py` | сделано: outbox, точный sent_at, троттлинг, retry, digest и quiet hours |
 | `verifier/guard.py` | дешёвая модель проверяет карточки перед показом: цена без метки, предмет не из запроса |
 | `pipeline`: полное извлечение (атрибуты, продавец) | гейт, минимальная карточка и дедуп есть; атрибутов карточка пока не несёт, поэтому подбор по ним не штрафует |

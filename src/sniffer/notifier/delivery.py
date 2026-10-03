@@ -26,6 +26,7 @@ from typing import Any, NamedTuple
 
 import structlog
 
+from sniffer.domain.monitoring import OVERFLOW_KIND
 from sniffer.domain.records import OutboxMessage
 from sniffer.notifier.digest import SEPARATOR, header, split
 from sniffer.notifier.outcome import Failure, classify
@@ -201,6 +202,8 @@ def render(payload: dict[str, Any]) -> str:
     """
     if payload.get("kind") == "collection_result":
         return _collection_result(payload)
+    if payload.get("kind") == OVERFLOW_KIND:
+        return _overflow(payload)
     title = escape(_clip(str(payload.get("title") or "без заголовка"), TITLE_LIMIT))
     url = escape(str(payload.get("url") or ""))
     price = _price(payload)
@@ -211,6 +214,24 @@ def render(payload: dict[str, Any]) -> str:
     if url:
         lines.append(f'<a href="{url}">открыть оригинал</a>')
     return "\n".join(line for line in lines if line)
+
+
+def _overflow(payload: dict[str, Any]) -> str:
+    """Сводка слота одной строкой: сколько подошло сверх суточного потолка.
+
+    Числа приходят из очереди и не доверяются: нечисло превращается в ноль, а не в трейсбек
+    на рендере (`render` не вправе бросать на чужих данных).
+    """
+    count = _whole(payload.get("count"))
+    cap = _whole(payload.get("cap"))
+    return (
+        f"Сегодня подошло ещё {count} сверх {cap} в сутки. "
+        "Сузьте запрос (цена, район, модель), чтобы не пропускать лучшее."
+    )
+
+
+def _whole(value: object) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
 def _clip(text: str, limit: int) -> str:

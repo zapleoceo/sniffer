@@ -346,7 +346,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     is_active      BOOLEAN     NOT NULL DEFAULT TRUE,
     -- instant | digest — при digest даже высокий score копится до сводки
     mode           TEXT        NOT NULL DEFAULT 'instant',
-    max_per_day    INT         NOT NULL DEFAULT 5,
+    max_per_day    INT         NOT NULL DEFAULT 10,
     quiet_from     TIME,
     quiet_to       TIME,
     sent_today     INT         NOT NULL DEFAULT 0,
@@ -364,6 +364,12 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     failed_streak     INT         NOT NULL DEFAULT 0,
     last_error        TEXT,
     quarantined_until TIMESTAMPTZ,
+    -- Монитор по слоту (015_monitor_agent.sql): сводка «ещё N» и пауза без слота.
+    suppressed_total  INT         NOT NULL DEFAULT 0,
+    overflow_day      DATE,
+    overflow_count    INT         NOT NULL DEFAULT 0,
+    overflow_notified BOOLEAN     NOT NULL DEFAULT FALSE,
+    no_slot_since     TIMESTAMPTZ,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (user_id, passport_root)
 );

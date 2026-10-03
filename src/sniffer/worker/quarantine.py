@@ -61,7 +61,7 @@ async def quarantine(
     until = moment + quarantine_delay(streak)
     await monitors.quarantine(slot.id, now=moment, streak=streak, until=until, error=error)
     log.error(
-        "matcher.quarantined",
+        "monitor.quarantined",
         subscription=slot.id,
         user=slot.user_id,
         streak=streak,

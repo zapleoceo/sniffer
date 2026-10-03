@@ -32,13 +32,9 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sniffer.domain.listing_state import LISTING_MAX_AGE_DAYS
-from sniffer.domain.passport import (
-    Intent,
-    counterpart_deal_type,
-    engine_cc_bounds,
-    with_default_attributes,
-)
-from sniffer.domain.records import Listing, MatchFilter
+from sniffer.domain.match_filter import build_match_filter
+from sniffer.domain.passport import Intent
+from sniffer.domain.records import Listing
 from sniffer.sources.telegram_reference import ChatDirectory, ChatLike
 
 log = structlog.get_logger(__name__)
@@ -51,10 +47,6 @@ CITY_OVERFETCH = 5
 # карточка (`domain.listing_state`): старше её гасит воркер, и окно шире лишь
 # листало бы погашенное.
 CATALOG_MAX_AGE_DAYS = LISTING_MAX_AGE_DAYS
-
-# Свойства, которые каталог отбирает «известное ≠ несовпадение». Модель и объём
-# идут своими полями `MatchFilter`: у них другая семантика (см. там).
-_EXACT_ATTRIBUTES = ("brand", "transmission", "rooms", "power")
 
 
 class CityChatLike(ChatLike, Protocol):
@@ -173,24 +165,13 @@ async def search_listings(params: dict[str, object], *, limit: int) -> list[List
     # — те же имена, что читает разбор запроса и отбор выдачи.
     raw_attributes = params.get("attributes")
     category = str(params.get("category") or "").strip() or None
-    attributes = with_default_attributes(
-        category, dict(raw_attributes) if isinstance(raw_attributes, dict) else {}
-    )
-    low, high = engine_cc_bounds(attributes.get("engine_cc"), attributes.get("engine_cc_dir"))
-    spec = MatchFilter(
+    spec = build_match_filter(
         city=city,
         category=category,
-        deal_type=counterpart_deal_type(intent),
-        max_price_vnd=ceiling,
+        intent=intent,
+        ceiling=ceiling,
         since=datetime.now(UTC) - timedelta(days=CATALOG_MAX_AGE_DAYS),
-        attributes={
-            key: attributes[key]
-            for key in _EXACT_ATTRIBUTES
-            if attributes.get(key) not in (None, "")
-        },
-        model=str(attributes.get("model") or "").strip() or None,
-        engine_cc_min=low,
-        engine_cc_max=high,
+        attributes=dict(raw_attributes) if isinstance(raw_attributes, dict) else {},
     )
     async with session_scope() as session:
         return await ListingRepository(session).search_catalog(spec, limit=limit)

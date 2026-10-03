@@ -15,7 +15,7 @@ from structlog.testing import capture_logs
 
 from sniffer.db.repositories.monitors import BrokenSubscription
 from sniffer.worker import __main__ as worker_main
-from sniffer.worker.matcher import Matcher
+from sniffer.worker.monitor import MonitorAgent
 from sniffer.worker.quarantine import QUARANTINE_FIRST, QUARANTINE_MAX, quarantine_delay
 from tests.monitor_support import (
     NOW,
@@ -41,7 +41,7 @@ async def test_the_pass_hands_one_moment_to_every_query(monkeypatch: pytest.Monk
     """
     world = install(monkeypatch, subscriptions=[subscription()], page=[listing(moment=LATER)])
 
-    assert await Matcher().tick(now=LATER) == 1
+    assert await MonitorAgent().tick(now=LATER) == 1
 
     assert [claim["now"] for claim in world.monitors.claims] == [LATER]
     assert [item["now"] for item in world.delivery.queued] == [LATER]
@@ -53,7 +53,7 @@ async def test_without_an_argument_the_pass_asks_its_injected_clock(
     """Часы — внедряемая зависимость, а не вызов `datetime.now` посреди прохода."""
     world = install(monkeypatch, subscriptions=[subscription()], page=[listing(moment=LATER)])
 
-    assert await Matcher(clock=lambda: LATER).tick() == 1
+    assert await MonitorAgent(clock=lambda: LATER).tick() == 1
 
     assert [claim["now"] for claim in world.monitors.claims] == [LATER]
     assert [item["now"] for item in world.delivery.queued] == [LATER]
@@ -62,7 +62,7 @@ async def test_without_an_argument_the_pass_asks_its_injected_clock(
 async def test_an_explicit_moment_beats_the_clock(monkeypatch: pytest.MonkeyPatch) -> None:
     world = install(monkeypatch, subscriptions=[subscription()], page=[listing()])
 
-    await Matcher(clock=lambda: LATER).tick(now=NOW)
+    await MonitorAgent(clock=lambda: LATER).tick(now=NOW)
 
     assert [claim["now"] for claim in world.monitors.claims] == [NOW]
 
@@ -72,7 +72,7 @@ async def test_the_default_clock_is_the_real_utc_time(monkeypatch: pytest.Monkey
     world = install(monkeypatch, subscriptions=[subscription()])
     before = datetime.now(UTC)
 
-    await Matcher().tick()
+    await MonitorAgent().tick()
 
     (claim,) = world.monitors.claims
     assert claim["now"].tzinfo is not None
@@ -105,7 +105,7 @@ async def test_a_dollar_budget_reaches_the_query_as_a_dong_ceiling(
     """300 $ при 26 000 ₫/$ — потолок 7,8 млн в самом запросе, а не «любая цена»."""
     world = install(monkeypatch, subscriptions=[usd_subscription()], page=[listing()])
 
-    await Matcher(rate=Rates(RATE)).tick(now=NOW)
+    await MonitorAgent(rate=Rates(RATE)).tick(now=NOW)
 
     ((spec, _after, _limit),) = world.listings.asked
     assert spec.max_price_vnd == Decimal("7800000")
@@ -119,7 +119,7 @@ async def test_without_a_rate_a_dollar_slot_waits_instead_of_ignoring_the_budget
     Прежний матчер строил отбор без потолка и отдавал дорогое как «идеально в бюджете».
     """
     world = install(monkeypatch, subscriptions=[usd_subscription()], page=[listing()])
-    matcher = Matcher(rate=Rates(None))
+    matcher = MonitorAgent(rate=Rates(None))
 
     with capture_logs() as logs:
         assert await matcher.tick(now=NOW) == 0
@@ -127,7 +127,7 @@ async def test_without_a_rate_a_dollar_slot_waits_instead_of_ignoring_the_budget
     assert world.listings.asked == [], "запрос без потолка не уходит"
     assert world.delivery.queued == [] and world.delivery.advanced == []
     assert matcher.counters.skipped_no_rate == 1
-    waiting = [entry for entry in logs if entry["event"] == "matcher.waiting_for_rate"]
+    waiting = [entry for entry in logs if entry["event"] == "monitor.waiting_for_rate"]
     assert waiting and waiting[0]["subscriptions"] == [1]
 
 
@@ -135,7 +135,7 @@ async def test_a_matcher_without_a_rate_source_waits_too(monkeypatch: pytest.Mon
     world = install(monkeypatch, subscriptions=[usd_subscription()], page=[listing()])
 
     with capture_logs() as logs:
-        assert await Matcher().tick(now=NOW) == 0
+        assert await MonitorAgent().tick(now=NOW) == 0
 
     assert world.listings.asked == []
     failed = [entry for entry in logs if entry["event"] == "fx.usd_rate_failed"]
@@ -149,7 +149,7 @@ async def test_a_dong_slot_is_served_while_a_dollar_slot_waits(
         monkeypatch, subscriptions=[usd_subscription(1), subscription(2)], page=[listing()]
     )
 
-    assert await Matcher(rate=Rates(None)).tick(now=NOW) == 1
+    assert await MonitorAgent(rate=Rates(None)).tick(now=NOW) == 1
 
     assert [item["subscription_id"] for item in world.delivery.queued] == [2]
 
@@ -158,7 +158,7 @@ async def test_the_rate_is_not_asked_when_no_slot_needs_it(monkeypatch: pytest.M
     install(monkeypatch, subscriptions=[subscription(1), subscription(2)], page=[listing()])
     rates = Rates(RATE)
 
-    await Matcher(rate=rates).tick(now=NOW)
+    await MonitorAgent(rate=rates).tick(now=NOW)
 
     assert rates.calls == 0
 
@@ -167,7 +167,7 @@ async def test_a_dollar_slot_resumes_from_the_same_place_when_the_rate_returns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     world = install(monkeypatch, subscriptions=[usd_subscription()], page=[listing()])
-    matcher = Matcher(rate=Rates(None, RATE))
+    matcher = MonitorAgent(rate=Rates(None, RATE))
 
     assert await matcher.tick(now=NOW) == 0
     assert await matcher.tick(now=NOW + timedelta(minutes=2)) == 1
@@ -182,7 +182,7 @@ async def test_a_failed_rate_is_not_asked_again_on_every_pass(
     """Источник курса, который не ответил, не опрашивают каждые пять секунд."""
     install(monkeypatch, subscriptions=[usd_subscription()], page=[listing()])
     rates = Rates(None)
-    matcher = Matcher(rate=rates)
+    matcher = MonitorAgent(rate=rates)
 
     await matcher.tick(now=NOW)
     await matcher.tick(now=NOW + timedelta(seconds=5))
@@ -196,7 +196,7 @@ async def test_a_dead_rate_source_is_logged_once_per_outage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     install(monkeypatch, subscriptions=[usd_subscription()], page=[listing()])
-    matcher = Matcher(rate=Rates(None))
+    matcher = MonitorAgent(rate=Rates(None))
 
     with capture_logs() as logs:
         for minutes in (0, 2, 4):
@@ -214,7 +214,7 @@ async def test_an_exploding_rate_source_is_just_an_unavailable_rate(
         monkeypatch, subscriptions=[usd_subscription(1), subscription(2)], page=[listing()]
     )
 
-    assert await Matcher(rate=Rates(RuntimeError("сервис курса упал"))).tick(now=NOW) == 1
+    assert await MonitorAgent(rate=Rates(RuntimeError("сервис курса упал"))).tick(now=NOW) == 1
 
     assert [item["subscription_id"] for item in world.delivery.queued] == [2]
 
@@ -224,7 +224,7 @@ async def test_a_nonsense_rate_is_no_rate(monkeypatch: pytest.MonkeyPatch, nonse
     """NaN в Postgres больше любого числа: потолок «до NaN» пропустил бы всё."""
     world = install(monkeypatch, subscriptions=[usd_subscription()], page=[listing()])
 
-    assert await Matcher(rate=Rates(nonsense)).tick(now=NOW) == 0
+    assert await MonitorAgent(rate=Rates(nonsense)).tick(now=NOW) == 0
 
     assert world.listings.asked == []
 
@@ -237,7 +237,7 @@ async def test_a_stop_signal_in_the_rate_source_is_not_swallowed(
     install(monkeypatch, subscriptions=[usd_subscription()], page=[listing()])
 
     with pytest.raises(type(stop)):
-        await Matcher(rate=Rates(stop)).tick(now=NOW)
+        await MonitorAgent(rate=Rates(stop)).tick(now=NOW)
 
 
 async def test_the_worker_gives_the_matcher_the_live_dollar_rate(
@@ -248,7 +248,7 @@ async def test_the_worker_gives_the_matcher_the_live_dollar_rate(
     monkeypatch.setattr(worker_main, "usd_vnd_rate", answers)
     world = install(monkeypatch, subscriptions=[usd_subscription()], page=[listing()])
 
-    await worker_main.build_matcher().tick(now=NOW)
+    await worker_main.build_monitor().tick(now=NOW)
 
     assert answers.calls == 1
     ((spec, _after, _limit),) = world.listings.asked
@@ -278,7 +278,7 @@ async def test_a_failing_slot_is_quarantined_and_the_others_are_served(
         page=[listing()],
         explode={BOOM: ValueError("незнакомое значение")},
     )
-    matcher = Matcher()
+    matcher = MonitorAgent()
 
     assert await matcher.tick(now=NOW) == 2
 
@@ -301,7 +301,7 @@ async def test_every_slot_works_in_its_own_savepoint_and_only_the_failing_one_ro
         explode={BOOM: RuntimeError("упала")},
     )
 
-    await Matcher().tick(now=NOW)
+    await MonitorAgent().tick(now=NOW)
 
     assert world.session.savepoints == 3, "по SAVEPOINT на подписку"
     assert world.session.rolled_back == 1, "откат — только у больной"
@@ -315,7 +315,7 @@ async def test_the_streak_grows_and_the_pause_backs_off(monkeypatch: pytest.Monk
         explode={BOOM: RuntimeError("снова")},
     )
 
-    await Matcher().tick(now=NOW)
+    await MonitorAgent().tick(now=NOW)
 
     (isolated,) = world.monitors.quarantined
     assert isolated["streak"] == 3
@@ -330,7 +330,7 @@ async def test_a_slot_that_cannot_be_read_goes_to_quarantine_with_the_reason_it_
         id=7, user_id=70, failed_streak=1, error="ValueError: 'spaceship' is not a valid Category"
     )
     world = install(monkeypatch, subscriptions=[subscription(1)], broken=[sick], page=[listing()])
-    matcher = Matcher()
+    matcher = MonitorAgent()
 
     assert await matcher.tick(now=NOW) == 1
 
@@ -353,7 +353,7 @@ async def test_a_stop_signal_in_a_slot_is_not_a_slot_failure(
     )
 
     with pytest.raises(type(stop)):
-        await Matcher().tick(now=NOW)
+        await MonitorAgent().tick(now=NOW)
 
     assert world.monitors.quarantined == []
     assert world.session.commits == 0
@@ -365,7 +365,7 @@ async def test_a_failure_of_the_claim_itself_is_not_hidden(monkeypatch: pytest.M
     world.monitors.claim_error = ConnectionError("база недоступна")
 
     with pytest.raises(ConnectionError):
-        await Matcher().tick(now=NOW)
+        await MonitorAgent().tick(now=NOW)
 
 
 async def test_the_quarantine_is_logged_as_an_error_with_its_cause(
@@ -375,9 +375,9 @@ async def test_the_quarantine_is_logged_as_an_error_with_its_cause(
     install(monkeypatch, subscriptions=[subscription_in(4, BOOM)], explode={BOOM: cause})
 
     with capture_logs() as logs:
-        await Matcher().tick(now=NOW)
+        await MonitorAgent().tick(now=NOW)
 
-    (entry,) = [item for item in logs if item["event"] == "matcher.quarantined"]
+    (entry,) = [item for item in logs if item["event"] == "monitor.quarantined"]
     assert entry["log_level"] == "error"
     assert entry["subscription"] == 4 and entry["user"] == 104 and entry["streak"] == 1
     assert entry["exc_info"] is cause, "в журнале видна причина, а не только её текст"
@@ -394,7 +394,7 @@ async def test_every_outcome_marks_the_slot_as_visited_for_the_rotation(
         page=[listing()],
     )
 
-    await Matcher().tick(now=NOW)
+    await MonitorAgent().tick(now=NOW)
 
     assert world.monitors.scanned == [1, 2]
 
@@ -405,7 +405,7 @@ async def test_a_slot_that_reached_its_daily_cap_is_still_visited(
     world = install(monkeypatch, subscriptions=[subscription(1)], page=[listing()])
     world.delivery.used = 5
 
-    assert await Matcher().tick(now=NOW) == 0
+    assert await MonitorAgent().tick(now=NOW) == 0
 
     assert world.monitors.scanned == [1]
 
@@ -414,7 +414,7 @@ async def test_a_waiting_slot_is_visited_but_not_scanned(monkeypatch: pytest.Mon
     """Ждущая курса подписка уходит в конец очереди обхода, а курсор и сбои не трогает."""
     world = install(monkeypatch, subscriptions=[usd_subscription(1)], page=[listing()])
 
-    await Matcher(rate=Rates(None)).tick(now=NOW)
+    await MonitorAgent(rate=Rates(None)).tick(now=NOW)
 
     assert world.monitors.touched == [1]
     assert world.monitors.scanned == [], "`record_scan` снял бы следы сбоев, а подписку не смотрели"
@@ -423,7 +423,7 @@ async def test_a_waiting_slot_is_visited_but_not_scanned(monkeypatch: pytest.Mon
 async def test_the_pass_takes_the_batch_it_was_given(monkeypatch: pytest.MonkeyPatch) -> None:
     world = install(monkeypatch)
 
-    await Matcher(batch=7).tick(now=NOW)
+    await MonitorAgent(batch=7).tick(now=NOW)
 
     assert [claim["limit"] for claim in world.monitors.claims] == [7]
 
@@ -434,10 +434,10 @@ async def test_the_default_batch_comes_from_the_settings(monkeypatch: pytest.Mon
 
     world = install(monkeypatch)
     try:
-        await Matcher().tick(now=NOW)
+        await MonitorAgent().tick(now=NOW)
         monkeypatch.setenv("MONITOR_BATCH", "9")
         reload_settings()
-        await Matcher().tick(now=NOW)
+        await MonitorAgent().tick(now=NOW)
     finally:
         monkeypatch.delenv("MONITOR_BATCH")
         reload_settings()
@@ -475,7 +475,7 @@ async def test_the_pass_cancels_the_lapsed_queue_before_it_takes_new_work(
     """Проход, который ставит новое, не оставляет за собой просроченное старое."""
     world = install(monkeypatch, subscriptions=[subscription()], page=[listing()])
     world.monitors.lapsed = 3
-    matcher = Matcher()
+    matcher = MonitorAgent()
 
     await matcher.tick(now=NOW)
 
@@ -488,7 +488,7 @@ async def test_the_cancellation_is_logged_only_when_something_was_cancelled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     world = install(monkeypatch)
-    matcher = Matcher()
+    matcher = MonitorAgent()
 
     with capture_logs() as quiet:
         await matcher.tick(now=NOW)
@@ -496,8 +496,8 @@ async def test_the_cancellation_is_logged_only_when_something_was_cancelled(
     with capture_logs() as loud:
         await matcher.tick(now=NOW)
 
-    assert not [entry for entry in quiet if entry["event"] == "matcher.lapsed_cancelled"]
-    (entry,) = [entry for entry in loud if entry["event"] == "matcher.lapsed_cancelled"]
+    assert not [entry for entry in quiet if entry["event"] == "monitor.lapsed_cancelled"]
+    (entry,) = [entry for entry in loud if entry["event"] == "monitor.lapsed_cancelled"]
     assert entry["cancelled"] == 2
     assert matcher.counters.cancelled_lapsed == 2
 
@@ -505,7 +505,7 @@ async def test_the_cancellation_is_logged_only_when_something_was_cancelled(
 async def test_the_grace_period_is_an_explicit_argument(monkeypatch: pytest.MonkeyPatch) -> None:
     world = install(monkeypatch)
 
-    await Matcher(lapse_grace=timedelta(minutes=30)).tick(now=NOW)
+    await MonitorAgent(lapse_grace=timedelta(minutes=30)).tick(now=NOW)
 
     assert world.monitors.cancellations[0]["grace"] == timedelta(minutes=30)
 
@@ -520,7 +520,7 @@ async def test_the_default_grace_period_comes_from_the_settings(
     try:
         monkeypatch.setenv("MONITOR_LAPSE_GRACE_HOURS", "2")
         reload_settings()
-        await Matcher().tick(now=NOW)
+        await MonitorAgent().tick(now=NOW)
     finally:
         monkeypatch.delenv("MONITOR_LAPSE_GRACE_HOURS")
         reload_settings()

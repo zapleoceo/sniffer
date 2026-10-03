@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -28,6 +29,7 @@ from sniffer.db import models
 from sniffer.db.mappers import to_subscription_state
 from sniffer.db.repositories.base import Repository
 from sniffer.db.repositories.delivery import OUTBOX_CANCELLED, OUTBOX_PENDING, entitled
+from sniffer.domain.monitoring import Overflow
 from sniffer.domain.records import SubscriptionState
 
 # Причина сбоя в базе — строка для человека, а не журнал: длинный разбор остаётся в логе
@@ -207,6 +209,48 @@ class MonitorRepository(Repository):
                 failed_streak=streak,
                 last_error=error[:ERROR_LIMIT],
                 quarantined_until=until,
+            )
+            .execution_options(synchronize_session=False)
+        )
+
+    async def ranked_slots(self, user_ids: Sequence[int], *, now: datetime) -> dict[int, list[int]]:
+        """Слоты клиентов с правом и без ручной паузы — в порядке приоритета.
+
+        Приоритета как колонки пока нет (его даст биллинг слотов), поэтому порядок — по `id`:
+        более ранняя подписка старше. Предикат права тот же `entitled`, что у выбора порции,
+        иначе ранг считался бы среди слотов, которых монитор всё равно не возьмёт.
+        """
+        rows = await self._session.execute(
+            select(models.Subscription.user_id, models.Subscription.id)
+            .where(models.Subscription.user_id.in_(list(user_ids)), entitled(now))
+            .order_by(models.Subscription.user_id, models.Subscription.id)
+        )
+        ranked: dict[int, list[int]] = {}
+        for user_id, subscription_id in rows:
+            ranked.setdefault(user_id, []).append(subscription_id)
+        return ranked
+
+    async def set_no_slot_since(self, subscription_id: int, since: datetime | None) -> None:
+        """Отметить, с какого момента слот без права (`None` — снова работает)."""
+        await self._session.execute(
+            update(models.Subscription)
+            .where(models.Subscription.id == subscription_id)
+            .values(no_slot_since=since)
+            .execution_options(synchronize_session=False)
+        )
+
+    async def record_overflow(
+        self, subscription_id: int, overflow: Overflow, *, extra: int
+    ) -> None:
+        """Записать счёт «ещё N» за сутки и прибавить отброшенное к общему числу слота."""
+        await self._session.execute(
+            update(models.Subscription)
+            .where(models.Subscription.id == subscription_id)
+            .values(
+                overflow_day=overflow.day,
+                overflow_count=overflow.count,
+                overflow_notified=overflow.notified,
+                suppressed_total=models.Subscription.suppressed_total + extra,
             )
             .execution_options(synchronize_session=False)
         )
