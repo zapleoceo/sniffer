@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -28,6 +28,7 @@ from sniffer.bot import voice as voice_input
 from sniffer.bot.billing import InvoicePayload
 from sniffer.bot.quota import Account
 from sniffer.bot.store import Client
+from sniffer.config import reload_settings
 from sniffer.domain import plans
 from sniffer.domain.dialogue import CURRENCY_ASK
 from sniffer.notifier.delivery import LOST_NOTE
@@ -42,9 +43,28 @@ from tests.notifier_support import Row
 from tests.test_tabs_notifier import GONE, FakeTabs, Wire, build
 
 
+def _sales(monkeypatch: pytest.MonkeyPatch, *, on: bool) -> None:
+    """`Settings.selling` читают слова и кнопки бота; включаем продажу, как владелец."""
+    monkeypatch.setenv("SALES_ENABLED", "true" if on else "false")
+    monkeypatch.setenv("OWNER_CHAT_ID", "9001")
+    reload_settings()
+
+
 @pytest.fixture
 def flow(monkeypatch: pytest.MonkeyPatch) -> Iterator[Flow]:
+    _sales(monkeypatch, on=True)
     yield from e2e.build(monkeypatch)
+    monkeypatch.undo()
+    reload_settings()
+
+
+@pytest.fixture
+def closed_flow(monkeypatch: pytest.MonkeyPatch) -> Iterator[Flow]:
+    """Продажа выключена: бот не зовёт покупать, а называет дату обновления лимита."""
+    _sales(monkeypatch, on=False)
+    yield from e2e.build(monkeypatch)
+    monkeypatch.undo()
+    reload_settings()
 
 
 # ── 1. /start и кнопки меню ─────────────────────────────────────────────────
@@ -234,6 +254,35 @@ async def test_the_subscribe_button_of_the_offer_leads_to_the_priced_consent_scr
     assert text.startswith("Подписка: 10 ⭐ в месяц, продлевается автоматически")
     labels = [label for label, _, _ in e2e.buttons(e2e.messages(screen)[-1])]
     assert labels == ["Принимаю условия, перейти к оплате", "Читать условия", "Не сейчас"]
+
+
+async def test_with_sales_off_the_free_cards_end_in_a_fact_and_a_date_without_a_button(
+    closed_flow: Flow,
+) -> None:
+    await exhaust_free_quota(closed_flow)
+    closed_flow.found = e2e.lots(100, 30, brand="honda", model="lead")
+
+    calls = await closed_flow.tap("req:search:1")
+
+    last = e2e.messages(calls)[-1]
+    text = str(last.text)
+    assert text.startswith("Использовано 10 из 10 бесплатных карточек. Период обновится 17 ноября.")
+    assert "Сейчас подходящих объявлений: 30" in text
+    assert "подписк" not in text.lower() and "⭐" not in text
+    assert not any(data == "plan:subscribe" for _, data, _ in e2e.buttons(last))
+
+
+async def test_with_sales_off_the_remainder_line_does_not_offer_a_subscription(
+    closed_flow: Flow,
+) -> None:
+    closed_flow.found = wide_market()
+    calls = await settle(closed_flow, "ищу скутер в Нячанге")
+
+    page = " ".join(e2e.texts(await closed_flow.tap(e2e.button(calls, "Ещё 5"))))
+
+    assert "после обновления лимита 17 ноября" in page
+    assert "по подписке" not in page
+    assert not any("Подписка" in str(e2e.buttons(m)) for m in e2e.messages(calls))
 
 
 async def test_a_new_period_returns_the_free_ten_and_plan_names_the_new_date(flow: Flow) -> None:
@@ -605,7 +654,9 @@ async def test_what_was_sent_today_shrinks_the_room_and_the_overflow_is_counted_
 async def test_a_slot_without_a_paid_subscription_pauses_and_sends_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    world = mon.install(monkeypatch, subscriptions=[mon.subscription(1)], page=[mon.listing(1)])
+    # Слот с оплаченным сроком: слот без срока (выдан владельцем) от оплаты не зависит.
+    paid = mon.subscription(1, expires_at=mon.NOW + timedelta(days=30))
+    world = mon.install(monkeypatch, subscriptions=[paid], page=[mon.listing(1)])
 
     class NoSlots:
         async def count(self, user_id: int, now: datetime) -> int | None:
@@ -626,7 +677,9 @@ async def test_the_pass_cancels_lapsed_subscriptions_before_taking_new_work(
 
     await MonitorAgent().tick(now=mon.NOW)
 
-    assert world.monitors.order[:2] == ["cancel", "claim"], "просрочка снимается до выдачи работы"
+    assert world.monitors.order[:3] == ["cancel", "mark_lapsed", "claim"], (
+        "просрочка снимается до выдачи работы"
+    )
     assert world.monitors.cancellations[0]["now"] == mon.NOW
 
 
