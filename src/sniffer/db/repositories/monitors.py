@@ -97,9 +97,19 @@ def _cancel_statement(*, cutoff: datetime) -> Update:
     # `NULL < …` — это NULL, то есть «бессрочная» сюда не попадает. Строки без подписки
     # (ответы сбора каталога) не попадают тоже: у них нет соединения с подписками.
     lapsed = select(models.Subscription.id).where(models.Subscription.expires_at < cutoff)
+    # `SKIP LOCKED`: нотифаер держит взятые в отправку строки до конца пачки, и обычный
+    # UPDATE по ним встал бы в очередь за его коммитом — на секунды, а проход матчера стоит
+    # на пути всего воркера. Результат от этого не меняется: строка, которую нотифаер уже
+    # отправляет, всё равно уйдёт (отменять отправляемое поздно), а остальное отменится
+    # здесь же. Блокировать воркер ради строки, чья судьба решена, незачем.
+    pending = (
+        select(models.Outbox.id)
+        .where(models.Outbox.status == OUTBOX_PENDING, models.Outbox.subscription_id.in_(lapsed))
+        .with_for_update(skip_locked=True)
+    )
     return (
         update(models.Outbox)
-        .where(models.Outbox.status == OUTBOX_PENDING, models.Outbox.subscription_id.in_(lapsed))
+        .where(models.Outbox.id.in_(pending))
         .values(status=OUTBOX_CANCELLED)
         .returning(models.Outbox.id)
         .execution_options(synchronize_session=False)

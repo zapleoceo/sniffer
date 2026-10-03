@@ -341,6 +341,9 @@ async def test_cancel_lapsed_cancels_pending_rows_of_subscriptions_expired_befor
     assert sql.startswith("UPDATE outbox SET status=")
     assert "outbox.subscription_id IN (SELECT subscriptions.id FROM subscriptions WHERE " in sql
     assert "subscriptions.expires_at < " in sql, "ровно в границу льготы доставка ещё идёт"
+    assert sql.endswith("FOR UPDATE SKIP LOCKED) RETURNING outbox.id"), (
+        "строки, взятые нотифаером в отправку, пропускаем, а не ждём его коммита"
+    )
     params = params_of(statement)
     assert params["status"] == "cancelled"
     assert params["status_1"] == "pending", "отменяем только ждущее: отправленное не трогаем"

@@ -588,6 +588,40 @@ async def test_cancel_lapsed_leaves_alone_everything_but_a_lapsed_pending_messag
     }
 
 
+async def test_cancelling_does_not_wait_for_a_row_the_notifier_is_sending(
+    db_engine: AsyncEngine,
+) -> None:
+    """Проход матчера стоит на пути всего воркера: ждать коммита нотифаера он не вправе."""
+    sessions = async_sessionmaker(db_engine, expire_on_commit=False)
+    now = _now()
+    grace = timedelta(hours=6)
+    long_ago = now - timedelta(days=1)
+    async with sessions() as setup:
+        user_id, sub_id = await _slot(setup, 9650, expires_at=long_ago)
+        setup.add(
+            models.Outbox(
+                user_id=user_id, subscription_id=sub_id, payload={"a": 1}, scheduled_at=long_ago
+            )
+        )
+        await setup.commit()
+
+    async with sessions() as notifier, sessions() as matcher:
+        taken = await DeliveryRepository(notifier).take_pending(now=now)
+        assert len(taken) == 1, "нотифаер взял строку в отправку и держит её"
+
+        cancelled = await asyncio.wait_for(
+            MonitorRepository(matcher).cancel_lapsed(now=now, grace=grace), timeout=10
+        )
+
+        assert cancelled == 0, "строка занята: не ждём и не отменяем"
+        await notifier.rollback()
+        await matcher.rollback()
+
+    async with sessions() as later:
+        assert await MonitorRepository(later).cancel_lapsed(now=now, grace=grace) == 1
+        await later.commit()
+
+
 async def test_a_renewal_inside_the_grace_keeps_the_queue(db_session: AsyncSession) -> None:
     expiry = _now()
     grace = timedelta(hours=6)
