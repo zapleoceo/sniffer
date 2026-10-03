@@ -26,7 +26,10 @@ def _ddl() -> str:
     return re.sub(
         r"--[^\n]*",
         "",
-        "\n".join(path.read_text(encoding="utf-8") for path in sorted(SCHEMA_DIR.glob("00*.sql"))),
+        "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted(SCHEMA_DIR.glob("[0-9][0-9][0-9]_*.sql"))
+        ),
     )
 
 

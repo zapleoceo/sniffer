@@ -64,7 +64,7 @@ async def deploy(engine: AsyncEngine) -> None:
     async with engine.connect() as conn:
         driver = (await conn.get_raw_connection()).driver_connection
         assert driver is not None
-        for path in sorted(SQL_DIR.glob("00*.sql")):
+        for path in sorted(SQL_DIR.glob("[0-9][0-9][0-9]_*.sql")):
             await driver.execute(path.read_text(encoding="utf-8"))
 
 

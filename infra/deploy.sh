@@ -313,7 +313,7 @@ for _ in $(seq 1 30); do
   [ "$H" = "healthy" ] || [ "$H" = "none" ] && break
   sleep 2
 done
-for migration in infra/sql/00*.sql; do
+for migration in infra/sql/[0-9][0-9][0-9]_*.sql; do
   if docker compose exec -T postgres psql -U sniffer -d sniffer -v ON_ERROR_STOP=1 \
        < "$migration" >/dev/null; then
     info "схема применена из $migration"
