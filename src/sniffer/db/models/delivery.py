@@ -117,3 +117,7 @@ class Outbox(BigIdMixin, Base):
         DateTime(timezone=True), nullable=False, server_default=NOW
     )
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Почему строка не ушла: `cancelled` — наше решение не слать (просрочено,
+    # клиент заблокировал бота), `failed` — отказ Telegram или кончились попытки.
+    # Без причины их не различить, глядя в базу.
+    last_error: Mapped[str | None] = mapped_column(Text)

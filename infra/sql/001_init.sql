@@ -251,7 +251,8 @@ CREATE TABLE IF NOT EXISTS users (
     is_blocked  BOOLEAN     NOT NULL DEFAULT FALSE,
     active_passport_root  BIGINT,
     editing_passport_root BIGINT,
-    awaiting_new_request  BOOLEAN NOT NULL DEFAULT FALSE
+    awaiting_new_request  BOOLEAN NOT NULL DEFAULT FALSE,
+    bot_blocked_at        TIMESTAMPTZ  -- клиент заблокировал бота, см. 014_notifier_safety.sql
 );
 
 ALTER TABLE users ADD COLUMN IF NOT EXISTS active_passport_root BIGINT;
@@ -262,6 +263,10 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS editing_passport_root BIGINT;
 -- сообщением (а при голосовом запросе — и расшифровкой) бот перезапускается, и
 -- тогда явное «начинаю новый поиск» снова решалось бы эвристикой.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS awaiting_new_request BOOLEAN NOT NULL DEFAULT FALSE;
+-- Клиент заблокировал бота: писать ему нельзя (HTTP 403 на sendMessage или апдейт
+-- my_chat_member). ALTER повторён в 014_notifier_safety.sql: колонку обязан получить
+-- любой, кто применил хотя бы один из двух файлов, иначе нотифаер падает на первом проходе.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS bot_blocked_at TIMESTAMPTZ;
 
 -- Паспорт неизменяем: правка поля создаёт новую версию с тем же root_id.
 CREATE TABLE IF NOT EXISTS passports (
@@ -413,10 +418,11 @@ CREATE TABLE IF NOT EXISTS outbox (
     subscription_id BIGINT   REFERENCES subscriptions(id) ON DELETE CASCADE,
     notification_id BIGINT   UNIQUE REFERENCES notifications(id) ON DELETE CASCADE,
     payload      JSONB       NOT NULL,
-    status       TEXT        NOT NULL DEFAULT 'pending',  -- pending|sent|failed
+    status       TEXT        NOT NULL DEFAULT 'pending',  -- pending|sent|failed|cancelled
     attempts     INT         NOT NULL DEFAULT 0,
     scheduled_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    sent_at      TIMESTAMPTZ
+    sent_at      TIMESTAMPTZ,
+    last_error   TEXT         -- почему строка не ушла: отмена, отказ Telegram, последний сбой
 );
 
 CREATE INDEX IF NOT EXISTS outbox_due_idx ON outbox (status, scheduled_at);
@@ -432,6 +438,8 @@ ALTER TABLE notifications ALTER COLUMN sent_at DROP NOT NULL;
 ALTER TABLE notifications ALTER COLUMN sent_at DROP DEFAULT;
 ALTER TABLE outbox ADD COLUMN IF NOT EXISTS subscription_id BIGINT REFERENCES subscriptions(id) ON DELETE CASCADE;
 ALTER TABLE outbox ADD COLUMN IF NOT EXISTS notification_id BIGINT UNIQUE REFERENCES notifications(id) ON DELETE CASCADE;
+-- Причина, по которой строка не ушла (ALTER повторён в 014_notifier_safety.sql).
+ALTER TABLE outbox ADD COLUMN IF NOT EXISTS last_error TEXT;
 
 -- ── внутренняя очередь ──────────────────────────────────────────────────────
 

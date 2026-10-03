@@ -52,6 +52,10 @@ class User(BigIdMixin, Base):
     awaiting_new_request: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=FALSE
     )
+    # Когда бот узнал, что писать клиенту нельзя (403 или апдейт my_chat_member).
+    # Пусто — можно. Момент, а не флаг: снятие блока возвращает пустое значение и
+    # слежение возобновляется само, а по самому моменту видно, с каких пор тишина.
+    bot_blocked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Passport(BigIdMixin, Base):
