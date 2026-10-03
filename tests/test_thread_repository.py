@@ -22,8 +22,8 @@ from sniffer.db import models
 from sniffer.db.repositories import PassportRepository, UserRepository
 from sniffer.db.repositories.delivery import DeliveryRepository
 from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
-from sniffer.domain.records import Payment
 from sniffer.domain.threads import MAX_LIVE_THREADS
+from tests.subscription_support import grant
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("TEST_DATABASE_URL"),
@@ -106,12 +106,7 @@ async def test_monitoring_state_comes_from_the_subscription(
     user_id = await _user(db_session, 55)
     repo = PassportRepository(db_session)
     chain = await repo.save_new(user_id, passport(1))
-    await DeliveryRepository(db_session).pay_and_activate(
-        Payment(user_id=user_id, amount=1, external_id=f"charge-{expected}"),
-        passport_root=chain.root,
-        until=datetime.now(UTC) + expires,
-        since_listing_id=0,
-    )
+    await grant(db_session, user_id, chain.root, until=datetime.now(UTC) + expires)
     if paused:
         assert await DeliveryRepository(db_session).set_active(
             user_id=user_id, passport_root=chain.root, active=False
@@ -156,11 +151,8 @@ async def test_the_notice_follows_the_real_subscription_on_a_real_database(
         assert dialogue.passport is not None
         first_root = first_root or dialogue.passport.root
     async with sessions() as session:
-        await DeliveryRepository(session).pay_and_activate(
-            Payment(user_id=dialogue.user_id, amount=1, external_id="charge-notice"),
-            passport_root=first_root,
-            until=datetime.now(UTC) + timedelta(days=30),
-            since_listing_id=0,
+        await grant(
+            session, dialogue.user_id, first_root, until=datetime.now(UTC) + timedelta(days=30)
         )
         await session.commit()
 

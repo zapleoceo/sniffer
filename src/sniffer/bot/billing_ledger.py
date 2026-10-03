@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from sniffer.db.engine import session_scope
 from sniffer.db.repositories.billing import BillingRepository
@@ -35,6 +35,28 @@ class DbLedger:
         async with session_scope() as session:
             return await BillingRepository(session).recent_payments(tg_user_id, limit=limit)
 
+    async def mark_refunding(self, charge_id: str) -> bool:
+        async with session_scope() as session:
+            changed = await BillingRepository(session).mark_refunding(charge_id)
+            await session.commit()
+            return changed
+
+    async def first_payment_of(self, invoice_payload: str) -> StoredPayment | None:
+        async with session_scope() as session:
+            return await BillingRepository(session).first_payment_of(invoice_payload)
+
+    async def payments_since(self, since: datetime) -> list[StoredPayment]:
+        async with session_scope() as session:
+            return await BillingRepository(session).payments_since(since)
+
+    async def unsettled_refunds(self, older_than: datetime) -> list[StoredPayment]:
+        async with session_scope() as session:
+            return await BillingRepository(session).unsettled_refunds(older_than)
+
+    async def has_event(self, kind: EventKind, charge_id: str) -> bool:
+        async with session_scope() as session:
+            return await BillingRepository(session).has_event(kind, charge_id)
+
     async def mark_refunded(self, charge_id: str) -> bool:
         async with session_scope() as session:
             changed = await BillingRepository(session).mark_refunded(charge_id)
@@ -45,12 +67,12 @@ class DbLedger:
         async with session_scope() as session:
             return await BillingRepository(session).first_charge_of(invoice_payload)
 
-    async def live_subscriptions(self, tg_user_id: int) -> int:
+    async def live_subscriptions(self, tg_user_id: int, now: datetime) -> int:
         async with session_scope() as session:
             user = await UserRepository(session).get_by_tg_id(tg_user_id)
             if user is None or user.id is None:
                 return 0
-            return await BillingRepository(session).live_subscriptions(user.id)
+            return await BillingRepository(session).live_subscriptions(user.id, now)
 
     async def record_consent(self, tg_user_id: int, doc: str, version: str) -> None:
         async with session_scope() as session:

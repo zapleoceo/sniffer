@@ -185,8 +185,16 @@ class QuotaService:
         return Standing(used=usage.used, limit=limit, period_end=usage.period_end)
 
     async def may_offer(self, account: Account, *, now: datetime | None = None) -> bool:
-        """Можно ли сейчас предложить подписку. Право занимается атомарно."""
-        return await self._ledger.claim_offer(account.user_id, now or self._clock(), OFFER_COOLDOWN)
+        """Можно ли сейчас предложить подписку. Право занимается атомарно.
+
+        Оплатившему с живой подпиской предложение не показывается вовсе (его потолок уже
+        300) и сутки ожидания не тратит: иначе после окончания подписки предложение
+        появилось бы позже, чем положено.
+        """
+        moment = now or self._clock()
+        if await self._entitlements.slots(account, moment) >= 1:
+            return False
+        return await self._ledger.claim_offer(account.user_id, moment, OFFER_COOLDOWN)
 
     async def sweep(self, older_than: datetime, limit: int) -> int:
         return await self._ledger.sweep(older_than, limit)

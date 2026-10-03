@@ -26,6 +26,9 @@ LOGIC = (
     "sniffer.bot.billing_service",
     "sniffer.bot.billing_payments",
     "sniffer.bot.billing_support",
+    "sniffer.bot.billing_reconcile",
+    "sniffer.bot.slot_wording",
+    "sniffer.domain.slots",
 )
 
 PROBE = """

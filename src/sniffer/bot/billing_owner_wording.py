@@ -104,3 +104,40 @@ def refund_done(charge_id: str, notes: list[str]) -> str:
 
 def refund_failed(charge_id: str, error: str) -> str:
     return f"Возврат {_code(charge_id)} не прошёл: {escape(error)}"
+
+
+def owner_slots_unsynced(*, tg_user_id: int, charge_id: str) -> str:
+    return (
+        f"🚨 Платёж записан, но слот не включился: клиент {_who(tg_user_id)}, "
+        f"charge {_code(charge_id)}. Клиенту сказано, что слот появится позже; сверка "
+        "повторит пересчёт сама, но проверьте журнал."
+    )
+
+
+def owner_date_anomaly(*, tg_user_id: int, charge_id: str, expiration: int | None) -> str:
+    return (
+        f"⚠️ Telegram прислал странную дату окончания ({expiration}): клиент {_who(tg_user_id)}, "
+        f"charge {_code(charge_id)}. Срок взят оценкой (30 суток), платёж записан."
+    )
+
+
+def owner_gap_unpaid(*, tg_user_id: int, amount: int, charge_id: str) -> str:
+    return (
+        f"🔎 Сверка: запись без платежа. В журнале платёж {_code(charge_id)} клиента "
+        f"{_who(tg_user_id)} на {amount} ⭐ есть, в истории звёзд Telegram — нет. "
+        "Слот при этом считается живым: проверьте платёж вручную."
+    )
+
+
+def owner_gap_recovered(*, tg_user_id: int, amount: int, charge_id: str, outcome: str) -> str:
+    return (
+        f"🔎 Сверка: платёж без записи. В истории Telegram есть {_code(charge_id)} от клиента "
+        f"{_who(tg_user_id)} на {amount} ⭐, в журнале его не было. {escape(outcome)}"
+    )
+
+
+def owner_refund_stuck(*, tg_user_id: int, charge_id: str, error: str) -> str:
+    return (
+        f"🚨 Сверка не смогла довести возврат: charge {_code(charge_id)}, клиент "
+        f"{_who(tg_user_id)}: {escape(error)}. Верните вручную: /refund {escape(charge_id)}"
+    )

@@ -12,9 +12,16 @@ from enum import StrEnum
 from typing import Any
 
 # Статус платежа в журнале (`payments.status`). Движется только вперёд:
-# `paid` → `refunded`; повторная доставка исходного апдейта ничего не воскрешает.
+# `paid` → `refunding` → `refunded`; повторная доставка исходного апдейта ничего не
+# воскрешает. `refunding` пишется ДО вызова Telegram: иначе сообщение о возврате,
+# прилетевшее раньше нашей отметки, выглядело бы как возврат «не нашими руками».
+# Слот такой платёж уже не держит: решение вернуть принято.
 PAID = "paid"
+REFUNDING = "refunding"
 REFUNDED = "refunded"
+# Откуда запись о платеже (`payments.source`).
+FROM_UPDATE = "update"
+FROM_RECONCILE = "reconcile"
 
 
 class PaymentKind(StrEnum):
@@ -54,6 +61,10 @@ class EventKind(StrEnum):
     SUB_OTHER = "sub_other"
     REFUNDED = "refunded"
     SUPPORT = "support"
+    # Сверка нашла расхождение и сказала о нём владельцу: по записи — один раз.
+    RECONCILE_GAP = "reconcile_gap"
+    # Сверка не смогла довести возврат и сказала об этом: по платежу — один раз.
+    REFUND_STUCK = "refund_stuck"
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +81,9 @@ class PaymentRecord:
     is_first_recurring: bool
     period_end: datetime | None
     raw: dict[str, Any]
+    source: str = FROM_UPDATE
+    # Срок посчитан нами (сверка), а не взят у Telegram.
+    period_end_estimated: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,3 +113,17 @@ class BillingEvent:
     payload: dict[str, Any]
     charge_id: str | None = None
     update_id: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class StarTransaction:
+    """Строка истории звёзд бота у Telegram (`getStarTransactions`): то, с чем сверяется журнал."""
+
+    charge_id: str
+    amount: int
+    date: datetime
+    # Входящая — платёж клиента; исходящая с тем же id — наш возврат.
+    incoming: bool
+    user_id: int | None = None
+    invoice_payload: str | None = None
+    subscription_period: int | None = None

@@ -23,10 +23,11 @@ ALTER TABLE payments ADD COLUMN IF NOT EXISTS refunded_at TIMESTAMPTZ;
 ALTER TABLE payments ADD COLUMN IF NOT EXISTS raw JSONB;
 
 -- Согласие с условиями до покупки (требование Telegram к платным ботам) —
--- доказательство при споре: какая версия текста и когда. RESTRICT, а не CASCADE:
--- запись, нужная для спора, не должна исчезнуть вместе с клиентом.
+-- доказательство при споре: какая версия текста и когда. Политика удаления клиента
+-- единая — CASCADE, как у платежей и подписок (015_stars_slots.sql приводит к ней и
+-- живую базу, где таблица уже создана с RESTRICT).
 CREATE TABLE IF NOT EXISTS user_consents (
-    user_id     BIGINT      NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    user_id     BIGINT      NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     doc         TEXT        NOT NULL,
     version     TEXT        NOT NULL,
     accepted_at TIMESTAMPTZ NOT NULL DEFAULT now(),

@@ -19,20 +19,27 @@ from sniffer.bot.billing import RefundedFacts
 from sniffer.bot.billing_payments import PaymentDesk, already_refunded
 from sniffer.bot.billing_ports import BotApiError
 from sniffer.domain.billing import EventKind, PaymentKind, Reason
-from tests.billing_support import CLIENT, OWNER, Failing, FakeLedger, RecordingApi
+from tests.billing_support import CLIENT, OWNER, Failing, FakeLedger, FakeSlots, RecordingApi
 from tests.test_billing import EXPIRATION, NOW, facts
 
 OTHER_PAYLOAD = "v2:s:42:2026-10-03:ffffffffffff"
 
 
-def desk(*, owner: int = OWNER) -> tuple[PaymentDesk, FakeLedger, RecordingApi]:
+def desk_with_slots(
+    *, owner: int = OWNER
+) -> tuple[PaymentDesk, FakeLedger, RecordingApi, FakeSlots]:
     order: list[str] = []
     ledger, api = FakeLedger(order), RecordingApi(order)
-    return (
-        PaymentDesk(ledger=ledger, api=api, owner_id=owner, reply_hours=48, clock=lambda: NOW),
-        (ledger),
-        api,
+    slots = FakeSlots(order)
+    payments = PaymentDesk(
+        ledger=ledger, api=api, slots=slots, owner_id=owner, reply_hours=48, clock=lambda: NOW
     )
+    return payments, ledger, api, slots
+
+
+def desk(*, owner: int = OWNER) -> tuple[PaymentDesk, FakeLedger, RecordingApi]:
+    payments, ledger, api, _slots = desk_with_slots(owner=owner)
+    return payments, ledger, api
 
 
 def moment() -> datetime:
@@ -48,7 +55,7 @@ async def test_the_first_payment_is_recorded_whole_and_thanked() -> None:
 
     reply = await payments.on_payment(paid)
 
-    assert reply == words.thanks_first(moment())
+    assert reply == words.thanks_first(moment(), 1)
     record = ledger.payments["charge-1"]
     assert record.kind is PaymentKind.FIRST and record.tg_user_id == CLIENT
     assert record.raw == paid.raw, "SuccessfulPayment как пришёл: по нему платёж разбирают руками"
@@ -61,11 +68,12 @@ async def test_the_first_payment_is_recorded_whole_and_thanked() -> None:
 async def test_a_renewal_is_answered_differently_from_the_first_payment() -> None:
     """Тот же ответ на продление выглядел бы как новое списание."""
     payments, ledger, _api = desk()
+    await payments.on_payment(facts())
 
     reply = await payments.on_payment(facts(is_first_recurring=False, charge_id="charge-2"))
 
-    assert reply == words.thanks_renewal(moment())
-    assert reply != words.thanks_first(moment())
+    assert reply == words.thanks_renewal(moment(), 0)
+    assert reply != words.thanks_first(moment(), 1)
     assert ledger.payments["charge-2"].kind is PaymentKind.RENEWAL
 
 
@@ -381,7 +389,15 @@ async def test_the_same_subscription_update_twice_is_one_event() -> None:
 
 # ── полнота охраны: чужой тип и прерывание на КАЖДОМ шаге каждого сценария ───
 
-LEDGER_STEPS = {"record_payment", "get_payment", "mark_refunded", "first_charge_of", "record_event"}
+LEDGER_STEPS = {
+    "record_payment",
+    "get_payment",
+    "mark_refunding",
+    "mark_refunded",
+    "first_payment_of",
+    "first_charge_of",
+    "record_event",
+}
 INTERRUPTS = [
     pytest.param(KeyboardInterrupt, id="KeyboardInterrupt"),
     pytest.param(asyncio.CancelledError, id="CancelledError"),
@@ -392,6 +408,10 @@ INTERRUPTS = [
 async def reject_flow(payments: PaymentDesk) -> object:
     # Другой charge id, чем у платежа из подготовки: тот же вернулся бы молчаливым повтором.
     return await payments.on_payment(facts(total_amount=1, charge_id="charge-2"))
+
+
+async def accept_flow(payments: PaymentDesk) -> object:
+    return await payments.on_payment(facts(charge_id="charge-3"))
 
 
 async def refund_flow(payments: PaymentDesk) -> object:
@@ -411,12 +431,16 @@ async def subscription_flow(payments: PaymentDesk) -> object:
 # сценарий → шаги, через которые он ходит в порты. Список связан с кодом механически:
 # `test_every_port_call_of_the_desk_is_in_the_matrix` сверяет его с исходником класса.
 FLOWS: dict[str, tuple[Callable[[PaymentDesk], Awaitable[object]], tuple[str, ...]]] = {
+    "on_payment_accepted": (accept_flow, ("first_payment_of", "record_payment", "sync")),
     "on_payment": (
         reject_flow,
         (
+            "first_payment_of",
             "record_payment",
+            "mark_refunding",
             "refund_star_payment",
             "mark_refunded",
+            "sync",
             "first_charge_of",
             "cancel_star_subscription",
             "send_text",
@@ -426,14 +450,19 @@ FLOWS: dict[str, tuple[Callable[[PaymentDesk], Awaitable[object]], tuple[str, ..
         refund_flow,
         (
             "get_payment",
+            "mark_refunding",
             "refund_star_payment",
             "mark_refunded",
+            "sync",
             "first_charge_of",
             "cancel_star_subscription",
             "send_text",
         ),
     ),
-    "on_refunded": (refunded_flow, ("get_payment", "mark_refunded", "record_event", "send_text")),
+    "on_refunded": (
+        refunded_flow,
+        ("get_payment", "mark_refunded", "sync", "record_event", "send_text"),
+    ),
     "on_subscription": (subscription_flow, ("record_event",)),
 }
 CASES = [(name, step) for name, (_run, steps) in FLOWS.items() for step in steps]
@@ -445,14 +474,17 @@ async def run_with(flow: str, step: str, error: BaseException) -> object:
     Без этой проверки матрица зеленеет на пустоте: сценарий, не дошедший до шага (повтор
     апдейта, ранний выход), «переживает» любое исключение, которого не видел.
     """
-    payments, ledger, api = desk()
+    payments, ledger, api, slots = desk_with_slots()
     await paid_subscription(payments)
-    (ledger.failures if step in LEDGER_STEPS else api.failures)[step] = error
+    if step == "sync":
+        slots.failure = error
+    else:
+        (ledger.failures if step in LEDGER_STEPS else api.failures)[step] = error
     ledger.order.clear()
     try:
         return await FLOWS[flow][0](payments)
     finally:
-        reached = f"ledger:{step}" in ledger.order or f"api:{step}" in ledger.order
+        reached = any(f"{kind}:{step}" in ledger.order for kind in ("ledger", "api", "slots"))
         assert reached, f"сценарий {flow} не дошёл до шага {step}: тест проверял пустоту"
 
 
@@ -461,7 +493,7 @@ def test_every_port_call_of_the_desk_is_in_the_matrix() -> None:
 
     Добавили вызов порта в сценарий — без строки в матрице красный этот тест, а не молчание.
     """
-    called = set(re.findall(r"self\._(?:ledger|api)\.(\w+)", inspect.getsource(PaymentDesk)))
+    called = set(re.findall(r"self\._(?:ledger|api|slots)\.(\w+)", inspect.getsource(PaymentDesk)))
     in_matrix = {step for _name, step in CASES}
 
     assert called == in_matrix, (called - in_matrix, in_matrix - called)

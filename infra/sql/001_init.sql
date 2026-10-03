@@ -364,6 +364,8 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     failed_streak     INT         NOT NULL DEFAULT 0,
     last_error        TEXT,
     quarantined_until TIMESTAMPTZ,
+    -- Порядок претензии на слот мониторинга (015_stars_slots.sql).
+    priority       INT         NOT NULL DEFAULT 0,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (user_id, passport_root)
 );
@@ -428,7 +430,10 @@ CREATE TABLE IF NOT EXISTS payments (
     is_first_recurring BOOLEAN  NOT NULL DEFAULT FALSE,
     period_end      TIMESTAMPTZ,
     refunded_at     TIMESTAMPTZ,
-    raw             JSONB
+    raw             JSONB,
+    -- Слоты (015_stars_slots.sql): откуда запись и оценка ли срок.
+    source          TEXT        NOT NULL DEFAULT 'update',
+    period_end_estimated BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 CREATE INDEX IF NOT EXISTS payments_user_idx ON payments (user_id, created_at DESC);

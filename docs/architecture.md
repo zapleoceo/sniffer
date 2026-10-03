@@ -1366,6 +1366,10 @@ Docker перезапускал воркер, цикл повторялся — 
 | `bot/billing_ledger.py`, `billing_telegram.py` | адаптеры: база и Bot API | `db`, aiogram |
 | `bot/billing_ui.py`, `bot/handlers/billing.py` | кнопки и роутер: тонкий слой над сервисами | aiogram |
 | `db/repositories/billing.py` | весь SQL оплаты | `db`, `domain` |
+| `domain/slots.py` | слоты мониторинга: раскладка сроков, «Следить», перенос — чистая арифметика | ничего |
+| `db/repositories/slots.py` | пересчёт слотов под замком на клиента, включение, перенос | `db`, `domain` |
+| `bot/billing_slots.py`, `bot/slot_wording.py`, `bot/handlers/slots.py` | адаптер слотов и право тарифа для квоты; слова; кнопки «Следить» и переноса | `db`, aiogram |
+| `bot/billing_reconcile.py` | сверка журнала с историей звёзд (в процессе `notifier`, раз в 15 минут) | порты |
 
 Лист-проверки: модули логики не должны тянуть ни `sniffer.db`, ни aiogram — это проверяет
 `tests/test_billing_isolation.py` запуском в отдельном процессе. Роутер оплаты подключается

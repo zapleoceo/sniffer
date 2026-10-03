@@ -148,24 +148,34 @@ async def test_plan_reads_the_standing_and_writes_nothing(monkeypatch: pytest.Mo
 # ── кнопка «Подписка» ───────────────────────────────────────────────────────
 
 
-async def test_the_subscription_button_is_an_honest_stub_until_the_payments_package(
+async def test_the_subscription_button_opens_the_subscription_screen(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """TODO(A5): здесь начнётся `/subscription`. Сейчас оформления нет, и бот так и говорит."""
+    """Кнопка «Подписка» — это `/subscription`: экран с цифрами, согласие, ссылка. Не заглушка."""
     monkeypatch.setattr(handler, "Message", FakeMessage)
+    shown: list[tuple[object, object, int]] = []
+
+    async def show(message: object, bot: object, tg_user_id: int) -> None:
+        shown.append((message, bot, tg_user_id))
+
+    monkeypatch.setattr(handler, "show_confirmation", show)
     message = FakeMessage("")
     callback = FakeCallback(message)
+    bot = object()
 
-    await handler.plan_action(cast(Any, callback), PlanCallback(action="subscribe"))
+    await handler.plan_action(cast(Any, callback), PlanCallback(action="subscribe"), cast(Any, bot))
 
-    assert callback.answered and message.answers == [wording_plan.SUBSCRIPTION_SOON]
+    assert callback.answered and message.answers == []
+    assert shown == [(message, bot, callback.from_user.id)]
 
 
 async def test_a_foreign_plan_action_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(handler, "Message", FakeMessage)
     message = FakeMessage("")
 
-    await handler.plan_action(cast(Any, FakeCallback(message)), PlanCallback(action="refund"))
+    await handler.plan_action(
+        cast(Any, FakeCallback(message)), PlanCallback(action="refund"), cast(Any, object())
+    )
 
     assert message.answers == []
 

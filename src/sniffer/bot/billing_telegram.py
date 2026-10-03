@@ -12,10 +12,11 @@ import re
 from aiogram import Bot
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError
-from aiogram.types import LabeledPrice
+from aiogram.types import LabeledPrice, TransactionPartnerUser
 
 from sniffer.bot.billing_ports import BotApiError
 from sniffer.domain import plans
+from sniffer.domain.billing import StarTransaction
 
 # `bot<id>:<секрет>` из адреса запроса.
 _TOKEN = re.compile(r"bot[0-9]+:[A-Za-z0-9_-]+")
@@ -74,3 +75,33 @@ class AiogramBotApi:
             await self._bot.send_message(chat_id, text, parse_mode=ParseMode.HTML)
         except TelegramAPIError as exc:
             raise BotApiError(redact(exc.message)) from exc
+
+    async def star_transactions(self, *, offset: int, limit: int) -> list[StarTransaction]:
+        """Страница истории звёзд: платёж клиента — входящая запись, наш возврат — исходящая.
+
+        Что именно Telegram кладёт в `source` и `receiver` у возврата и в каком порядке отдаёт
+        страницы, живьём не проверено (сценарий U6 в `docs/payments-live-check.md`): адаптер
+        читает только то, что описано в справочнике, а всё нераспознанное пропускает.
+        """
+        try:
+            page = await self._bot.get_star_transactions(offset=offset, limit=limit)
+        except TelegramAPIError as exc:
+            raise BotApiError(redact(exc.message)) from exc
+        found: list[StarTransaction] = []
+        for tx in page.transactions:
+            partner = tx.source if tx.source is not None else tx.receiver
+            user = partner if isinstance(partner, TransactionPartnerUser) else None
+            # Не-платёж пользователя (подарок, вывод) тоже занимает место на странице:
+            # пропустить его значило бы принять неполную страницу за конец истории.
+            found.append(
+                StarTransaction(
+                    charge_id=tx.id,
+                    amount=tx.amount,
+                    date=tx.date,
+                    incoming=tx.source is not None,
+                    user_id=user.user.id if user is not None else None,
+                    invoice_payload=user.invoice_payload if user is not None else None,
+                    subscription_period=user.subscription_period if user is not None else None,
+                )
+            )
+        return found

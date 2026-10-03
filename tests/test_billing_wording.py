@@ -35,7 +35,7 @@ def client_texts() -> list[str]:
     """Всё, что клиент может прочитать: константы и результаты функций."""
     until = datetime(2026, 11, 1, tzinfo=UTC)
     return [
-        words.SUBSCRIBE_LABEL,
+        words.PAY_LABEL,
         words.ACCEPT_LABEL,
         words.TERMS_LABEL,
         words.CANCEL_LABEL,
@@ -56,8 +56,11 @@ def client_texts() -> list[str]:
         words.confirmation(1),
         words.confirmation(3),
         words.link_ready(2),
-        words.thanks_first(until),
-        words.thanks_renewal(until),
+        words.thanks_first(until, 1),
+        words.thanks_first(until, 0),
+        words.thanks_renewal(until, 0),
+        words.thanks_renewal(until, 2),
+        words.payment_slot_pending(until, 48),
         words.terms(48),
         words.paysupport_prompt(48),
         words.support_prompt(48),
@@ -204,13 +207,12 @@ def test_the_price_comes_from_the_single_constant_into_the_labels() -> None:
     try:
         plans.SUBSCRIPTION_STARS = 77
         importlib.reload(words)
-        assert "77 ⭐" in words.SUBSCRIBE_LABEL
         assert "77 ⭐" in words.PAY_LABEL
         assert "77 ⭐" in words.OFFER
     finally:
         plans.SUBSCRIPTION_STARS = original
         importlib.reload(words)
-    assert f"{original} ⭐" in words.SUBSCRIBE_LABEL
+    assert f"{original} ⭐" in words.PAY_LABEL
 
 
 def _string_literals(path: Path) -> list[str]:

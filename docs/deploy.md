@@ -732,6 +732,14 @@ docker exec sniffer-postgres psql -U sniffer -d sniffer -c "\d payments" | head 
 кнопкой Pay» в этой записи прежних версий — не рабочий путь, а историческая ошибка
 (`docs/monetization.md`, раздел «Подписка: Telegram Stars»).
 
+#### Слоты мониторинга (015_stars_slots.sql)
+
+Колонки `subscriptions.priority`, `payments.source`, `payments.period_end_estimated`, индекс
+сверки и единая политика удаления клиента: внешний ключ `user_consents.user_id` пересоздаётся
+с `ON DELETE CASCADE` (`DROP CONSTRAINT IF EXISTS` + `ADD CONSTRAINT`: идемпотентно, данные не
+правятся). Три колонки имеют часовых в `infra/deploy.sh`. Сверка платежей работает в
+процессе `notifier` (раз в 15 минут и при старте): отдельного контейнера нет.
+
 #### Оплата звёздами: журнал платежей (03.10.2026)
 
 Всё в одном файле `infra/sql/011_stars_billing.sql`, и он идемпотентен:
@@ -760,6 +768,7 @@ docker exec sniffer-postgres psql -U sniffer -d sniffer -c "\dt user_consents bi
 | Переменная | Что делает | По умолчанию |
 |---|---|---|
 | `OWNER_CHAT_ID` | кому уходят возвраты, ошибки записи платежа и обращения `/paysupport`; **пока не задан — подписка не продаётся** (некому отвечать за возвраты, а это требование Telegram) | заполнен |
+| `SALES_ENABLED` | продажа подписки Stars; **выкл по умолчанию**, `OWNER_CHAT_ID` её не включает. Включать только после сценария S13 из `docs/payments-live-check.md` (оплата → слот → слежение, возврат, сверка). Выданные ссылки при выключенном флаге принимаются | `false` |
 | `PAYSUPPORT_REPLY_HOURS` | срок ответа на обращения по оплате в условиях и в ответе клиенту, 1–720 часов | `48` |
 | `TELEGRAM_ENV` | `test` — тестовая среда Telegram (`/bot<token>/test/<метод>`) для бота, нотифаера и оповещений коллектора; в бою пусто | `prod` |
 

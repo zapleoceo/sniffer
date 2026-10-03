@@ -34,11 +34,15 @@ from aiogram.types import Update
 from sniffer.domain.billing import (
     PAID,
     REFUNDED,
+    REFUNDING,
     BillingEvent,
     EventKind,
+    PaymentKind,
     PaymentRecord,
+    StarTransaction,
     StoredPayment,
 )
+from sniffer.domain.slots import SlotState
 
 OWNER = 169510539
 CLIENT = 42
@@ -244,6 +248,9 @@ class FakeLedger:
         self.order = order if order is not None else []
         self.payments: dict[str, PaymentRecord] = {}
         self.refunded: set[str] = set()
+        self.refunding: set[str] = set()
+        # Когда платёж лёг в журнал: по умолчанию давно (сверка не считает его «свежим»).
+        self.created: dict[str, datetime] = {}
         self.consents: set[tuple[int, str, str]] = set()
         self.events: list[BillingEvent] = []
         self.live = 0
@@ -278,14 +285,19 @@ class FakeLedger:
             amount=record.amount,
             currency=record.currency,
             kind=record.kind.value,
-            status=REFUNDED if charge_id in self.refunded else PAID,
+            status=self._status(charge_id),
             invoice_payload=record.invoice_payload,
             is_recurring=record.is_recurring,
             is_first_recurring=record.is_first_recurring,
             period_end=record.period_end,
             refunded_at=None,
-            created_at=datetime.now(UTC),
+            created_at=self.created.get(charge_id, datetime.now(UTC) - timedelta(days=1)),
         )
+
+    def _status(self, charge_id: str) -> str:
+        if charge_id in self.refunded:
+            return REFUNDED
+        return REFUNDING if charge_id in self.refunding else PAID
 
     async def recent_payments(self, tg_user_id: int, limit: int) -> list[StoredPayment]:
         await self._enter("recent_payments")
@@ -296,11 +308,48 @@ class FakeLedger:
         ]
         return [payment for payment in reversed(found) if payment is not None][:limit]
 
+    async def mark_refunding(self, charge_id: str) -> bool:
+        await self._enter("mark_refunding")
+        changed = charge_id in self.payments and self._status(charge_id) == PAID
+        if changed:
+            self.refunding.add(charge_id)
+        return changed
+
     async def mark_refunded(self, charge_id: str) -> bool:
         await self._enter("mark_refunded")
         changed = charge_id in self.payments and charge_id not in self.refunded
         self.refunded.add(charge_id)
+        self.refunding.discard(charge_id)
         return changed
+
+    async def first_payment_of(self, invoice_payload: str) -> StoredPayment | None:
+        await self._enter("first_payment_of")
+        for charge, record in self.payments.items():
+            if record.invoice_payload == invoice_payload:
+                return await self.get_payment(charge)
+        return None
+
+    async def payments_since(self, since: datetime) -> list[StoredPayment]:
+        await self._enter("payments_since")
+        found = [await self.get_payment(charge) for charge in self.payments]
+        return [p for p in found if p is not None and p.created_at >= since]
+
+    async def unsettled_refunds(self, older_than: datetime) -> list[StoredPayment]:
+        await self._enter("unsettled_refunds")
+        found = [await self.get_payment(charge) for charge in self.payments]
+        return [
+            p
+            for p in found
+            if p is not None
+            and p.created_at < older_than
+            and (
+                p.status == REFUNDING or (p.status == PAID and p.kind == PaymentKind.UNKNOWN.value)
+            )
+        ]
+
+    async def has_event(self, kind: EventKind, charge_id: str) -> bool:
+        await self._enter("has_event")
+        return any(e.kind == kind and e.charge_id == charge_id for e in self.events)
 
     async def first_charge_of(self, invoice_payload: str) -> str | None:
         await self._enter("first_charge_of")
@@ -309,7 +358,7 @@ class FakeLedger:
                 return charge
         return None
 
-    async def live_subscriptions(self, tg_user_id: int) -> int:
+    async def live_subscriptions(self, tg_user_id: int, now: datetime) -> int:
         await self._enter("live_subscriptions")
         return self.live
 
@@ -333,6 +382,23 @@ class FakeLedger:
         return sum(1 for e in self.events if e.tg_user_id == tg_user_id and e.kind == kind)
 
 
+class FakeSlots:
+    """`Slots` без базы: записывает пересчёты и отдаёт заданное состояние."""
+
+    def __init__(self, order: list[str] | None = None) -> None:
+        self.order = order if order is not None else []
+        self.syncs: list[int] = []
+        self.state = SlotState(slots=1, holding=0, resumed=0)
+        self.failure: BaseException | None = None
+
+    async def sync(self, tg_user_id: int, now: datetime) -> SlotState:
+        self.order.append("slots:sync")
+        self.syncs.append(tg_user_id)
+        if self.failure is not None:
+            raise self.failure
+        return self.state
+
+
 class RecordingApi:
     """`BotApi` без Telegram: записывает вызовы и по имени метода бросает заданное."""
 
@@ -343,6 +409,8 @@ class RecordingApi:
         self.texts: list[tuple[int, str]] = []
         self.failures: dict[str, BaseException] = {}
         self.order = order if order is not None else []
+        # Что «лежит» в истории звёзд у Telegram: свежие первыми, отдаётся страницами.
+        self.history: list[StarTransaction] = []
 
     def _enter(self, name: str) -> None:
         self.order.append(f"api:{name}")
@@ -377,3 +445,7 @@ class RecordingApi:
     async def send_text(self, chat_id: int, text: str) -> None:
         self._enter("send_text")
         self.texts.append((chat_id, text))
+
+    async def star_transactions(self, *, offset: int, limit: int) -> list[StarTransaction]:
+        self._enter("star_transactions")
+        return self.history[offset : offset + limit]

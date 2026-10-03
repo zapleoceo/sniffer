@@ -41,10 +41,9 @@ from sniffer.bot.billing_telegram import AiogramBotApi
 from sniffer.bot.billing_ui import BillingCallback
 from sniffer.bot.handlers import billing as billing_handlers
 from sniffer.bot.handlers import search
-from sniffer.bot.keyboards import SubscribeCallback
 from sniffer.domain.billing import Reason
 from tests import billing_support as fx
-from tests.billing_support import CLIENT, NONCE, OWNER, FakeLedger, RecordingSession
+from tests.billing_support import CLIENT, NONCE, OWNER, FakeLedger, FakeSlots, RecordingSession
 
 PAYLOAD = InvoicePayload(CLIENT, words.TERMS_VERSION, NONCE).encode()
 ACCEPT = BillingCallback(action="accept", version=words.TERMS_VERSION).pack()
@@ -86,8 +85,12 @@ def wire(monkeypatch: pytest.MonkeyPatch) -> Iterator[Wired]:
     def desks(for_bot: Bot) -> billing_handlers.Desks:
         api = AiogramBotApi(for_bot)
         return billing_handlers.Desks(
-            sales=BillingService(ledger=ledger, api=api, owner_id=OWNER, nonce=lambda: NONCE),
-            payments=PaymentDesk(ledger=ledger, api=api, owner_id=OWNER, reply_hours=48),
+            sales=BillingService(
+                ledger=ledger, api=api, owner_id=OWNER, sales_enabled=True, nonce=lambda: NONCE
+            ),
+            payments=PaymentDesk(
+                ledger=ledger, api=api, slots=FakeSlots(), owner_id=OWNER, reply_hours=48
+            ),
             support=SupportDesk(ledger=ledger, api=api, owner_id=OWNER, reply_hours=48),
         )
 
@@ -251,8 +254,8 @@ async def test_accepting_old_terms_shows_the_new_ones_instead_of_a_link(wired: W
 
 @pytest.mark.parametrize(
     "data",
-    [ACCEPT, BillingCallback(action="terms").pack(), SubscribeCallback(root=7).pack()],
-    ids=["accept", "terms", "old-follow-button"],
+    [ACCEPT, BillingCallback(action="terms").pack()],
+    ids=["accept", "terms"],
 )
 async def test_a_stale_button_says_so_instead_of_silence(wired: Wired, data: str) -> None:
     """Сообщение старше 48 часов Telegram отдаёт недоступным; на деньгах молчать нельзя."""
@@ -261,16 +264,6 @@ async def test_a_stale_button_says_so_instead_of_silence(wired: Wired, data: str
     (answer,) = wired.session.sent(AnswerCallbackQuery)
     assert answer.text == words.STALE_BUTTON and answer.show_alert is True
     assert wired.messages() == [] and wired.session.sent(CreateInvoiceLink) == []
-
-
-async def test_the_old_follow_button_leads_to_the_safe_flow_not_to_an_invoice(
-    wired: Wired,
-) -> None:
-    """Прежняя «Следить за новыми» слала счёт-сообщение; теперь — экран с цифрами и согласием."""
-    await wired.feed(fx.callback(SubscribeCallback(root=7).pack()))
-
-    assert wired.session.sent(SendInvoice) == [] and wired.session.sent(CreateInvoiceLink) == []
-    assert wired.messages()[0].text == words.confirmation(0)
 
 
 async def test_cancel_and_terms_buttons(wired: Wired) -> None:

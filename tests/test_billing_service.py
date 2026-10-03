@@ -29,7 +29,13 @@ def make(*, owner: int = OWNER, live: int = 0) -> tuple[BillingService, FakeLedg
     order: list[str] = []
     ledger, api = FakeLedger(order), RecordingApi(order)
     ledger.live = live
-    return BillingService(ledger=ledger, api=api, owner_id=owner, nonce=lambda: NONCE), ledger, api
+    return (
+        BillingService(
+            ledger=ledger, api=api, owner_id=owner, sales_enabled=True, nonce=lambda: NONCE
+        ),
+        ledger,
+        api,
+    )
 
 
 # ── экран «Подписка» ────────────────────────────────────────────────────────
@@ -63,6 +69,52 @@ async def test_without_an_owner_nothing_is_sold() -> None:
 
     assert (screen.text, screen.offer, link) == (words.BILLING_OFF, False, None)
     assert ledger.calls == [] and api.order == []
+
+
+def closed(*, owner: int = OWNER) -> tuple[BillingService, FakeLedger, RecordingApi]:
+    """Продажа выключена флагом: так сервис собирается по умолчанию в бою."""
+    order: list[str] = []
+    ledger, api = FakeLedger(order), RecordingApi(order)
+    sales = BillingService(
+        ledger=ledger, api=api, owner_id=owner, sales_enabled=False, nonce=lambda: NONCE
+    )
+    return sales, ledger, api
+
+
+async def test_with_the_sales_flag_off_nothing_is_sold_even_though_the_owner_is_set() -> None:
+    """Владелец в проде задан всегда, поэтому им продажу включать нельзя: нужен свой флаг."""
+    sales, ledger, api = closed()
+
+    screen = await sales.confirmation(CLIENT)
+    link = await sales.issue_link(CLIENT)
+
+    assert sales.enabled is False
+    assert (screen.text, screen.offer, link) == (words.BILLING_OFF, False, None)
+    assert ledger.calls == [] and api.order == [] and ledger.consents == set()
+
+
+async def test_the_flag_without_an_owner_still_sells_nothing() -> None:
+    sales, _ledger, _api = make(owner=0)
+
+    assert sales.enabled is False
+
+
+async def test_a_link_issued_earlier_is_still_accepted_when_the_flag_is_off() -> None:
+    """Выключатель продаж не должен ломать уже выданные счета: платёж не теряется."""
+    sales, ledger, _api = closed()
+    ledger.consents.add((CLIENT, words.TERMS_DOC, words.TERMS_VERSION))
+
+    verdict = await sales.pre_checkout(
+        CheckoutFacts(buyer_id=CLIENT, currency="XTR", total_amount=10, payload=PAYLOAD)
+    )
+
+    assert verdict.ok
+
+
+def test_the_flag_is_off_by_default_in_the_settings() -> None:
+    from sniffer.config import Settings
+
+    assert Settings(_env_file=None).sales_enabled is False  # type: ignore[call-arg]
 
 
 async def test_a_broken_ledger_is_an_honest_unavailable_not_a_wrong_number() -> None:
@@ -122,7 +174,9 @@ async def test_every_link_is_a_different_payload() -> None:
     """Продление и события подписки находят её по нагрузке: две подписки не должны её делить."""
     nonces = iter(["aaaaaaaaaaaa", "bbbbbbbbbbbb"])
     ledger, api = FakeLedger(), RecordingApi()
-    sales = BillingService(ledger=ledger, api=api, owner_id=OWNER, nonce=lambda: next(nonces))
+    sales = BillingService(
+        ledger=ledger, api=api, owner_id=OWNER, sales_enabled=True, nonce=lambda: next(nonces)
+    )
 
     await sales.issue_link(CLIENT)
     await sales.issue_link(CLIENT)

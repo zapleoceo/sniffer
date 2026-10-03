@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import structlog
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import CallbackQuery, Message
 
@@ -17,6 +17,7 @@ from sniffer.bot import voice as voice_input
 from sniffer.bot.catalog_finder import CatalogFinder
 from sniffer.bot.commands import looks_like_command
 from sniffer.bot.conversation import Conversation, Reply, Send
+from sniffer.bot.handlers.billing import show_confirmation
 from sniffer.bot.keyboards import (
     AnswerCallback,
     FeedbackCallback,
@@ -205,17 +206,13 @@ def _sender(message: Message) -> Send:
 
 
 @router.callback_query(PlanCallback.filter())
-async def plan_action(callback: CallbackQuery, callback_data: PlanCallback) -> None:
-    """Кнопка «Подписка» под предложением.
-
-    TODO(A5): здесь начинается `/subscription` (подтверждение с цифрами → согласие →
-    ссылка на счёт). Пока оформления нет, говорим об этом прямо.
-    """
+async def plan_action(callback: CallbackQuery, callback_data: PlanCallback, bot: Bot) -> None:
+    """Кнопка «Подписка» под предложением: экран с цифрами, согласие и ссылка — `/subscription`."""
     await callback.answer()
     message = callback.message
     if not isinstance(message, Message) or callback_data.action != "subscribe":
         return
-    await message.answer(wording_plan.SUBSCRIPTION_SOON)
+    await show_confirmation(message, bot, callback.from_user.id)
 
 
 @router.callback_query(RequestsCallback.filter())

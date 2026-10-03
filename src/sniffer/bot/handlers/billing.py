@@ -37,9 +37,9 @@ from sniffer.bot.billing import (
 from sniffer.bot.billing_ledger import DbLedger
 from sniffer.bot.billing_payments import PaymentDesk
 from sniffer.bot.billing_service import BillingService, Verdict, guarded_verdict
+from sniffer.bot.billing_slots import DbSlots
 from sniffer.bot.billing_support import SupportDesk
 from sniffer.bot.billing_telegram import AiogramBotApi
-from sniffer.bot.keyboards import SubscribeCallback
 from sniffer.config import get_settings
 
 log = structlog.get_logger(__name__)
@@ -66,8 +66,12 @@ def desks(bot: Bot) -> Desks:
     api, ledger = AiogramBotApi(bot), DbLedger()
     owner, hours = settings.owner_chat_id, settings.paysupport_reply_hours
     return Desks(
-        sales=BillingService(ledger=ledger, api=api, owner_id=owner),
-        payments=PaymentDesk(ledger=ledger, api=api, owner_id=owner, reply_hours=hours),
+        sales=BillingService(
+            ledger=ledger, api=api, owner_id=owner, sales_enabled=settings.sales_enabled
+        ),
+        payments=PaymentDesk(
+            ledger=ledger, api=api, slots=DbSlots(), owner_id=owner, reply_hours=hours
+        ),
         support=SupportDesk(ledger=ledger, api=api, owner_id=owner, reply_hours=hours),
     )
 
@@ -88,7 +92,7 @@ def _claim(key: tuple[int, int]) -> bool:
 @router.message(Command("subscription"))
 async def subscription_command(message: Message, bot: Bot) -> None:
     if message.from_user is not None:
-        await _show_confirmation(message, bot, message.from_user.id)
+        await show_confirmation(message, bot, message.from_user.id)
 
 
 @router.message(Command("terms"))
@@ -122,7 +126,8 @@ async def refund_command(message: Message, command: CommandObject, bot: Bot) -> 
     await message.answer(await payments.refund(parsed[0], user_id=parsed[1]))
 
 
-async def _show_confirmation(message: Message, bot: Bot, tg_user_id: int) -> None:
+async def show_confirmation(message: Message, bot: Bot, tg_user_id: int) -> None:
+    """Экран «Подписка» с цифрами: общая точка входа команды и кнопок слотов."""
     screen = await desks(bot).sales.confirmation(tg_user_id)
     await message.answer(
         screen.text, reply_markup=ui.confirmation_markup() if screen.offer else None
@@ -142,20 +147,6 @@ async def _live_message(callback: CallbackQuery) -> Message | None:
         return callback.message
     await callback.answer(words.STALE_BUTTON, show_alert=True)
     return None
-
-
-@router.callback_query(SubscribeCallback.filter())
-async def subscribe_button(callback: CallbackQuery, bot: Bot) -> None:
-    """Прежняя кнопка «Следить за новыми»: теперь ведёт в безопасный поток `/subscription`.
-
-    Подписка по аккаунту, а не «за тему запроса», поэтому корень поиска из кнопки здесь не
-    нужен: подтверждение с цифрами, согласие, ссылка — те же, что у команды.
-    """
-    message = await _live_message(callback)
-    if message is None:
-        return
-    await callback.answer()
-    await _show_confirmation(message, bot, callback.from_user.id)
 
 
 @router.callback_query(ui.BillingCallback.filter())
@@ -183,7 +174,7 @@ async def _accept(
     """«Принимаю условия»: согласие записано, ссылка выдана, кнопка со ссылкой снята."""
     if data.version != words.TERMS_VERSION:
         await callback.answer(words.TERMS_CHANGED, show_alert=True)
-        await _show_confirmation(message, bot, callback.from_user.id)
+        await show_confirmation(message, bot, callback.from_user.id)
         return
     key = (message.chat.id, message.message_id)
     if not _claim(key):
