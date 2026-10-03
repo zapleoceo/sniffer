@@ -28,16 +28,14 @@ import pytest
 
 from sniffer.db import collection_models as _collection_models  # noqa: F401
 from sniffer.db.models import Base
+from tests.sql_chain_support import SQL_DIR, added_columns
 
 ROOT = Path(__file__).resolve().parents[1]
-SQL_DIR = ROOT / "infra" / "sql"
 DEPLOY = ROOT / "infra" / "deploy.sh"
 
 # Вызов часового: отдельная строка, хвостовой комментарий допускается.
 _CALL = re.compile(r"^[ \t]*require_column[ \t]+(\w+)[ \t]+(\w+)[ \t]*(?:#.*)?$", re.MULTILINE)
 _FUNCTION = re.compile(r"^require_column\(\) \{\n.*?^\}\n", re.MULTILINE | re.DOTALL)
-_ALTER = re.compile(r"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(\w+)\s+(.*?)(?:;|\Z)", re.I | re.S)
-_ADD = re.compile(r"ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+(\w+)", re.I)
 
 # ALTER'ы, существовавшие к введению правила, у которых часового нет. Список
 # ЗАКРЫТ: новая строка в него — это обход правила, и ревью обязано её заметить.
@@ -73,15 +71,9 @@ def _sentinels() -> list[tuple[str, str]]:
     return _CALL.findall(_script())
 
 
-def _alters() -> set[tuple[str, str]]:
+def _alters(directory: Path = SQL_DIR) -> set[tuple[str, str]]:
     """Пары «таблица — колонка» из всех `ALTER TABLE … ADD COLUMN IF NOT EXISTS`."""
-    text = "\n".join(path.read_text(encoding="utf-8") for path in sorted(SQL_DIR.glob("00*.sql")))
-    text = re.sub(r"--[^\n]*", "", text)
-    return {
-        (match.group(1), column)
-        for match in _ALTER.finditer(text)
-        for column in _ADD.findall(match.group(2))
-    }
+    return added_columns(directory)
 
 
 def _guard() -> str:
@@ -164,6 +156,15 @@ def test_the_legacy_list_only_names_real_unguarded_alters() -> None:
 
     assert LEGACY_WITHOUT_SENTINEL <= alters, sorted(LEGACY_WITHOUT_SENTINEL - alters)
     assert not LEGACY_WITHOUT_SENTINEL & guarded, "часовой появился — уберите строку из списка"
+
+
+def test_the_alter_scan_sees_a_column_from_a_file_numbered_010(tmp_path: Path) -> None:
+    """Подставной `010_probe.sql`: ALTER за двузначной маской остался бы без часового."""
+    (tmp_path / "010_probe.sql").write_text(
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS probe_flag BOOLEAN;", encoding="utf-8"
+    )
+
+    assert _alters(tmp_path) == {("users", "probe_flag")}
 
 
 # ── сама функция: красит ли она деплой ──────────────────────────────────────

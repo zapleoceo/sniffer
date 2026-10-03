@@ -300,6 +300,13 @@ info "бот и agent-collector получили обязательные нас
 # инод с момента старта контейнера, а `git checkout` заменяет файл новым инодом,
 # и внутри контейнера остаётся старая версия без свежих ALTER. stdin это обходит.
 #
+# Применяется вся цепочка: каждый файл `infra/sql/NNN_*.sql` с ТРЁХЗНАЧНЫМ
+# номером, по алфавиту. Маска была двузначной («00» и звёздочка), и файл
+# `010_*.sql` не применился бы ни здесь, ни в CI, ни в тесте схемы — молча, при
+# зелёной сборке. Теперь маска одна на деплой, CI и тесты, а файл вне маски
+# красит tests/test_migration_mask.py. Правила имён и содержимого — docs/deploy.md,
+# «Миграции: имя файла и маска».
+#
 # Postgres поднимаем первым и ждём healthy: миграция в неподнятую базу — гонка,
 # а app-контейнеры обязаны стартовать уже на новой схеме.
 log "миграции схемы"
@@ -313,7 +320,7 @@ for _ in $(seq 1 30); do
   [ "$H" = "healthy" ] || [ "$H" = "none" ] && break
   sleep 2
 done
-for migration in infra/sql/00*.sql; do
+for migration in infra/sql/[0-9][0-9][0-9]_*.sql; do
   if docker compose exec -T postgres psql -U sniffer -d sniffer -v ON_ERROR_STOP=1 \
        < "$migration" >/dev/null; then
     info "схема применена из $migration"

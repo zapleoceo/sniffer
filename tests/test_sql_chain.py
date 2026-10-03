@@ -1,4 +1,4 @@
-"""Цепочка `infra/sql/00*.sql` не правит данные: деплой гонит её на КАЖДОМ запуске.
+"""Цепочка `infra/sql/NNN_*.sql` не правит данные: деплой гонит её на КАЖДОМ запуске.
 
 Таблицы применённых миграций нет, и `infra/deploy.sh` прогоняет каждый файл по
 алфавиту при каждом деплое. Значит «разовая» правка данных в цепочке не
@@ -18,8 +18,9 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-SQL_DIR = Path(__file__).parents[1] / "infra" / "sql"
-CHAIN = sorted(SQL_DIR.glob("00*.sql"))
+from tests.sql_chain_support import SQL_DIR, chain
+
+CHAIN = chain()
 
 # Оператор, который меняет или удаляет УЖЕ лежащие данные. `INSERT ... ON
 # CONFLICT DO NOTHING` сюда не входит: он только добавляет. А `DO UPDATE` и
@@ -45,19 +46,33 @@ def statements(path: Path) -> set[tuple[str, str]]:
     return found
 
 
+def rewrites(directory: Path = SQL_DIR) -> set[tuple[str, str]]:
+    """Правки данных во всех файлах цепочки, кроме разрешённых."""
+    return set().union(*(statements(path) for path in chain(directory))) - ALLOWED
+
+
 def test_the_chain_is_not_empty() -> None:
     """Пустой glob превратил бы остальные проверки в зелёные впустую."""
     assert len(CHAIN) >= 9, CHAIN
 
 
 def test_the_chain_contains_no_data_rewrites() -> None:
-    rewrites = set().union(*(statements(path) for path in CHAIN)) - ALLOWED
+    found = rewrites()
 
-    assert not rewrites, (
+    assert not found, (
         "в цепочке миграций появилась правка данных: деплой применяет её на "
-        f"КАЖДОМ запуске, а не один раз. Найдено: {sorted(rewrites)}. Разовую "
+        f"КАЖДОМ запуске, а не один раз. Найдено: {sorted(found)}. Разовую "
         "правку делают вручную и описывают в docs/deploy.md, а не кладут сюда"
     )
+
+
+def test_a_rewrite_in_a_file_numbered_010_is_found(tmp_path: Path) -> None:
+    """Подставной `010_probe.sql`: за двузначной маской правка данных проходила бы незамеченной."""
+    (tmp_path / "010_probe.sql").write_text(
+        "UPDATE listings SET is_active = false;", encoding="utf-8"
+    )
+
+    assert rewrites(tmp_path) == {("010_probe.sql", "update listings")}
 
 
 def test_the_allow_list_still_matches_the_chain() -> None:
