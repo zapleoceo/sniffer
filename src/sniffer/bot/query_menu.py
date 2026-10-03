@@ -1,4 +1,9 @@
-"""Несколько запросов клиента: список, выбор и управление мониторингом."""
+"""Ветки запросов клиента: список, выбор и управление мониторингом.
+
+Заголовок ветки здесь не живёт: он нужен и там, где меню нет (сообщение о
+вытесненной ветке), поэтому лежит в `bot/threads.py` вместе с остальным знанием
+о ветках.
+"""
 
 from __future__ import annotations
 
@@ -6,9 +11,7 @@ from sniffer.bot.store import Client
 from sniffer.db.engine import session_scope
 from sniffer.db.repositories import PassportRepository, UserRepository
 from sniffer.db.repositories.delivery import DeliveryRepository
-from sniffer.domain.passport import Passport
 from sniffer.domain.records import QueryOverview
-from sniffer.search.vocabulary import city_name
 
 
 async def list_for(client: Client) -> list[QueryOverview]:
@@ -47,15 +50,3 @@ async def toggle(client: Client, root: int, *, active: bool) -> bool:
         )
         await session.commit()
         return changed
-
-
-def title(passport: Passport, *, limit: int = 38) -> str:
-    """Короткое узнаваемое имя без отдельного шага «назовите запрос»."""
-    text = passport.raw_query.strip()
-    if not text:
-        parts = [passport.category.value if passport.category else "запрос"]
-        city = city_name(passport.city, "ru")
-        if city:
-            parts.append(city)
-        text = " · ".join(parts)
-    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"

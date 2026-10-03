@@ -17,7 +17,7 @@ import pytest
 from aiogram.types import Message
 
 from sniffer.bot import app as bot_app
-from sniffer.bot import journal, query_menu, subscription
+from sniffer.bot import journal, query_menu, subscription, threads
 from sniffer.bot.conversation import (
     NO_REQUEST_YET,
     NOTHING_FOUND,
@@ -29,6 +29,7 @@ from sniffer.bot.conversation import (
 )
 from sniffer.bot.handlers import search as handler
 from sniffer.bot.keyboards import (
+    NEW_THREAD_LABEL,
     AnswerCallback,
     FeedbackCallback,
     RequestsCallback,
@@ -51,6 +52,7 @@ from sniffer.domain.dialogue import (
 )
 from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
 from sniffer.domain.records import PassportEvent, QueryOverview, StoredPassport
+from sniffer.domain.threads import MAX_LIVE_THREADS
 from sniffer.search.intake_rules import parse_query
 from sniffer.search.vocabulary import served_cities
 from sniffer.sources.base import RawItem
@@ -68,6 +70,7 @@ class MemoryStore:
         self._users: dict[int, int] = {}
         self._active: dict[int, int] = {}
         self._editing: set[int] = set()
+        self._awaiting: set[int] = set()
 
     async def load(self, client: Client) -> Dialogue:
         user_id = self._users.setdefault(client.tg_user_id, len(self._users) + 1)
@@ -92,7 +95,25 @@ class MemoryStore:
             passport=current,
             state=replay(events),
             editing=current.root in self._editing,
+            starting_new=user_id in self._awaiting,
         )
+
+    async def live_threads(self, dialogue: Dialogue) -> list[QueryOverview]:
+        """Ветки в работе, свежие сверху и обрезанные пределом — как в SQL.
+
+        Предел повторён здесь не ради симметрии: по длине этого списка бот решает,
+        вытесняется ли ветка, и список без предела никогда не сказал бы «мест нет».
+        """
+        active = self._active.get(dialogue.user_id)
+        live = [
+            QueryOverview(root=row.root, passport=row.passport, is_active=row.root == active)
+            for row in reversed(self.rows)
+            if row.user_id == dialogue.user_id and row.is_current
+        ]
+        return live[:MAX_LIVE_THREADS]
+
+    async def await_new(self, dialogue: Dialogue) -> None:
+        self._awaiting.add(dialogue.user_id)
 
     async def start(self, dialogue: Dialogue, passport: Passport) -> Dialogue:
         stored = StoredPassport(
@@ -101,6 +122,7 @@ class MemoryStore:
         self.rows.append(stored)
         self._active[dialogue.user_id] = stored.root
         self._editing.discard(stored.root)
+        self._awaiting.discard(dialogue.user_id)
         self._event(stored.id, EVENT_USER_MESSAGE, {"text": passport.raw_query})
         return Dialogue(user_id=dialogue.user_id, passport=stored, state=DialogueState())
 
@@ -138,6 +160,7 @@ class MemoryStore:
         if not owned:
             return dialogue
         self._active[dialogue.user_id] = root
+        self._awaiting.discard(dialogue.user_id)
         if editing:
             self._editing.add(root)
         else:
@@ -1054,6 +1077,7 @@ async def test_request_menu_handler_covers_the_whole_navigation(
     items = [item]
     selected: list[tuple[int, bool]] = []
     repeated: list[int] = []
+    armed: list[bool] = []
 
     async def list_for(_client: Client) -> list[QueryOverview]:
         return items
@@ -1070,6 +1094,9 @@ async def test_request_menu_handler_covers_the_whole_navigation(
         async def repeat(self, _client: Client, root: int, _send: Any) -> None:
             repeated.append(root)
 
+        async def start_new(self, _client: Client) -> None:
+            armed.append(True)
+
     monkeypatch.setattr(handler, "Message", FakeMessage)
     monkeypatch.setattr(query_menu, "list_for", list_for)
     monkeypatch.setattr(query_menu, "select", select)
@@ -1084,12 +1111,15 @@ async def test_request_menu_handler_covers_the_whole_navigation(
     await handler.manage_request(callback, RequestsCallback(action="edit", root=7))
     await handler.manage_request(callback, RequestsCallback(action="pause", root=7))
     await handler.manage_request(callback, RequestsCallback(action="resume", root=7))
+    await handler.manage_request(callback, RequestsCallback(action="new"))
 
     assert callback.answered
     assert repeated == [7]
     assert (7, True) in selected
-    assert any("Ваши запросы" in text for text, _keyboard in message.answers)
+    assert any("Ваши поиски" in text for text, _keyboard in message.answers)
     assert any("Изменяем" in text for text, _keyboard in message.answers)
+    assert armed == [True], "кнопка «новый поиск» взводит ветку, а не ищет сразу"
+    assert threads.ASK_WHAT in [text for text, _keyboard in message.answers]
 
 
 async def test_empty_and_stale_request_menus_answer_plainly(
@@ -1152,7 +1182,8 @@ def test_request_menu_is_compact_and_exposes_only_relevant_monitor_action() -> N
     actions = request_actions(active)
     labels = [button.text for row in actions.inline_keyboard for button in row]
 
-    assert len(listing.inline_keyboard) == 2
+    assert len(listing.inline_keyboard) == 3, "две ветки плюс «новый поиск»"
+    assert listing.inline_keyboard[-1][0].text == NEW_THREAD_LABEL, "вход в новую ветку последним"
     assert "⏸ Выключить мониторинг" in labels
     assert "▶️ Включить мониторинг" not in labels
     packed = RequestsCallback(action="search", root=active.root).pack()

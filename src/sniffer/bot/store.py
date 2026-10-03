@@ -24,7 +24,7 @@ from sniffer.db.engine import session_scope
 from sniffer.db.repositories import PassportRepository, UserRepository
 from sniffer.domain.dialogue import EVENT_USER_MESSAGE, DialogueState, advance, replay
 from sniffer.domain.passport import Passport
-from sniffer.domain.records import StoredPassport
+from sniffer.domain.records import QueryOverview, StoredPassport
 
 Sessions = Callable[[], AbstractAsyncContextManager[AsyncSession]]
 
@@ -39,12 +39,21 @@ class Client:
 
 @dataclass(frozen=True, slots=True)
 class Dialogue:
-    """Текущий разговор: чей, о чём и на каком вопросе остановились."""
+    """Текущий разговор: чей, о чём и на каком вопросе остановились.
+
+    «О чём» — это всегда ОДНА ветка, активная. Паспорта соседних веток сюда не
+    попадают вовсе, и это не упрощение, а граница: пока в разговоре лежит один
+    паспорт, ни одна эвристика не может увести уточнение в чужую ветку —
+    сравнивать ей просто не с чем.
+    """
 
     user_id: int
     passport: StoredPassport | None = None
     state: DialogueState = field(default_factory=DialogueState)
     editing: bool = False
+    # Человек сказал `/new` и ещё не написал, что ищет. Пока флаг взведён,
+    # следующее сообщение открывает ветку, а не уточняет активную.
+    starting_new: bool = False
 
 
 class DialogueStore(Protocol):
@@ -65,6 +74,10 @@ class DialogueStore(Protocol):
     async def note(self, dialogue: Dialogue, *, kind: str, payload: dict[str, Any]) -> Dialogue: ...
 
     async def select(self, dialogue: Dialogue, root: int, *, editing: bool = False) -> Dialogue: ...
+
+    async def live_threads(self, dialogue: Dialogue) -> list[QueryOverview]: ...
+
+    async def await_new(self, dialogue: Dialogue) -> None: ...
 
 
 class PassportStore:
@@ -92,6 +105,7 @@ class PassportStore:
                 passport=current,
                 state=replay(events),
                 editing=user.editing_passport_root == current.root,
+                starting_new=user.awaiting_new_request,
             )
 
     async def start(self, dialogue: Dialogue, passport: Passport) -> Dialogue:
@@ -128,6 +142,17 @@ class PassportStore:
             await PassportRepository(session).add_event(dialogue.passport.id, kind, payload)
             await session.commit()
         return replace(dialogue, state=advance(dialogue.state, kind, payload))
+
+    async def live_threads(self, dialogue: Dialogue) -> list[QueryOverview]:
+        """Ветки в работе, свежие сверху. Нужны, чтобы знать, есть ли место."""
+        async with self._sessions() as session:
+            return await PassportRepository(session).list_queries(dialogue.user_id)
+
+    async def await_new(self, dialogue: Dialogue) -> None:
+        """`/new`: следующее сообщение открывает ветку, а не уточняет активную."""
+        async with self._sessions() as session:
+            await PassportRepository(session).await_new_request(dialogue.user_id)
+            await session.commit()
 
     async def select(self, dialogue: Dialogue, root: int, *, editing: bool = False) -> Dialogue:
         """Переключить контекст только на принадлежащую клиенту цепочку."""

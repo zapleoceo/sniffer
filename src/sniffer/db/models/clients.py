@@ -47,6 +47,11 @@ class User(BigIdMixin, Base):
     active_passport_root: Mapped[int | None] = mapped_column(BigInteger)
     # Нажатие «изменить» переживает рестарт бота и следующий апдейт Telegram.
     editing_passport_root: Mapped[int | None] = mapped_column(BigInteger)
+    # `/new` без текста: следующее сообщение открывает ветку, а не уточняет
+    # активную. Переживает рестарт по той же причине, что и строка выше.
+    awaiting_new_request: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=FALSE
+    )
 
 
 class Passport(BigIdMixin, Base):

@@ -17,7 +17,7 @@ from aiogram.types import (
     PreCheckoutQuery,
 )
 
-from sniffer.bot import billing, query_menu, subscription
+from sniffer.bot import billing, query_menu, subscription, threads
 from sniffer.bot import voice as voice_input
 from sniffer.bot.catalog_finder import CatalogFinder
 from sniffer.bot.conversation import NO_REQUEST_YET, Conversation, Reply, Send
@@ -45,7 +45,9 @@ GREETING = (
     "Если чего-то важного не хватает, уточню парой вопросов — отвечать можно кнопкой "
     "или словами. Объявление не перепечатываю: даю ссылку на источник и честно помечаю, "
     "если лот старый и мог быть продан.\n\n"
-    "Несколько поисков и их мониторинги: /requests"
+    "Ищете сразу несколько разных вещей? У каждого поиска своя ветка: /new начинает "
+    "новую и не смешивает её с прежней, /requests показывает все ветки и переключает "
+    "между ними."
 )
 
 _conversation: Conversation | None = None
@@ -69,6 +71,25 @@ async def requests(message: Message) -> None:
     client = _client(message)
     if client is not None:
         await _show_requests(message, client)
+
+
+@router.message(Command("new"))
+async def new_request(message: Message) -> None:
+    """Явная ветка. `/new скутер в Нячанге` — сразу, `/new` — следующим сообщением.
+
+    Текст в той же команде существует не для скорости: голосовой запрос в
+    команду не положишь, поэтому взведённый флаг нужен всё равно — и пусть у
+    одного и того же «начни новый поиск» будет один вход, а не два похожих.
+    """
+    client = _client(message)
+    if client is None:  # pragma: no cover — сообщение без автора
+        return
+    await conversation().start_new(client)
+    query = (message.text or "").partition(" ")[2].strip()
+    if not query:
+        await message.answer(threads.ASK_WHAT)
+        return
+    await conversation().on_text(client, query, _sender(message))
 
 
 @router.message(F.text)
@@ -214,6 +235,12 @@ async def manage_request(callback: CallbackQuery, callback_data: RequestsCallbac
     if action == "list":
         await _show_requests(message, client)
         return
+    if action == "new":
+        # Кнопка делает ровно то же, что команда: ветка открывается следующим
+        # сообщением. Второй путь с собственным поведением рассыпался бы первым.
+        await conversation().start_new(client)
+        await message.answer(threads.ASK_WHAT)
+        return
     items = await query_menu.list_for(client)
     item = next((row for row in items if row.root == root), None)
     if item is None:
@@ -227,7 +254,7 @@ async def manage_request(callback: CallbackQuery, callback_data: RequestsCallbac
     elif action == "edit":
         await query_menu.select(client, root, editing=True)
         await message.answer(
-            f"Изменяем: <b>{query_menu.title(item.passport)}</b>\n\n"
+            f"Изменяем: <b>{threads.title(item.passport)}</b>\n\n"
             "Напишите, что изменить, например «до 500», или новую формулировку целиком."
         )
         return
@@ -248,7 +275,8 @@ async def _show_requests(message: Message, client: Client) -> None:
         await message.answer("Запросов пока нет. Напишите, что хотите найти.")
         return
     await message.answer(
-        "Ваши запросы\n\n🟢 мониторинг работает · ⏸ на паузе · ▫️ без мониторинга",
+        "Ваши поиски — по ветке на каждый, ✓ отмечает тот, к которому относится "
+        "следующее сообщение\n\n🟢 мониторинг работает · ⏸ на паузе · ▫️ без мониторинга",
         reply_markup=requests_markup(items),
     )
 
@@ -260,7 +288,7 @@ def _request_text(item: QueryOverview) -> str:
         "expired": "мониторинг закончился",
         "off": "мониторинг не подключён",
     }
-    return f"<b>{query_menu.title(item.passport)}</b>\n{states[item.monitoring]}"
+    return f"<b>{threads.title(item.passport)}</b>\n{states[item.monitoring]}"
 
 
 @router.pre_checkout_query()

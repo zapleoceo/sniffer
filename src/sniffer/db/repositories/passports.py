@@ -17,6 +17,7 @@ from sniffer.db.mappers import passport_values, to_passport_event, to_stored_pas
 from sniffer.db.repositories.base import Repository
 from sniffer.domain.passport import Passport
 from sniffer.domain.records import PassportEvent, QueryOverview, StoredPassport
+from sniffer.domain.threads import MAX_LIVE_THREADS
 
 
 class PassportRepository(Repository):
@@ -53,7 +54,14 @@ class PassportRepository(Repository):
         return to_stored_passport(row) if row is not None else None
 
     async def select(self, user_id: int, root: int, *, editing: bool = False) -> bool:
-        """Выбрать свою цепочку; чужой root не меняет состояние."""
+        """Выбрать свою цепочку; чужой root не меняет состояние.
+
+        Выбор ветки снимает и взведённое `/new`: человек сказал, с какой веткой
+        работает, и ждать от него новую просьбу больше незачем. Снимается здесь,
+        а не у вызывающих, потому что через это место проходят ВСЕ переключения
+        контекста — и создание ветки (`save_new`) в том числе. Снимай флаг у
+        вызывающих — один из них забудут, и `/new` остался бы взведённым навсегда.
+        """
         chain = func.coalesce(models.Passport.root_id, models.Passport.id)
         owned = await self._session.scalar(
             select(models.Passport.id)
@@ -68,17 +76,38 @@ class PassportRepository(Repository):
             .values(
                 active_passport_root=root,
                 editing_passport_root=root if editing else None,
+                awaiting_new_request=False,
             )
         )
         return True
+
+    async def await_new_request(self, user_id: int) -> None:
+        """`/new` без текста: следующее сообщение открывает ветку, а не уточняет.
+
+        Флаг, а не «ничего не делаем и надеемся»: между командой и сообщением бот
+        перезапускается, а у голосового запроса между ними ещё и расшифровка.
+        """
+        await self._session.execute(
+            update(models.User).where(models.User.id == user_id).values(awaiting_new_request=True)
+        )
 
     async def clear_editing(self, user_id: int) -> None:
         await self._session.execute(
             update(models.User).where(models.User.id == user_id).values(editing_passport_root=None)
         )
 
-    async def list_queries(self, user_id: int) -> list[QueryOverview]:
-        """Все актуальные цепочки и их мониторинги, свежие сверху."""
+    async def list_queries(
+        self, user_id: int, *, limit: int = MAX_LIVE_THREADS
+    ) -> list[QueryOverview]:
+        """Ветки в работе и их мониторинги, свежие сверху, не больше предела.
+
+        Предел — в SQL, а не в отрисовке меню: обрезать список после выборки
+        значило бы тянуть из базы все цепочки человека ради пяти строк, а главное
+        — «сколько веток в работе» перестало бы быть одним ответом. Вытесненная
+        ветка не удаляется: её мониторинг читает `subscriptions` по корню и о
+        списке не знает, а кнопки под её старой выдачей по-прежнему переключают
+        на неё (`select`) и возвращают её в список.
+        """
         chain = func.coalesce(models.Passport.root_id, models.Passport.id)
         rows = await self._session.execute(
             select(models.Passport, models.Subscription, models.User.active_passport_root)
@@ -92,6 +121,7 @@ class PassportRepository(Repository):
             )
             .where(models.Passport.user_id == user_id, models.Passport.is_current.is_(True))
             .order_by(models.Passport.created_at.desc(), models.Passport.id.desc())
+            .limit(limit)
         )
         result: list[QueryOverview] = []
         moment = datetime.now(UTC)

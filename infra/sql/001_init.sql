@@ -250,11 +250,18 @@ CREATE TABLE IF NOT EXISTS users (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     is_blocked  BOOLEAN     NOT NULL DEFAULT FALSE,
     active_passport_root  BIGINT,
-    editing_passport_root BIGINT
+    editing_passport_root BIGINT,
+    awaiting_new_request  BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 ALTER TABLE users ADD COLUMN IF NOT EXISTS active_passport_root BIGINT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS editing_passport_root BIGINT;
+-- `/new` без текста: следующее сообщение открывает новую ветку, чем бы оно ни
+-- было похоже на прежнюю просьбу. В БД, а не в памяти процесса, по той же
+-- причине, по которой тут лежит editing_passport_root: между командой и
+-- сообщением (а при голосовом запросе — и расшифровкой) бот перезапускается, и
+-- тогда явное «начинаю новый поиск» снова решалось бы эвристикой.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS awaiting_new_request BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- Паспорт неизменяем: правка поля создаёт новую версию с тем же root_id.
 CREATE TABLE IF NOT EXISTS passports (

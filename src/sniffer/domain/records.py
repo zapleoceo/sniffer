@@ -126,6 +126,7 @@ class User:
     is_blocked: bool = False
     active_passport_root: int | None = None
     editing_passport_root: int | None = None
+    awaiting_new_request: bool = False
     created_at: datetime | None = None
     id: int | None = None
 
