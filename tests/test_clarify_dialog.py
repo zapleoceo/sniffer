@@ -209,3 +209,25 @@ def test_the_target_is_ten(count: int) -> None:
     planner = ClarificationPlanner()
     items = base()[:count]
     assert planner.decide(bike(), facets_from(items), DialogueState()) == Search("small")
+
+
+@pytest.mark.parametrize(
+    ("mode", "enabled"),
+    [
+        ("listings", True),
+        ("legacy", False),
+        ("shadow", False),
+        ("pilot", False),
+        ("catalog", False),
+    ],
+)
+def test_the_planner_runs_only_on_the_cheap_local_catalog(
+    monkeypatch: pytest.MonkeyPatch, mode: str, enabled: bool
+) -> None:
+    """На живом поиске каждый шаг сужения платил бы моделью и обходом источников."""
+    from types import SimpleNamespace
+
+    from sniffer.bot.handlers import search as handler
+
+    monkeypatch.setattr(handler, "get_settings", lambda: SimpleNamespace(catalog_mode=mode))
+    assert isinstance(handler._planner(), ClarificationPlanner) is enabled
