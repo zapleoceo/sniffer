@@ -203,7 +203,6 @@ def test_every_text_about_the_limit_says_search_not_request_or_branch() -> None:
     texts = [
         wording.GREETING,
         wording_plan.QUOTA_UNAVAILABLE,
-        wording_plan.SUBSCRIPTION_SOON,
         wording_plan.UNKNOWN_COMMAND,
         wording_plan.SUBSCRIBE_LABEL,
         wording_plan.more_line(3, limit=FREE_CARDS_PER_PERIOD, renews=END),
@@ -222,7 +221,6 @@ def test_the_texts_are_valid_telegram_html() -> None:
     """Голый «<», «>» или «&» Telegram отвергает целиком: сообщение не дойдёт."""
     plain = [
         wording_plan.QUOTA_UNAVAILABLE,
-        wording_plan.SUBSCRIPTION_SOON,
         wording_plan.UNKNOWN_COMMAND,
         wording_plan.exhausted_offer(total=5, renews=END),
         wording_plan.exhausted_short(total=5, renews=END),

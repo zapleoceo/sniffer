@@ -24,15 +24,18 @@ from sniffer.bot import billing_owner_wording as owner_words
 from sniffer.bot import billing_wording as words
 from sniffer.bot.billing import Classification, PaymentFacts, RefundedFacts, classify_payment
 from sniffer.bot.billing_guard import Flow, describe
-from sniffer.bot.billing_ports import BotApi, BotApiError, Ledger
+from sniffer.bot.billing_ports import BotApi, BotApiError, Ledger, Slots
 from sniffer.domain.billing import (
+    PAID,
     REFUNDED,
     BillingEvent,
     EventKind,
     PaymentKind,
     PaymentRecord,
     Reason,
+    StoredPayment,
 )
+from sniffer.domain.slots import SlotState
 
 log = structlog.get_logger(__name__)
 
@@ -63,12 +66,14 @@ class PaymentDesk:
         *,
         ledger: Ledger,
         api: BotApi,
+        slots: Slots,
         owner_id: int,
         reply_hours: int,
         clock: Callable[[], datetime] = _utcnow,
     ) -> None:
         self._ledger = ledger
         self._api = api
+        self._slots = slots
         self._owner_id = owner_id
         self._reply_hours = reply_hours
         self._clock = clock
@@ -91,7 +96,16 @@ class PaymentDesk:
         """
         flow = Flow("on_payment")
         unclassified = Classification(PaymentKind.UNKNOWN, Reason.BAD_PAYLOAD)
-        done = await flow.compute("classify", lambda: classify_payment(facts, self._clock()))
+        # Первый платёж подписки спрашивается ДО записи этого: после неё «самым ранним» мог
+        # бы оказаться он сам, и сверка суммы продления шла бы с ним же.
+        seen = await flow.step(
+            "first_payment", lambda: self._ledger.first_payment_of(facts.payload)
+        )
+        first = seen.or_else(None)
+        done = await flow.compute(
+            "classify",
+            lambda: classify_payment(facts, self._clock(), first=first, first_unknown=not seen.ok),
+        )
         verdict = done.or_else(unclassified)
         built = await flow.compute("build_record", lambda: self._record_for(facts, verdict))
         record = built.or_else(None)
@@ -131,6 +145,21 @@ class PaymentDesk:
         flow.finish()
         return reply
 
+    async def settle_refund(self, payment: StoredPayment) -> RefundResult:
+        """Довести возврат платежа, который решено вернуть, но не вернули (зовёт сверка)."""
+        if payment.tg_user_id is None:
+            return RefundResult(False, "в журнале нет id клиента: вернуть можно только вручную")
+        flow = Flow("settle_refund")
+        result = await self._refund(
+            flow,
+            payment.tg_user_id,
+            payment.charge_id,
+            payment.invoice_payload,
+            recurring=payment.is_recurring or payment.is_first_recurring,
+        )
+        flow.finish()
+        return result
+
     def _record_for(self, facts: PaymentFacts, verdict: Classification) -> PaymentRecord | None:
         """Платёж в виде строки журнала. Плательщик — из апдейта, а нет его — из счёта."""
         payer = facts.payer_id
@@ -149,6 +178,8 @@ class PaymentDesk:
             is_first_recurring=facts.is_first_recurring,
             period_end=verdict.period_end,
             raw=facts.raw,
+            source=facts.source,
+            period_end_estimated=verdict.estimated,
         )
 
     async def _reply_to_payment(
@@ -157,9 +188,32 @@ class PaymentDesk:
         if verdict.kind is PaymentKind.UNKNOWN:
             return await self._reject(flow, entry, facts, verdict.reason or Reason.BAD_PAYLOAD)
         until = verdict.period_end or self._clock()
+        if verdict.date_anomaly:
+            await self._alert(
+                flow,
+                owner_words.owner_date_anomaly(
+                    tg_user_id=entry.tg_user_id,
+                    charge_id=entry.charge_id,
+                    expiration=facts.expiration,
+                ),
+            )
+        # Слот включается пересчётом по журналу, и ответ клиенту строится из его итога:
+        # «подписка действует» без слота — обещание, которое ничем не подкреплено.
+        synced = await flow.step(
+            "sync_slots", lambda: self._slots.sync(entry.tg_user_id, self._clock())
+        )
+        if not synced.ok:
+            await self._alert(
+                flow,
+                owner_words.owner_slots_unsynced(
+                    tg_user_id=entry.tg_user_id, charge_id=entry.charge_id
+                ),
+            )
+            return words.payment_slot_pending(until, self._reply_hours)
+        state = synced.or_else(SlotState())
         if verdict.kind is PaymentKind.RENEWAL:
-            return words.thanks_renewal(until)
-        return words.thanks_first(until)
+            return words.thanks_renewal(until, state.resumed)
+        return words.thanks_first(until, state.free)
 
     async def _reject(
         self, flow: Flow, entry: PaymentRecord, facts: PaymentFacts, reason: Reason
@@ -196,17 +250,30 @@ class PaymentDesk:
     async def _refund(
         self, flow: Flow, user_id: int, charge_id: str, payload: str | None, *, recurring: bool
     ) -> RefundResult:
-        """Вернуть звёзды и остановить продление. Повторный возврат — успех."""
+        """Вернуть звёзды и остановить продление. Повторный возврат — успех.
+
+        Порядок: СНАЧАЛА запись «возвращаем», потом вызов Telegram. Сообщение о возврате
+        приходит отдельным апдейтом и может обогнать нашу отметку: без записи вперёд оно
+        читалось бы как возврат «не нашими руками» и будило владельца ложной тревогой.
+        Недоступный журнал возврат не останавливает: деньги клиента важнее учёта.
+        """
+        notes: list[str] = []
+        planned = await flow.step("mark_refunding", lambda: self._ledger.mark_refunding(charge_id))
+        if not planned.ok:
+            notes.append("журнал не обновлён до возврата")
         called = await flow.step(
             "refund",
             lambda: self._api.refund_star_payment(user_id=user_id, charge_id=charge_id),
         )
         if not called.ok and not already_refunded(called.error):
-            return RefundResult(False, describe(called.error or Exception()))
-        notes: list[str] = []
+            return RefundResult(False, describe(called.error or Exception()), tuple(notes))
         marked = await flow.step("mark_refunded", lambda: self._ledger.mark_refunded(charge_id))
         if not marked.ok:
             notes.append("журнал не обновлён: отметьте возврат вручную")
+        # Слот за возвращённый платёж снят сразу, а не в конце оплаченного срока.
+        resynced = await flow.step("sync_slots", lambda: self._slots.sync(user_id, self._clock()))
+        if not resynced.ok:
+            notes.append("слоты не пересчитаны: сверка сделает это сама")
         if recurring and payload:
             notes += await self._stop_renewal(flow, user_id, payload)
         return RefundResult(True, notes=tuple(notes))
@@ -257,12 +324,11 @@ class PaymentDesk:
         """
         flow = Flow("on_refunded")
         found = await flow.step("get_payment", lambda: self._ledger.get_payment(facts.charge_id))
-        marked = await flow.step(
-            "mark_refunded", lambda: self._ledger.mark_refunded(facts.charge_id)
-        )
+        await flow.step("mark_refunded", lambda: self._ledger.mark_refunded(facts.charge_id))
         payment = found.or_else(None)
         tg_user_id = payment.tg_user_id if payment is not None else facts.payer_id
         if tg_user_id is not None:
+            await flow.step("sync_slots", lambda: self._slots.sync(tg_user_id, self._clock()))
             event = BillingEvent(
                 EventKind.REFUNDED,
                 tg_user_id,
@@ -271,7 +337,9 @@ class PaymentDesk:
                 update_id=facts.update_id,
             )
             await flow.step("record_event", lambda: self._ledger.record_event(event))
-        if marked.or_else(False) or payment is None:
+        # Свой возврат журнал уже знает (`refunding`/`refunded`); `paid` или отсутствие записи —
+        # возврат сделан не нами (поддержка Telegram, спор).
+        if payment is None or payment.status == PAID:
             await self._alert(
                 flow,
                 owner_words.owner_refund_outside(

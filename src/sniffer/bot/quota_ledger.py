@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sniffer.bot.billing_slots import LedgerEntitlements
 from sniffer.bot.quota import Account, QuotaService
 from sniffer.bot.store import Client
 from sniffer.config import get_settings
@@ -87,4 +88,8 @@ def new_quota() -> QuotaService:
     Одна фабрика на бота и на отложенные ответы: две сборки разошлись бы в том, кого
     считать владельцем.
     """
-    return QuotaService(SqlLedger(), owner_tg_id=get_settings().owner_chat_id or None)
+    return QuotaService(
+        SqlLedger(),
+        entitlements=LedgerEntitlements(),
+        owner_tg_id=get_settings().owner_chat_id or None,
+    )

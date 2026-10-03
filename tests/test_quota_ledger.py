@@ -437,6 +437,21 @@ async def a_subscription_is_offered_at_most_once_a_day(kit: Kit) -> None:
 
 
 @scenario
+async def a_payer_with_a_live_subscription_is_never_offered_one_and_the_day_is_not_spent(
+    kit: Kit,
+) -> None:
+    _, who = await started(kit)
+    slots = Slots(1)
+    quota = service(kit, Clock(T0), entitlements=slots)
+
+    assert await quota.may_offer(who) is False
+    assert await quota.may_offer(who) is False
+
+    slots.count = 0  # подписка кончилась: право на предложение целое, сутки не тратились
+    assert await quota.may_offer(who) is True
+
+
+@scenario
 async def the_standing_reads_without_writing(kit: Kit) -> None:
     user, who = await started(kit)
     quota = service(kit)

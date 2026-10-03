@@ -33,7 +33,7 @@ from sniffer.db import models
 from sniffer.db.mappers import to_subscription_state
 from sniffer.db.repositories.base import Repository
 from sniffer.domain.monitoring import OVERFLOW_KIND
-from sniffer.domain.records import OutboxMessage, Payment, SubscriptionState
+from sniffer.domain.records import OutboxMessage, SubscriptionState
 
 OUTBOX_PENDING = "pending"
 OUTBOX_SENT = "sent"
@@ -408,70 +408,6 @@ class DeliveryRepository(Repository):
                 .limit(1)
             )
         )
-
-    async def pay_and_activate(
-        self, payment: Payment, *, passport_root: int, until: datetime, since_listing_id: int
-    ) -> bool:
-        """Платёж → активная подписка. Возврат `False` — платёж уже был учтён.
-
-        Одной транзакцией и в одном месте, потому что здесь встречаются деньги
-        и доступ: записать платёж без подписки значит взять звезду и ничего не
-        дать, включить подписку без платежа — раздать бесплатно.
-
-        Идемпотентность держится на `payments.external_id UNIQUE`, а не на
-        проверке «а нет ли уже такого»: Telegram повторяет апдейт при любой
-        задержке ответа, и проверка отдельным запросом оставляет окно между ней
-        и вставкой. `ON CONFLICT DO NOTHING` окна не оставляет.
-        """
-        table = cast(Table, models.Payment.__table__)
-        inserted = await self._session.execute(
-            pg_insert(table)
-            .values(
-                user_id=payment.user_id,
-                amount=payment.amount,
-                currency=payment.currency,
-                provider=payment.provider,
-                status=payment.status,
-                external_id=payment.external_id,
-                is_recurring=payment.is_recurring,
-            )
-            .on_conflict_do_nothing(index_elements=["external_id"])
-            .returning(table.c.id)
-        )
-        payment_id = inserted.scalar_one_or_none()
-        if payment_id is None:
-            # Повторная доставка того же апдейта. Подписку не трогаем: она уже
-            # продлена этим самым платежом.
-            return False
-
-        subscription = cast(Table, models.Subscription.__table__)
-        row = await self._session.execute(
-            pg_insert(subscription)
-            .values(
-                user_id=payment.user_id,
-                passport_root=passport_root,
-                is_active=True,
-                expires_at=until,
-                charge_id=payment.external_id,
-                since_listing_id=since_listing_id,
-            )
-            .on_conflict_do_update(
-                index_elements=["user_id", "passport_root"],
-                # Продление: срок и ключ платежа обновляются, точка отсчёта —
-                # НЕТ. Иначе повторная оплата сдвигала бы её на «сейчас», и
-                # клиент терял бы всё, что накопилось за оплаченный месяц.
-                set_={
-                    "is_active": True,
-                    "expires_at": until,
-                    "charge_id": payment.external_id,
-                },
-            )
-            .returning(subscription.c.id)
-        )
-        await self._session.execute(
-            update(table).where(table.c.id == payment_id).values(subscription_id=row.scalar_one())
-        )
-        return True
 
     async def subscription_for(
         self, *, user_id: int, passport_root: int

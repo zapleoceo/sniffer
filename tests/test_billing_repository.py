@@ -20,7 +20,13 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sniffer.db import models
 from sniffer.db.repositories.billing import BillingRepository
 from sniffer.db.repositories.users import UserRepository
-from sniffer.domain.billing import BillingEvent, EventKind, PaymentKind, PaymentRecord
+from sniffer.domain.billing import (
+    FROM_RECONCILE,
+    BillingEvent,
+    EventKind,
+    PaymentKind,
+    PaymentRecord,
+)
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("TEST_DATABASE_URL"),
@@ -176,8 +182,10 @@ async def test_live_subscriptions_are_counted_by_invoice_with_the_term_from_tele
     )
     await db_session.commit()
 
-    assert await repo.live_subscriptions(user_id) == 2, "живая и продлённая; остальное не в счёт"
-    assert await repo.live_subscriptions(other) == 1
+    assert await repo.live_subscriptions(user_id, NOW) == 2, (
+        "живая и продлённая; остальное не в счёт"
+    )
+    assert await repo.live_subscriptions(other, NOW) == 1
 
 
 async def test_consent_is_per_version_and_repeating_it_changes_nothing(
@@ -239,3 +247,135 @@ async def test_recent_payments_are_the_clients_own_newest_first(db_session: Asyn
     recent = await repo.recent_payments(42, limit=3)
 
     assert [payment.charge_id for payment in recent] == ["mine-3", "mine-2", "mine-1"]
+
+
+async def test_a_payment_we_decided_to_return_no_longer_holds_a_slot(
+    db_session: AsyncSession,
+) -> None:
+    """`refunding` пишется до вызова Telegram: слот снят уже тогда, а не после ответа."""
+    user_id = await _user(db_session)
+    repo = BillingRepository(db_session)
+    await repo.insert_payment(user_id, _record("held"))
+    await db_session.commit()
+    assert await repo.live_subscriptions(user_id, NOW) == 1
+
+    planned = await repo.mark_refunding("held")
+    again = await repo.mark_refunding("held")
+    await db_session.commit()
+
+    assert (planned, again) == (True, False)
+    assert await repo.live_subscriptions(user_id, NOW) == 0
+    stored = await repo.get_payment("held")
+    assert stored is not None and stored.status == "refunding"
+    assert await repo.mark_refunded("held") is True, "refunding идёт дальше, в refunded"
+
+
+async def test_live_terms_come_longest_first_and_use_the_caller_clock(
+    db_session: AsyncSession,
+) -> None:
+    user_id = await _user(db_session)
+    repo = BillingRepository(db_session)
+    short, long_, gone = (f"v2:s:42:2026-10-03:{c * 12}" for c in "stu")
+    await repo.insert_payment(
+        user_id, _record("short", payload=short, period_end=NOW + timedelta(days=3))
+    )
+    await repo.insert_payment(
+        user_id, _record("long", payload=long_, period_end=NOW + timedelta(days=20))
+    )
+    await repo.insert_payment(
+        user_id, _record("gone", payload=gone, period_end=NOW - timedelta(days=1))
+    )
+    await db_session.commit()
+
+    ends = await repo.live_period_ends(user_id, NOW)
+
+    assert ends == [NOW + timedelta(days=20), NOW + timedelta(days=3)]
+    later = await repo.live_period_ends(user_id, NOW + timedelta(days=5))
+    assert later == [NOW + timedelta(days=20)], "«сейчас» — аргумент, а не часы базы"
+
+
+async def test_the_first_payment_of_a_subscription_comes_back_with_its_amount(
+    db_session: AsyncSession,
+) -> None:
+    user_id = await _user(db_session)
+    repo = BillingRepository(db_session)
+    await repo.insert_payment(user_id, _record("first-charge"))
+    await repo.insert_payment(user_id, _record("renewal", kind=PaymentKind.RENEWAL))
+    await db_session.commit()
+
+    first = await repo.first_payment_of(PAYLOAD)
+
+    assert first is not None and first.charge_id == "first-charge" and first.amount == 10
+    assert await repo.first_payment_of("v2:s:42:2026-10-03:ffffffffffff") is None
+
+
+async def test_unsettled_refunds_are_foreign_paid_rows_and_refunding_ones_only(
+    db_session: AsyncSession,
+) -> None:
+    user_id = await _user(db_session)
+    repo = BillingRepository(db_session)
+    await repo.insert_payment(user_id, _record("ours"))
+    await repo.insert_payment(
+        user_id, _record("foreign", payload="чужое", kind=PaymentKind.UNKNOWN)
+    )
+    await repo.insert_payment(user_id, _record("half", payload="v2:s:42:2026-10-03:" + "h" * 12))
+    await repo.mark_refunding("half")
+    await repo.insert_payment(user_id, _record("done", payload="v2:s:42:2026-10-03:" + "d" * 12))
+    await repo.mark_refunded("done")
+    await db_session.commit()
+
+    found = {
+        p.charge_id for p in await repo.unsettled_refunds(datetime.now(UTC) + timedelta(hours=1))
+    }
+    young = await repo.unsettled_refunds(datetime.now(UTC) - timedelta(days=1))
+
+    assert found == {"foreign", "half"}
+    assert young == [], "платёж моложе границы сверка не трогает"
+
+
+async def test_a_reconciled_payment_remembers_where_it_came_from(
+    db_session: AsyncSession,
+) -> None:
+    user_id = await _user(db_session)
+    repo = BillingRepository(db_session)
+    base = _record("found-later")
+    record = PaymentRecord(
+        charge_id=base.charge_id,
+        tg_user_id=base.tg_user_id,
+        amount=base.amount,
+        currency=base.currency,
+        kind=base.kind,
+        invoice_payload=base.invoice_payload,
+        is_recurring=base.is_recurring,
+        is_first_recurring=base.is_first_recurring,
+        period_end=base.period_end,
+        raw=base.raw,
+        source=FROM_RECONCILE,
+        period_end_estimated=True,
+    )
+
+    await repo.insert_payment(user_id, record)
+    await db_session.commit()
+
+    row = await db_session.scalar(
+        select(models.Payment).where(models.Payment.external_id == "found-later")
+    )
+    assert row is not None and row.source == "reconcile" and row.period_end_estimated is True
+    plain = await repo.insert_payment(user_id, _record("from-update"))
+    await db_session.commit()
+    stored = await db_session.scalar(
+        select(models.Payment).where(models.Payment.external_id == "from-update")
+    )
+    assert plain and stored is not None and stored.source == "update"
+
+
+async def test_an_event_by_kind_and_charge_is_found(db_session: AsyncSession) -> None:
+    repo = BillingRepository(db_session)
+    await repo.record_event(
+        BillingEvent(EventKind.RECONCILE_GAP, 42, {"stage": "gap"}, charge_id="gap-1")
+    )
+    await db_session.commit()
+
+    assert await repo.has_event(EventKind.RECONCILE_GAP, "gap-1") is True
+    assert await repo.has_event(EventKind.RECONCILE_GAP, "gap-2") is False
+    assert await repo.has_event(EventKind.REFUND_STUCK, "gap-1") is False

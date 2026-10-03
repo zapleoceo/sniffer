@@ -188,6 +188,9 @@ payments          is_first_recurring     # первый платёж подпи�
 payments          period_end             # срок от Telegram, не наша арифметика
 payments          refunded_at            # когда вернули
 payments          raw                    # SuccessfulPayment как пришёл
+subscriptions     priority               # 016_stars_slots: порядок претензии на слот мониторинга
+payments          source                 # 016_stars_slots: апдейт или сверка
+payments          period_end_estimated   # 016_stars_slots: срок посчитан сверкой, а не взят у Telegram
 schema_proposals                         # хвост цепочки на момент введения таблицы (004)
 SENTINELS
 }

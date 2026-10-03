@@ -28,7 +28,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sniffer.domain import plans
-from sniffer.domain.billing import PaymentKind, Reason
+from sniffer.domain.billing import FROM_UPDATE, PaymentKind, Reason, StoredPayment
 
 PAYLOAD_VERSION = "v2"
 # Ограничение Telegram на нагрузку счёта, байт.
@@ -115,6 +115,9 @@ class PaymentFacts:
     is_recurring: bool
     is_first_recurring: bool
     raw: dict[str, Any]
+    source: str = FROM_UPDATE
+    # Срок в `expiration` придуман сверкой (дата платежа + период), а не прислан Telegram.
+    expiration_estimated: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,10 +137,21 @@ def check_buyer(buyer_id: int | None, payload: InvoicePayload) -> Reason | None:
 
 
 def check_price(currency: str, amount: int) -> Reason | None:
-    """Валюта и сумма — те, что в тарифе СЕЙЧАС, а не те, что были при выписке счёта."""
+    """Валюта и сумма — те, что в тарифе СЕЙЧАС: новый счёт и первый платёж подписки."""
+    return check_amount(currency, amount, plans.SUBSCRIPTION_STARS)
+
+
+def check_amount(currency: str, amount: int, expected: int | None) -> Reason | None:
+    """Сверка с заданной суммой. У продления это сумма ПЕРВОГО платежа этой подписки.
+
+    Цена подписки фиксируется при выписке счёта, и после смены тарифа продление старого
+    подписчика законно идёт по прежней цене: сверка с текущей вернула бы честный платёж
+    как «не наш». `None` — сверять нечем (журнал не ответил): сумма не проверяется,
+    валюта по-прежнему да.
+    """
     if currency != plans.SUBSCRIPTION_CURRENCY:
         return Reason.WRONG_CURRENCY
-    if amount != plans.SUBSCRIPTION_STARS:
+    if expected is not None and amount != expected:
         return Reason.WRONG_AMOUNT
     return None
 
@@ -152,9 +166,25 @@ class Classification:
     period_end: datetime | None = None
     # Срок посчитан нами, потому что Telegram его не прислал: это оценка, а не факт.
     estimated: bool = False
+    # Telegram прислал дату, которой верить нельзя (ноль, прошлое, далёкое будущее):
+    # срок тоже оценка, а владельцу — сообщение. «Нет даты» и «дата 0» — разные случаи.
+    date_anomaly: bool = False
 
 
-def classify_payment(facts: PaymentFacts, now: datetime) -> Classification:
+# Здравый смысл для даты окончания от Telegram: абсолютные границы, а не «около сейчас» —
+# часы приложения тут ни при чём. Звёздных подписок до 2024 года не существует, так что
+# нулевая дата (1970) и всё, что раньше, — не срок.
+_EARLIEST = datetime(2024, 1, 1, tzinfo=UTC)
+_LATEST = datetime(2100, 1, 1, tzinfo=UTC)
+
+
+def classify_payment(
+    facts: PaymentFacts,
+    now: datetime,
+    *,
+    first: StoredPayment | None = None,
+    first_unknown: bool = True,
+) -> Classification:
     """Платёж → подписка (первый платёж или продление) либо «не наш», который вернётся сам.
 
     Срок берём у Telegram (`subscription_expiration_date`): продлевает подписку он, и его
@@ -162,31 +192,51 @@ def classify_payment(facts: PaymentFacts, now: datetime) -> Classification:
     помечена как оценка. Платёж, у которого нет ни одного признака подписки, подпиской не
     считается: счёт был выписан как подписочный, и разовая оплата по нему — сбой Telegram
     или подделка, а не покупка.
+
+    Первый платёж подписки узнаётся ДВУМЯ признаками: флаг `is_first_recurring` и отсутствие
+    записи о первом платеже в журнале (`first is None`). Каждый нужен: флаг теряется, если
+    Telegram его не прислал, запись — если журнал недоступен был в первый раз. Первый платёж
+    сверяется с текущей ценой, продление — с суммой первого платежа (см. `check_price`).
+    `first_unknown` — журнал не спрашивали или он не ответил: продление принимается без
+    сверки суммы (по умолчанию: вызывающий, который про журнал не знает, ничего не сверяет).
     """
     payload = parse_payload(facts.payload)
     if isinstance(payload, Reason):
         return Classification(PaymentKind.UNKNOWN, payload)
-    refusal = check_price(facts.currency, facts.total_amount) or check_buyer(
+    is_first = (
+        facts.is_first_recurring
+        or (facts.expiration is not None and not facts.is_recurring)
+        or (first is None and not first_unknown)
+    )
+    expected: int | None = plans.SUBSCRIPTION_STARS
+    if not is_first:
+        expected = None if first is None else first.amount
+    refusal = check_amount(facts.currency, facts.total_amount, expected) or check_buyer(
         facts.payer_id, payload
     )
     if refusal is not None:
         return Classification(PaymentKind.UNKNOWN, refusal, payload)
-    if facts.is_first_recurring or (facts.expiration is not None and not facts.is_recurring):
-        kind = PaymentKind.FIRST
-    elif facts.is_recurring:
-        kind = PaymentKind.RENEWAL
-    else:
+    if not (facts.is_recurring or facts.is_first_recurring or facts.expiration is not None):
         return Classification(PaymentKind.UNKNOWN, Reason.NOT_A_SUBSCRIPTION, payload)
+    kind = PaymentKind.FIRST if is_first else PaymentKind.RENEWAL
     period_end = _from_unix(facts.expiration)
+    estimate = now + timedelta(seconds=plans.SUBSCRIPTION_PERIOD_S)
     if period_end is None:
-        estimate = now + timedelta(seconds=plans.SUBSCRIPTION_PERIOD_S)
         return Classification(kind, None, payload, estimate, estimated=True)
+    if facts.expiration_estimated:
+        return Classification(kind, None, payload, period_end, estimated=True)
+    if not _EARLIEST <= period_end <= _LATEST:
+        return Classification(kind, None, payload, estimate, estimated=True, date_anomaly=True)
     return Classification(kind, None, payload, period_end)
 
 
 def _from_unix(stamp: int | None) -> datetime | None:
-    """Дата от Telegram либо `None`, если её нет или она абсурдна (не роняем запись платежа)."""
-    if not stamp:
+    """Дата от Telegram либо `None`, если её нет или она не читается (не роняем запись платежа).
+
+    Ноль — это дата (1970 год), а не «нет даты»: `if not stamp` склеивал их, и платёж с
+    нулевым сроком выглядел как платёж без срока.
+    """
+    if stamp is None:
         return None
     try:
         return datetime.fromtimestamp(stamp, tz=UTC)

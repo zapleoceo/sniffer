@@ -40,12 +40,12 @@ from sniffer.domain.records import (
     Chat,
     DiscoveryCandidate,
     Listing,
-    Payment,
     RawMessage,
     SubscriptionState,
 )
 from sniffer.domain.threads import MAX_LIVE_THREADS
 from sniffer.pipeline.gate import GateResult
+from tests.subscription_support import grant
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("TEST_DATABASE_URL"),
@@ -1338,77 +1338,6 @@ async def test_one_broken_message_does_not_stop_the_whole_batch(
 # ── деньги: подписка за звёзды ──────────────────────────────────────────────
 
 
-async def test_the_same_payment_never_extends_a_subscription_twice(
-    db_session: AsyncSession,
-) -> None:
-    """Идемпотентность платежа. Telegram ПОВТОРЯЕТ апдейт, если бот не ответил.
-
-    Проверять надо на живой базе: держится всё на `payments.external_id UNIQUE`
-    и `ON CONFLICT DO NOTHING`, а на подделке ни того, ни другого нет. Деньги
-    нельзя обработать «примерно один раз».
-    """
-    passport = Passport(intent=Intent.BUY, category=Category.MOTORBIKE, city="nha_trang")
-    user = await UserRepository(db_session).get_or_create(777, username="платящий")
-    assert user.id is not None
-    stored = await PassportRepository(db_session).save_new(user.id, passport)
-    await db_session.commit()
-
-    repo = DeliveryRepository(db_session)
-    payment = Payment(user_id=user.id, amount=1, external_id="charge-повтор")
-    until = NOW + timedelta(days=30)
-
-    first = await repo.pay_and_activate(
-        payment, passport_root=stored.id, until=until, since_listing_id=100
-    )
-    await db_session.commit()
-    second = await repo.pay_and_activate(
-        payment, passport_root=stored.id, until=until + timedelta(days=30), since_listing_id=999
-    )
-    await db_session.commit()
-
-    assert (first, second) == (True, False), "повторный апдейт не должен продлевать"
-    state = await repo.subscription_for(user_id=user.id, passport_root=stored.id)
-    assert state is not None
-    assert state.expires_at == until, "срок остался от первого платежа"
-    assert state.since_listing_id == 100, "точка отсчёта не сдвинулась"
-
-
-async def test_a_renewal_extends_the_term_but_keeps_the_starting_point(
-    db_session: AsyncSession,
-) -> None:
-    """Продление сдвигает срок и НЕ трогает точку отсчёта.
-
-    Иначе клиент терял бы всё, что накопилось за оплаченный месяц: подписка
-    начинала бы считать «новое» заново с момента списания.
-    """
-    passport = Passport(intent=Intent.BUY, category=Category.MOTORBIKE, city="nha_trang")
-    user = await UserRepository(db_session).get_or_create(778)
-    assert user.id is not None
-    stored = await PassportRepository(db_session).save_new(user.id, passport)
-    await db_session.commit()
-
-    repo = DeliveryRepository(db_session)
-    await repo.pay_and_activate(
-        Payment(user_id=user.id, amount=1, external_id="месяц-1"),
-        passport_root=stored.id,
-        until=NOW + timedelta(days=30),
-        since_listing_id=50,
-    )
-    await db_session.commit()
-    await repo.pay_and_activate(
-        Payment(user_id=user.id, amount=1, external_id="месяц-2", is_recurring=True),
-        passport_root=stored.id,
-        until=NOW + timedelta(days=60),
-        since_listing_id=900,
-    )
-    await db_session.commit()
-
-    state = await repo.subscription_for(user_id=user.id, passport_root=stored.id)
-    assert state is not None
-    assert state.expires_at == NOW + timedelta(days=60)
-    assert state.since_listing_id == 50, "продление не начинает слежение заново"
-
-
 async def test_an_expired_subscription_stops_receiving_cards(db_session: AsyncSession) -> None:
     """Кончились деньги — кончилась рассылка, и без всякого сторожа.
 
@@ -1422,13 +1351,7 @@ async def test_an_expired_subscription_stops_receiving_cards(db_session: AsyncSe
     stored = await PassportRepository(db_session).save_new(user.id, passport)
     await db_session.commit()
 
-    repo = DeliveryRepository(db_session)
-    await repo.pay_and_activate(
-        Payment(user_id=user.id, amount=1, external_id="истёкший"),
-        passport_root=stored.id,
-        until=NOW,
-        since_listing_id=0,
-    )
+    await grant(db_session, user.id, stored.id, until=NOW)
     await db_session.commit()
 
     assert await _live(db_session, now=NOW - timedelta(days=1)) != []
@@ -1440,12 +1363,7 @@ async def test_paid_monitor_can_be_paused_and_resumed(db_session: AsyncSession) 
     assert user.id is not None
     stored = await PassportRepository(db_session).save_new(user.id, _passport(400))
     repo = DeliveryRepository(db_session)
-    await repo.pay_and_activate(
-        Payment(user_id=user.id, amount=1, external_id="пауза"),
-        passport_root=stored.root,
-        until=datetime.now(UTC) + timedelta(days=30),
-        since_listing_id=0,
-    )
+    await grant(db_session, user.id, stored.root, until=datetime.now(UTC) + timedelta(days=30))
 
     assert await repo.set_active(user_id=user.id, passport_root=stored.root, active=False)
     assert await _live(db_session) == []
@@ -1492,11 +1410,8 @@ async def test_a_subscription_only_gets_listings_newer_than_itself(
     await db_session.commit()
     assert seen.id is not None
 
-    await DeliveryRepository(db_session).pay_and_activate(
-        Payment(user_id=user.id, amount=1, external_id="за-новое"),
-        passport_root=stored.id,
-        until=NOW + timedelta(days=30),
-        since_listing_id=seen.id,
+    await grant(
+        db_session, user.id, stored.id, until=NOW + timedelta(days=30), since_listing_id=seen.id
     )
     fresh = await listings.add(_card(new_raw, "Появилось после подписки"))
     await db_session.commit()

@@ -222,6 +222,7 @@ def test_the_guard_module_names_where_the_root_is_caught() -> None:
 
 SERVICES = [SRC / "bot" / name for name in ("billing_service.py", "billing_payments.py")]
 SERVICES.append(SRC / "bot" / "billing_support.py")
+SERVICES.append(SRC / "bot" / "billing_reconcile.py")
 # Единственный метод, где порты зовутся прямо: его целиком вызывает `Flow.step` через lambda.
 DIRECT_CALLERS = {"_issue"}
 
@@ -237,7 +238,7 @@ def unguarded_port_calls(source: str) -> list[str]:
             isinstance(inner, ast.Attribute)
             and isinstance(inner.value, ast.Name)
             and inner.value.id == "self"
-            and inner.attr in {"_ledger", "_api"}
+            and inner.attr in {"_ledger", "_api", "_slots"}
         ):
             continue
         current: ast.AST = node

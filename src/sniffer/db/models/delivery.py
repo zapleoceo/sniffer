@@ -58,6 +58,9 @@ class Subscription(BigIdMixin, Base):
     overflow_notified: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=FALSE)
     no_slot_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     day_bucket: Mapped[date | None] = mapped_column(Date)
+    # Порядок претензии на слот мониторинга (016_stars_slots.sql): слоты берут первые
+    # по (priority, id); перенос слота — смена порядка, а не удаление мониторинга.
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, server_default=ZERO)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=NOW
     )
@@ -101,6 +104,11 @@ class Payment(BigIdMixin, Base):
     period_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     refunded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     raw: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    # Откуда запись (016_stars_slots.sql): апдейт Telegram или сверка; срок сверки — оценка.
+    source: Mapped[str] = mapped_column(Text, nullable=False, server_default=sa_text("'update'"))
+    period_end_estimated: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=FALSE
+    )
 
 
 class Notification(BigIdMixin, Base):

@@ -21,6 +21,7 @@ import asyncio
 import secrets
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 import structlog
 
@@ -129,6 +130,10 @@ def _new_nonce() -> str:
     return secrets.token_hex(6)
 
 
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
 class BillingService:
     def __init__(
         self,
@@ -136,22 +141,28 @@ class BillingService:
         ledger: Ledger,
         api: BotApi,
         owner_id: int,
+        sales_enabled: bool,
         nonce: Callable[[], str] = _new_nonce,
+        clock: Callable[[], datetime] = _utcnow,
     ) -> None:
         self._ledger = ledger
         self._api = api
         self._owner_id = owner_id
+        self._sales_enabled = sales_enabled
         self._nonce = nonce
+        self._clock = clock
 
     @property
     def enabled(self) -> bool:
-        """Подписку продаём только когда есть кому отвечать за возвраты и обращения.
+        """Подписку продаём, когда продажа ВКЛЮЧЕНА и есть кому отвечать за возвраты.
 
-        Владелец не задан — некому вернуть звёзды и получить `/paysupport`, а это
-        обязательное условие Telegram к платным ботам. Продавать нельзя; уже выданные
-        ссылки продолжают работать (платёж никогда не остаётся без разбора).
+        Флаг `SALES_ENABLED` (по умолчанию выкл) отделён от владельца: владелец в проде
+        задан всегда, а продавать можно только когда оплаченный слот работает. Владелец не
+        задан — некому вернуть звёзды и получить `/paysupport`, а это обязательное условие
+        Telegram к платным ботам. Уже выданные ссылки продолжают работать в обоих случаях
+        (платёж никогда не остаётся без разбора).
         """
-        return self._owner_id != 0
+        return self._sales_enabled and self._owner_id != 0
 
     # ── покупка ─────────────────────────────────────────────────────────────
 
@@ -160,7 +171,9 @@ class BillingService:
         if not self.enabled:
             return Confirmation(words.BILLING_OFF, offer=False)
         flow = Flow("confirmation")
-        live = await flow.step("live", lambda: self._ledger.live_subscriptions(tg_user_id))
+        live = await flow.step(
+            "live", lambda: self._ledger.live_subscriptions(tg_user_id, self._clock())
+        )
         flow.finish()
         if not live.ok:
             return Confirmation(words.UNAVAILABLE, offer=False)
@@ -176,7 +189,7 @@ class BillingService:
         return issued.value if issued.ok else None
 
     async def _issue(self, tg_user_id: int) -> Link:
-        live = await self._ledger.live_subscriptions(tg_user_id)
+        live = await self._ledger.live_subscriptions(tg_user_id, self._clock())
         # Согласие пишется ДО ссылки: ссылка без записанного согласия — это покупка,
         # в которой нельзя доказать, что клиент прочитал условия.
         await self._ledger.record_consent(tg_user_id, words.TERMS_DOC, words.TERMS_VERSION)

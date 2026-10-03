@@ -17,9 +17,9 @@ from aiogram.filters.callback_data import CallbackData
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from sniffer.bot import wording_plan
-from sniffer.bot.billing_wording import SUBSCRIBE_LABEL
 from sniffer.bot.conversation import Reply
 from sniffer.bot.paging import MoreOffer, all_label, more_label
+from sniffer.bot.slot_wording import FOLLOW_LABEL
 from sniffer.bot.threads import labels
 from sniffer.config import get_settings
 from sniffer.domain.records import QueryOverview
@@ -28,9 +28,10 @@ from sniffer.domain.records import QueryOverview
 # ряд ещё читаются, длинные подписи телефон обрежет.
 ROW = 2
 
-# Подпись «Следить» с ценой — `billing_wording.SUBSCRIBE_LABEL`: цена стоит прямо на
-# кнопке (кнопка, ведущая к счёту без предупреждения о деньгах, — тёмный паттерн, даже
-# если речь про звезду), а число звёзд берётся из тарифа и здесь не пишется.
+# «Следить» цены на кнопке не несёт (`slot_wording.FOLLOW_LABEL`): у подписчика со свободным
+# слотом оно ничего не стоит, а остальных кнопка ведёт на экран подтверждения с ценой, где
+# до согласия ничего не списывается. Кнопка с ценой, которая не списывает, врала бы так же,
+# как кнопка без цены, которая списывает.
 
 # Отдельная ветка на каждый поиск — то, из-за чего уточнение не уезжает в чужой
 # паспорт. Подпись говорит «новый», а не «сбросить»: прежний поиск остаётся.
@@ -150,7 +151,7 @@ def markup(reply: Reply) -> InlineKeyboardMarkup | None:
             rows.append(
                 [
                     InlineKeyboardButton(
-                        text=SUBSCRIBE_LABEL,
+                        text=FOLLOW_LABEL,
                         callback_data=SubscribeCallback(root=reply.passport_root or 0).pack(),
                     )
                 ]
@@ -253,7 +254,7 @@ def request_actions(item: QueryOverview) -> InlineKeyboardMarkup:
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=SUBSCRIBE_LABEL, callback_data=SubscribeCallback(root=item.root).pack()
+                    text=FOLLOW_LABEL, callback_data=SubscribeCallback(root=item.root).pack()
                 )
             ]
         )

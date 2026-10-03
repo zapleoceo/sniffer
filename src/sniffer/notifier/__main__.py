@@ -17,6 +17,11 @@ from aiogram import Bot
 from aiogram.enums import ParseMode
 from aiogram.types import LinkPreviewOptions
 
+from sniffer.bot.billing_ledger import DbLedger
+from sniffer.bot.billing_payments import PaymentDesk
+from sniffer.bot.billing_reconcile import INTERVAL, Every, StarsReconciler
+from sniffer.bot.billing_slots import DbSlots
+from sniffer.bot.billing_telegram import AiogramBotApi
 from sniffer.config import Settings, get_settings
 from sniffer.notifier.delivery import Delivery, Sender
 from sniffer.notifier.policy import policy_from
@@ -41,12 +46,34 @@ async def run(stop: asyncio.Event) -> None:
     settings = get_settings()
     bot = Bot(token=settings.bot_token, session=bot_session(settings))
     delivery = Delivery(_sender(bot), policy=policy_from(settings))
+    reconciler = _reconciler(bot, settings)
+    every = Every(INTERVAL)
+
+    async def tick() -> int:
+        # Сверка платежей живёт здесь, потому что здесь уже есть Bot и база; ритм — раз в
+        # четверть часа и сразу при старте. Её сбой доставку не останавливает: каждый
+        # шаг сверки охраняется сам (`billing_guard.Flow`).
+        return await delivery.tick() + await every.run(reconciler.tick)
+
     try:
-        await idle_loop(stop, delivery.tick, service=NAME, poll_interval_s=POLL_INTERVAL_S)
+        await idle_loop(stop, tick, service=NAME, poll_interval_s=POLL_INTERVAL_S)
     finally:
         # Сессия aiohttp живёт внутри Bot: не закрыть её значит оставить
         # предупреждение в логе на каждой остановке контейнера.
         await bot.session.close()
+
+
+def _reconciler(bot: Bot, settings: Settings) -> StarsReconciler:
+    api, ledger, slots = AiogramBotApi(bot), DbLedger(), DbSlots()
+    owner = settings.owner_chat_id
+    desk = PaymentDesk(
+        ledger=ledger,
+        api=api,
+        slots=slots,
+        owner_id=owner,
+        reply_hours=settings.paysupport_reply_hours,
+    )
+    return StarsReconciler(ledger=ledger, api=api, slots=slots, desk=desk, owner_id=owner)
 
 
 def _sender(bot: Bot) -> Sender:

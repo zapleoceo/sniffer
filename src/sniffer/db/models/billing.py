@@ -23,7 +23,7 @@ class UserConsent(Base):
     __tablename__ = "user_consents"
 
     user_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("users.id", ondelete="RESTRICT"), primary_key=True
+        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
     )
     doc: Mapped[str] = mapped_column(Text, primary_key=True)
     version: Mapped[str] = mapped_column(Text, primary_key=True)

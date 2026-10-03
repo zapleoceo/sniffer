@@ -10,10 +10,17 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Protocol
 
-from sniffer.domain.billing import BillingEvent, EventKind, PaymentRecord, StoredPayment
+from sniffer.domain.billing import (
+    BillingEvent,
+    EventKind,
+    PaymentRecord,
+    StarTransaction,
+    StoredPayment,
+)
+from sniffer.domain.slots import SlotState
 
 
 class BotApiError(Exception):
@@ -37,6 +44,10 @@ class BotApi(Protocol):
 
     async def send_text(self, chat_id: int, text: str) -> None: ...
 
+    async def star_transactions(self, *, offset: int, limit: int) -> list[StarTransaction]:
+        """Страница истории звёзд бота, свежие первыми (`getStarTransactions`)."""
+        ...
+
 
 class Ledger(Protocol):
     """Журнал платежей. Реализация на базе — `bot/billing_ledger.py`.
@@ -53,11 +64,27 @@ class Ledger(Protocol):
 
     async def recent_payments(self, tg_user_id: int, limit: int) -> list[StoredPayment]: ...
 
+    async def mark_refunding(self, charge_id: str) -> bool:
+        """Решение вернуть платёж записано ДО вызова Telegram. `False` — уже не `paid`."""
+        ...
+
     async def mark_refunded(self, charge_id: str) -> bool: ...
+
+    async def first_payment_of(self, invoice_payload: str) -> StoredPayment | None:
+        """Самый ранний платёж подписки: с его суммой сверяются продления."""
+        ...
+
+    async def payments_since(self, since: datetime) -> list[StoredPayment]: ...
+
+    async def unsettled_refunds(self, older_than: datetime) -> list[StoredPayment]:
+        """Решено вернуть, но не доведено: `refunding` и «не наши» платежи, оставшиеся `paid`."""
+        ...
+
+    async def has_event(self, kind: EventKind, charge_id: str) -> bool: ...
 
     async def first_charge_of(self, invoice_payload: str) -> str | None: ...
 
-    async def live_subscriptions(self, tg_user_id: int) -> int: ...
+    async def live_subscriptions(self, tg_user_id: int, now: datetime) -> int: ...
 
     async def record_consent(self, tg_user_id: int, doc: str, version: str) -> None: ...
 
@@ -66,3 +93,11 @@ class Ledger(Protocol):
     async def record_event(self, event: BillingEvent) -> bool: ...
 
     async def events_within(self, tg_user_id: int, kind: EventKind, window: timedelta) -> int: ...
+
+
+class Slots(Protocol):
+    """Раскладка слотов мониторинга по платежам. Адаптер — `bot/billing_slots.py`."""
+
+    async def sync(self, tg_user_id: int, now: datetime) -> SlotState:
+        """Пересчитать сроки мониторингов клиента по журналу. Идемпотентно."""
+        ...

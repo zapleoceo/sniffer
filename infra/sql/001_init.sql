@@ -370,6 +370,8 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     overflow_count    INT         NOT NULL DEFAULT 0,
     overflow_notified BOOLEAN     NOT NULL DEFAULT FALSE,
     no_slot_since     TIMESTAMPTZ,
+    -- Порядок претензии на слот мониторинга (016_stars_slots.sql).
+    priority       INT         NOT NULL DEFAULT 0,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (user_id, passport_root)
 );
@@ -434,7 +436,10 @@ CREATE TABLE IF NOT EXISTS payments (
     is_first_recurring BOOLEAN  NOT NULL DEFAULT FALSE,
     period_end      TIMESTAMPTZ,
     refunded_at     TIMESTAMPTZ,
-    raw             JSONB
+    raw             JSONB,
+    -- Слоты (016_stars_slots.sql): откуда запись и оценка ли срок.
+    source          TEXT        NOT NULL DEFAULT 'update',
+    period_end_estimated BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 CREATE INDEX IF NOT EXISTS payments_user_idx ON payments (user_id, created_at DESC);

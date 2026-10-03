@@ -9,10 +9,10 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import cast
 
-from sqlalchemy import Table, func, select, update
+from sqlalchemy import Table, and_, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from sniffer.db import models
@@ -20,6 +20,7 @@ from sniffer.db.repositories.base import Repository
 from sniffer.domain.billing import (
     PAID,
     REFUNDED,
+    REFUNDING,
     BillingEvent,
     EventKind,
     PaymentKind,
@@ -51,6 +52,8 @@ class BillingRepository(Repository):
                 is_recurring=record.is_recurring,
                 is_first_recurring=record.is_first_recurring,
                 period_end=record.period_end,
+                period_end_estimated=record.period_end_estimated,
+                source=record.source,
                 raw=record.raw,
             )
             .on_conflict_do_nothing(index_elements=["external_id"])
@@ -79,6 +82,21 @@ class BillingRepository(Repository):
         )
         return [_stored(payment, tg_id) for payment, tg_id in rows]
 
+    async def mark_refunding(self, charge_id: str) -> bool:
+        """Решено вернуть: пишется ДО вызова Telegram. `False` — платёж уже не `paid`.
+
+        Слот такой платёж больше не держит (живые подписки считают только `paid`), а
+        сообщение о возврате, пришедшее раньше нашей отметки «возвращён», опознаётся как
+        наше по этому статусу.
+        """
+        changed = await self._session.execute(
+            update(models.Payment)
+            .where(models.Payment.external_id == charge_id, models.Payment.status == PAID)
+            .values(status=REFUNDING)
+            .returning(models.Payment.id)
+        )
+        return changed.scalar_one_or_none() is not None
+
     async def mark_refunded(self, charge_id: str) -> bool:
         """Платёж возвращён. `False` — он уже был помечен или его нет в журнале.
 
@@ -104,26 +122,94 @@ class BillingRepository(Repository):
         )
         return charge
 
-    async def live_subscriptions(self, user_id: int) -> int:
-        """Сколько подписок клиента оплачено прямо сейчас.
+    async def first_payment_of(self, invoice_payload: str) -> StoredPayment | None:
+        """Самый ранний платёж подписки (по записи в журнале), со всеми полями."""
+        row = (
+            await self._session.execute(
+                select(models.Payment, models.User.tg_user_id)
+                .join(models.User, models.User.id == models.Payment.user_id)
+                .where(models.Payment.invoice_payload == invoice_payload)
+                .order_by(models.Payment.created_at, models.Payment.id)
+                .limit(1)
+            )
+        ).first()
+        return None if row is None else _stored(row[0], row[1])
 
-        Подписка — это счёт (`invoice_payload`); срок у неё — максимум `period_end`
-        по не возвращённым платежам, поэтому возврат последнего продления сам
-        укорачивает срок. Сравнение со временем — часами базы, а не приложения.
+    async def payments_since(self, since: datetime) -> list[StoredPayment]:
+        rows = await self._session.execute(
+            select(models.Payment, models.User.tg_user_id)
+            .join(models.User, models.User.id == models.Payment.user_id)
+            .where(models.Payment.created_at >= since)
+            .order_by(models.Payment.created_at, models.Payment.id)
+        )
+        return [_stored(payment, tg_id) for payment, tg_id in rows]
+
+    async def unsettled_refunds(self, older_than: datetime) -> list[StoredPayment]:
+        """Возврат решён, но не доведён: `refunding` либо «не наш» платёж, оставшийся `paid`.
+
+        Падение процесса между записью «не нашего» платежа и вызовом возврата оставляет
+        именно такую строку; без этого запроса она жила бы вечно. `older_than` не даёт
+        сверке перехватить возврат, который прямо сейчас делает обработчик апдейта.
         """
-        live = (
-            select(models.Payment.invoice_payload)
+        rows = await self._session.execute(
+            select(models.Payment, models.User.tg_user_id)
+            .join(models.User, models.User.id == models.Payment.user_id)
+            .where(
+                models.Payment.created_at < older_than,
+                or_(
+                    models.Payment.status == REFUNDING,
+                    and_(
+                        models.Payment.status == PAID,
+                        models.Payment.kind == PaymentKind.UNKNOWN.value,
+                    ),
+                ),
+            )
+            .order_by(models.Payment.created_at, models.Payment.id)
+        )
+        return [_stored(payment, tg_id) for payment, tg_id in rows]
+
+    async def has_event(self, kind: EventKind, charge_id: str) -> bool:
+        found = await self._session.scalar(
+            select(models.BillingEvent.id)
+            .where(
+                models.BillingEvent.kind == kind.value, models.BillingEvent.charge_id == charge_id
+            )
+            .limit(1)
+        )
+        return found is not None
+
+    async def live_period_ends(self, user_id: int, now: datetime) -> list[datetime]:
+        """Сроки живых подписок клиента, самый долгий первым: по одному на подписку.
+
+        Подписка — это счёт (`invoice_payload`); срок — максимум `period_end` по её платежам
+        со статусом `paid`, поэтому возврат последнего продления сам укорачивает срок, а
+        платёж, который решено вернуть (`refunding`), слота уже не держит. «Сейчас»
+        приходит от вызывающего, а не с часов базы: пересчёт слотов и квота обязаны
+        видеть один и тот же момент.
+        """
+        ends = (
+            select(func.max(models.Payment.period_end).label("ends"))
             .where(
                 models.Payment.user_id == user_id,
                 models.Payment.invoice_payload.is_not(None),
                 models.Payment.kind.in_([PaymentKind.FIRST.value, PaymentKind.RENEWAL.value]),
-                models.Payment.status != REFUNDED,
+                models.Payment.status == PAID,
             )
             .group_by(models.Payment.invoice_payload)
-            .having(func.max(models.Payment.period_end) > func.now())
             .subquery()
         )
-        return int(await self._session.scalar(select(func.count()).select_from(live)) or 0)
+        rows = await self._session.scalars(
+            select(ends.c.ends).where(ends.c.ends > now).order_by(ends.c.ends.desc())
+        )
+        return list(rows)
+
+    async def live_subscriptions(self, user_id: int, now: datetime) -> int:
+        """Сколько подписок клиента оплачено в момент `now` — число слотов.
+
+        Ровно длина списка сроков: число слотов и сроки, которые раскладываются по
+        мониторингам, не могут разойтись, потому что считаются одним запросом.
+        """
+        return len(await self.live_period_ends(user_id, now))
 
     async def record_consent(self, user_id: int, doc: str, version: str) -> None:
         """Клиент согласился с этой версией документа. Повтор ничего не меняет."""
