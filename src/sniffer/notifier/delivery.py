@@ -208,6 +208,9 @@ class Delivery:
             # Строка остаётся в очереди нетронутой, попытка ей не засчитывается.
             self._paused_until = lead.until
             log.warning("notifier.paused", until=lead.until, reason=lead.note)
+            # Пауза пришла, возможно, после `_to_general`: связь темы уже переведена в `lost`, и
+            # без коммита сессия закрылась бы откатом — следующий проход снова искал бы тему.
+            await work.commit()
             return Step(sent=0, called=True, halt=True)
         if lead.action is Action.BLOCK:
             await work.users.set_bot_blocked(held[0].recipient_id, blocked=True, at=now)

@@ -15,6 +15,14 @@
 * **пересчёт слотов** у всех, у кого за последние дни были платежи: если пересчёт после
   платежа не удался, он удастся здесь.
 
+Режимы (`RECONCILE_MODE`): `off` — сверка не ходит; `report` (по умолчанию) — читает историю
+и только сообщает владельцу, что сделала бы; `refund` — записывает недостающее и возвращает.
+Платёж со счётом старой модели (`sub:N`) не возвращается автоматически ни в каком режиме.
+
+История листается ДО КОНЦА, а не «первые страницы»: справочник Bot API обещает лишь
+«в хронологическом порядке», направление не названо, и сверка не опирается на то, какие
+записи свежее.
+
 Каждый шаг охраняется до корня иерархии (`billing_guard.Flow`): сверка не роняет процесс
 нотифаера, у которого есть настоящая работа — доставка.
 """
@@ -25,12 +33,13 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 
 import structlog
 
 from sniffer.bot import billing_owner_wording as owner_words
 from sniffer.bot import billing_wording as words
-from sniffer.bot.billing import PaymentFacts
+from sniffer.bot.billing import PaymentFacts, is_legacy_payload
 from sniffer.bot.billing_guard import Attempt, Flow, describe
 from sniffer.bot.billing_payments import PaymentDesk, RefundResult
 from sniffer.bot.billing_ports import BotApi, Ledger, Slots
@@ -50,11 +59,19 @@ from sniffer.domain.slots import SlotState
 log = structlog.get_logger(__name__)
 
 INTERVAL = timedelta(minutes=15)
-PAGES = 5
+# 50 страниц по 100 — пять тысяч операций: на порядки больше нашей истории; упереться в
+# потолок значит не дойти до конца, и тогда отсутствие платежа ничего не доказывает.
+PAGES = 50
 PAGE_SIZE = 100
 # Платёж моложе этого срока ещё может обрабатываться обработчиком апдейта: сверка его не трогает.
 SETTLE_AFTER = timedelta(minutes=10)
 LOOKBACK = timedelta(days=2)
+
+
+class ReconcileMode(StrEnum):
+    OFF = "off"
+    REPORT = "report"
+    REFUND = "refund"
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +118,7 @@ class StarsReconciler:
         desk: PaymentDesk,
         owner_id: int,
         clock: Callable[[], datetime] = _utcnow,
+        mode: ReconcileMode = ReconcileMode.REPORT,
         pages: int = PAGES,
         page_size: int = PAGE_SIZE,
     ) -> None:
@@ -110,6 +128,7 @@ class StarsReconciler:
         self._desk = desk
         self._owner_id = owner_id
         self._clock = clock
+        self._mode = mode
         self._pages = pages
         self._page_size = page_size
 
@@ -119,6 +138,8 @@ class StarsReconciler:
         return report.handled
 
     async def reconcile(self) -> ReconcileReport:
+        if self._mode is ReconcileMode.OFF:
+            return ReconcileReport()
         flow = Flow("reconcile")
         now = self._clock()
         history, complete = await self._history(flow)
@@ -128,7 +149,7 @@ class StarsReconciler:
         recent = (
             await flow.step("recent", lambda: self._ledger.payments_since(now - LOOKBACK))
         ).or_else([])
-        recovered = await self._recover(flow, history)
+        recovered = await self._recover(flow, history, now)
         gaps = await self._gaps(flow, history, recent, complete=complete, now=now)
         marked = await self._mark_refunds(flow, history)
         settled = await self._settle(flow, now)
@@ -172,19 +193,39 @@ class StarsReconciler:
 
     # ── платёж без записи ───────────────────────────────────────────────────
 
-    async def _recover(self, flow: Flow, history: list[StarTransaction]) -> int:
+    async def _recover(self, flow: Flow, history: list[StarTransaction], now: datetime) -> int:
+        refunded = {tx.charge_id for tx in history if not tx.incoming}
         recovered = 0
         for tx in history:
             if not (tx.incoming and tx.invoice_payload is not None and tx.user_id is not None):
                 continue
+            # Свежий платёж ещё обрабатывает обработчик апдейта: тронуть его значило бы
+            # записать второй раз и ответить клиенту дважды.
+            if tx.date > now - SETTLE_AFTER:
+                continue
             known = await self._lookup(flow, tx.charge_id)
             if not known.ok or known.value is not None:
                 continue
-            await self._record_missing(flow, tx)
+            if self._mode is not ReconcileMode.REFUND or is_legacy_payload(tx.invoice_payload):
+                await self._report_missing(flow, tx)
+                continue
+            await self._record_missing(flow, tx, refunded=tx.charge_id in refunded)
             recovered += 1
         return recovered
 
-    async def _record_missing(self, flow: Flow, tx: StarTransaction) -> None:
+    async def _report_missing(self, flow: Flow, tx: StarTransaction) -> None:
+        user = tx.user_id or 0
+        await self._tell_owner_once(
+            flow,
+            EventKind.RECONCILE_REPORT,
+            tx.charge_id,
+            user,
+            owner_words.owner_report_missing(
+                tg_user_id=user, amount=tx.amount, charge_id=tx.charge_id
+            ),
+        )
+
+    async def _record_missing(self, flow: Flow, tx: StarTransaction, *, refunded: bool) -> None:
         period = timedelta(seconds=tx.subscription_period or plans.SUBSCRIPTION_PERIOD_S)
         facts = PaymentFacts(
             payer_id=tx.user_id,
@@ -200,7 +241,9 @@ class StarsReconciler:
             expiration_estimated=True,
         )
         replied = await flow.step("recover_payment", lambda: self._desk.on_payment(facts))
-        text = replied.or_else(None)
+        # Платёж, который в истории уже вернули, записывается (журнал сходится), но
+        # «спасибо» за него клиенту не уходит.
+        text = None if refunded else replied.or_else(None)
         user = tx.user_id
         if text is not None and user is not None:
             await flow.step("tell_client", lambda: self._api.send_text(user, text))
@@ -230,15 +273,18 @@ class StarsReconciler:
     ) -> int:
         seen = {tx.charge_id for tx in history if tx.incoming}
         oldest = min((tx.date for tx in history), default=None)
+        newest = max((tx.date for tx in history), default=None)
         gaps = 0
         for payment in recent:
             if payment.status == REFUNDED or payment.charge_id in seen:
                 continue
             if payment.created_at > now - SETTLE_AFTER:
                 continue
-            # Платёж старше самой давней строки неполной истории мог просто не поместиться
-            # на просмотренные страницы: о нём можно сказать, только если окно покрывает его.
-            if not complete and (oldest is None or payment.created_at < oldest):
+            # Неполная история — окно с неизвестного конца: платёж вне окна (старее самой
+            # давней или новее самой свежей строки) мог просто не попасть на страницы.
+            if not complete and not (
+                oldest is not None and newest is not None and oldest <= payment.created_at <= newest
+            ):
                 continue
             user = payment.tg_user_id or 0
             told = await self._tell_owner_once(
@@ -257,6 +303,8 @@ class StarsReconciler:
 
     async def _mark_refunds(self, flow: Flow, history: list[StarTransaction]) -> int:
         marked = 0
+        if self._mode is not ReconcileMode.REFUND:
+            return marked
         for tx in history:
             if tx.incoming:
                 continue
@@ -278,6 +326,9 @@ class StarsReconciler:
         )
         settled = 0
         for payment in stuck.or_else([]):
+            if self._mode is not ReconcileMode.REFUND or is_legacy_payload(payment.invoice_payload):
+                await self._report_refund(flow, payment)
+                continue
             result = await self._settle_one(flow, payment)
             outcome = result.value
             user = payment.tg_user_id
@@ -301,6 +352,20 @@ class StarsReconciler:
                 ),
             )
         return settled
+
+    async def _report_refund(self, flow: Flow, payment: StoredPayment) -> None:
+        user = payment.tg_user_id or 0
+        await self._tell_owner_once(
+            flow,
+            EventKind.RECONCILE_REPORT,
+            payment.charge_id,
+            user,
+            owner_words.owner_report_refund(
+                tg_user_id=user,
+                charge_id=payment.charge_id,
+                legacy=is_legacy_payload(payment.invoice_payload),
+            ),
+        )
 
     async def _resync(self, flow: Flow, recent: list[StoredPayment], now: datetime) -> int:
         users = sorted(

@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sniffer.db import models
 from sniffer.db.repositories import PassportRepository, UserRepository
 from sniffer.db.repositories.passport_edit import PassportEditor, StaleVersion
-from sniffer.db.repositories.watch import Move, WatchRepository
+from sniffer.db.repositories.watch import WatchRepository
 from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
 from sniffer.domain.passport_edit import Change, EditError
 
@@ -148,70 +148,23 @@ async def test_archive_is_idempotent_and_refuses_a_stranger(db_session: AsyncSes
     assert [(r.passport_root, r.state) for r in rows] == [(root, "archived")]
 
 
-async def test_a_live_slot_moves_with_its_money_and_a_clean_slate(db_session: AsyncSession) -> None:
-    user_id, (src, dst) = await user_with(db_session, 9, searches=2)
-    await subscribe(db_session, user_id, src)
-    watch = WatchRepository(db_session)
-
-    assert (
-        await watch.move_slot(user_id=user_id, from_root=src, to_root=dst, now=datetime.now(UTC))
-        is Move.MOVED
-    )
-    await db_session.commit()
-
-    sub = await db_session.scalar(select(models.Subscription))
-    assert sub is not None
-    assert sub.passport_root == dst
-    assert sub.charge_id == f"charge-{src}"  # ключ платежа и отмены не потерян
-    assert (sub.failed_streak, sub.last_error, sub.quarantined_until) == (0, None, None)
-    slots = await watch.live_slots(user_id, datetime.now(UTC))
-    assert [s.root for s in slots] == [dst]
-
-
-async def test_a_slot_does_not_move_onto_a_search_that_already_has_one(
-    db_session: AsyncSession,
-) -> None:
-    user_id, (a, b) = await user_with(db_session, 10, searches=2)
-    await subscribe(db_session, user_id, a)
-    await subscribe(db_session, user_id, b)
-    result = await WatchRepository(db_session).move_slot(
-        user_id=user_id, from_root=a, to_root=b, now=datetime.now(UTC)
-    )
-    assert result is Move.TARGET_BUSY
-
-
-async def test_an_expired_row_on_the_target_does_not_block_the_move(
-    db_session: AsyncSession,
-) -> None:
-    user_id, (a, b) = await user_with(db_session, 11, searches=2)
-    await subscribe(db_session, user_id, a)
-    await subscribe(db_session, user_id, b, days=-2)
-    result = await WatchRepository(db_session).move_slot(
-        user_id=user_id, from_root=a, to_root=b, now=datetime.now(UTC)
-    )
-    await db_session.commit()
-    assert result is Move.MOVED
-    assert len((await db_session.scalars(select(models.Subscription))).all()) == 1
-
-
-async def test_a_slot_moves_only_between_own_searches_and_only_if_there_is_one(
-    db_session: AsyncSession,
-) -> None:
-    user_id, (a, b) = await user_with(db_session, 12, searches=2)
-    other, (foreign,) = await user_with(db_session, 13)
-    watch = WatchRepository(db_session)
-    now = datetime.now(UTC)
-
-    assert await watch.move_slot(user_id=user_id, from_root=a, to_root=b, now=now) is Move.NO_SLOT
-    await subscribe(db_session, user_id, a)
-    assert (
-        await watch.move_slot(user_id=user_id, from_root=a, to_root=foreign, now=now)
-        is Move.NOT_FOUND
-    )
-    assert other != user_id
-
-
 async def test_an_expired_slot_is_not_a_slot(db_session: AsyncSession) -> None:
     user_id, (root,) = await user_with(db_session, 14)
     await subscribe(db_session, user_id, root, days=-1)
     assert await WatchRepository(db_session).live_slots(user_id, datetime.now(UTC)) == []
+
+
+async def test_an_action_inside_a_topic_does_not_move_the_general_chat_pointer(
+    db_session: AsyncSession,
+) -> None:
+    user_id, (general, other) = await user_with(db_session, 15, searches=2)
+    passports = PassportRepository(db_session)
+    assert await passports.select(user_id, general)
+
+    await passports.select(user_id, other, editing=True, move_pointer=False)
+    await db_session.commit()
+
+    user = await db_session.get(models.User, user_id, populate_existing=True)
+    assert user is not None
+    assert user.active_passport_root == general
+    assert user.editing_passport_root == other

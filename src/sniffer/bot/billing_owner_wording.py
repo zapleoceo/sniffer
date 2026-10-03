@@ -141,3 +141,23 @@ def owner_refund_stuck(*, tg_user_id: int, charge_id: str, error: str) -> str:
         f"🚨 Сверка не смогла довести возврат: charge {_code(charge_id)}, клиент "
         f"{_who(tg_user_id)}: {escape(error)}. Верните вручную: /refund {escape(charge_id)}"
     )
+
+
+def owner_report_missing(*, tg_user_id: int, amount: int, charge_id: str) -> str:
+    return (
+        f"🔎 Сверка (режим report, ничего не менялось): в истории Telegram есть платёж "
+        f"{_code(charge_id)} клиента {_who(tg_user_id)} на {amount} ⭐, в журнале его нет. "
+        "Запишите вручную или включите RECONCILE_MODE=refund, когда порядок истории проверен."
+    )
+
+
+def owner_report_refund(*, tg_user_id: int, charge_id: str, legacy: bool) -> str:
+    why_manual = (
+        "счёт старой модели (sub:N): автоматически не возвращается, решите сами"
+        if legacy
+        else "платёж «не наш» или возврат не доведён"
+    )
+    return (
+        f"🔎 Сверка (режим report, ничего не менялось): {why_manual}. charge "
+        f"{_code(charge_id)}, клиент {_who(tg_user_id)}. Вернуть: /refund {escape(charge_id)}"
+    )

@@ -29,8 +29,9 @@ def data(markup: InlineKeyboardMarkup) -> list[panel.WatchCallback | str]:
     return out
 
 
-def test_the_search_limit_is_five_free_and_ten_paid() -> None:
-    assert plans.search_cap(0) == 5
+def test_the_search_limit_is_one_free_and_ten_paid() -> None:
+    assert plans.FREE_SEARCHES == 1 and plans.PAID_SEARCHES == 10
+    assert plans.search_cap(0) == 1
     assert plans.search_cap(1) == 10
     assert plans.search_cap(4) == 10
     with pytest.raises(ValueError):
@@ -100,11 +101,12 @@ def test_delete_asks_for_confirmation_and_warns_about_a_paid_slot() -> None:
 
 
 def test_the_limit_message_mentions_the_paid_limit_only_to_free_accounts() -> None:
-    free = panel.LIMIT_REACHED.format(
-        used=5, cap=5, upgrade=panel.UPGRADE.format(paid=panel.PAID_SEARCHES)
-    )
-    paid = panel.LIMIT_REACHED.format(used=10, cap=10, upgrade="")
+    free = panel.limit_text(panel.PanelView([], 0, 0, 1, 1))
+    paid = panel.limit_text(panel.PanelView([], 1, 1, 10, 10))
     assert "до 10" in free and "до 10" not in paid
+    assert free.startswith("У вас уже 1 поиск — поставьте на паузу или удалите один")
+    assert paid.startswith("У вас уже 10 поисков — ")
+    assert any(a.a == panel.LIST for a in data(panel.limit_markup()) if not isinstance(a, str))
 
 
 def test_names_with_markup_are_escaped_in_the_text_but_not_in_buttons() -> None:

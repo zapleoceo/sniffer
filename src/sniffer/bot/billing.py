@@ -66,6 +66,11 @@ class InvoicePayload:
         return f"{PAYLOAD_VERSION}:s:{self.tg_user_id}:{self.terms_version}:{self.nonce}"
 
 
+def is_legacy_payload(raw: str | None) -> bool:
+    """Счёт старой модели (`sub:N`): платёж по нему решает человек, а не автоматика."""
+    return raw is not None and _LEGACY.fullmatch(raw) is not None
+
+
 def parse_payload(raw: str) -> InvoicePayload | Reason:
     """Нагрузка из апдейта либо причина, по которой счёт не наш. Не падает ни на каком вводе."""
     found = _PAYLOAD.fullmatch(raw)

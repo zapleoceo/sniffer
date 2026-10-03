@@ -229,6 +229,12 @@ class _Turn:
         )
 
 
+class SearchLimit(Protocol):
+    """Сколько поисков можно держать: текст отказа, если открыть ещё один нельзя."""
+
+    async def blocked(self, user_id: int) -> str | None: ...
+
+
 class Conversation:
     def __init__(
         self,
@@ -240,8 +246,11 @@ class Conversation:
         recorder: Recorder | None = None,
         quota: QuotaService | None = None,
         planner: ClarificationPlanner | None = None,
+        search_limit: SearchLimit | None = None,
     ) -> None:
         self._store = store
+        # Без предела — прежнее поведение (симуляция, тесты диалога): число поисков не считается.
+        self._search_limit = search_limit
         self._intake = intake
         self._finder = finder
         self._scoped_finder = scoped_finder
@@ -383,6 +392,15 @@ class Conversation:
         не говорят: про ушедший из списка поиск. `False` — ветку открыть не
         вышло, потому что взведённое `/new` потратило другое сообщение.
         """
+        if self._search_limit is not None:
+            full = await self._search_limit.blocked(dialogue.user_id)
+            if full is not None:
+                # Ответ отказа вместо ветки. Взведённое `/new` снимается: иначе человек, которому
+                # отказали, получал бы отказ на каждое следующее сообщение.
+                if dialogue.starting_new and dialogue.passport is not None:
+                    await self._store.select(dialogue, dialogue.passport.root)
+                await send(Reply(full))
+                return True
         opened = await open_thread(self._store, dialogue, passport)
         if opened is None:
             return False

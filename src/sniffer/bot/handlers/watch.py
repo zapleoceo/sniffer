@@ -15,8 +15,8 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from sniffer.bot import filter_card as card
 from sniffer.bot import filter_flow, query_menu, tab_flow, threads, topics, watch_flow
 from sniffer.bot import watch_panel as panel
+from sniffer.bot.search_gate import Start, start_new_search
 from sniffer.bot.store import Client
-from sniffer.db.repositories.watch import Move
 from sniffer.domain.field_spec import spec_by_key
 from sniffer.domain.passport_edit import Change
 from sniffer.domain.records import QueryOverview
@@ -84,25 +84,16 @@ async def _choose_target(message: Message, client: Client, item: QueryOverview) 
 
 
 async def _move(message: Message, client: Client, root: int, target: int) -> None:
-    result = await watch_flow.move_slot(client, root, target)
-    await message.answer(panel.MOVED if result is Move.MOVED else panel.MOVE_REFUSED)
+    moved = await watch_flow.move_slot(client, root, target)
+    await message.answer(panel.MOVED if moved else panel.MOVE_REFUSED)
 
 
 async def _new_search(message: Message, client: Client) -> None:
-    allowed, view = await watch_flow.can_open_new(client)
-    if not allowed and view is not None:
-        upgrade = "" if view.paid_slots else panel.UPGRADE.format(paid=panel.PAID_SEARCHES)
-        text = panel.LIMIT_REACHED.format(used=view.used, cap=view.cap, upgrade=upgrade)
-        await message.answer(text)
-        return
-    if topics.active() and message.bot is not None:
-        if await tab_flow.create_blank(message.bot, client):
-            await message.answer(panel.NEW_TAB.format(name=tab_flow.NEW_TOPIC_NAME))
-            return
     from sniffer.bot.handlers import search
 
-    await search.conversation().start_new(client)
-    await message.answer(threads.ASK_WHAT)
+    started = await start_new_search(message, client, search.conversation(), prefer_tab=True)
+    if started is Start.ARMED:
+        await message.answer(threads.ASK_WHAT)
 
 
 async def _open_tab(message: Message, client: Client, root: int) -> None:

@@ -16,11 +16,27 @@ ALTER TABLE payments ADD COLUMN IF NOT EXISTS period_end_estimated BOOLEAN NOT N
 
 -- Единая политика удаления клиента: всё, что про него, уходит вместе с ним (CASCADE) —
 -- как у платежей и подписок. До этого согласие держало RESTRICT и блокировало удаление
--- клиента. DROP + ADD идемпотентны: ограничение пересоздаётся тем же, а данные не трогаются.
-ALTER TABLE user_consents DROP CONSTRAINT IF EXISTS user_consents_user_id_fkey;
-ALTER TABLE user_consents
-    ADD CONSTRAINT user_consents_user_id_fkey
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE;
+-- клиента. Ограничение пересоздаётся ТОЛЬКО если оно ещё не CASCADE: DROP + ADD берут
+-- блокировку ACCESS EXCLUSIVE на users на каждом деплое, а запуск, которому менять
+-- нечего, не должен ни ждать чужие транзакции, ни ставить их в очередь за собой.
+-- lock_timeout не даёт деплою зависнуть в очереди за долгой транзакцией: он падает
+-- (и деплой красный), а не блокирует бота. Данные не трогаются.
+DO $fk$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'user_consents_user_id_fkey'
+          AND conrelid = 'user_consents'::regclass
+          AND confdeltype = 'c'
+    ) THEN
+        SET LOCAL lock_timeout = '5s';
+        ALTER TABLE user_consents DROP CONSTRAINT IF EXISTS user_consents_user_id_fkey;
+        ALTER TABLE user_consents
+            ADD CONSTRAINT user_consents_user_id_fkey
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE;
+    END IF;
+END
+$fk$;
 
 -- Сверка спрашивает «есть ли уже такое событие по этому платежу»: без индекса — полный обход.
 CREATE INDEX IF NOT EXISTS billing_events_charge_idx ON billing_events (kind, charge_id);

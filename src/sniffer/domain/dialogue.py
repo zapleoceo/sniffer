@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from math import ceil
 
@@ -72,6 +72,20 @@ EVENT_QUESTION_ASKED = "question_asked"
 # Насколько режем бюджет по кнопке «дорого». Не в ноль и не в половину:
 # клиент отбраковал показанное, а не отказался от покупки.
 PRICEY_FACTOR = 0.7
+# Валюты, в которые бюджет пересчитать нельзя: курса есть только USD→VND.
+UNPRICED_CURRENCIES = frozenset({Currency.EUR, Currency.RUB})
+# Кнопки без евро и рублей: два доллара и два донговых потолка. Значение — «сумма валюта», как у
+# обычного вопроса про бюджет (`fields._parse_budget`).
+CURRENCY_CHOICES = (
+    Option("до 300 $", "300 USD"),
+    Option("до 500 $", "500 USD"),
+    Option("до 10 млн ₫", "10000000 VND"),
+    Option("до 20 млн ₫", "20000000 VND"),
+)
+CURRENCY_ASK = (
+    "Бюджет в евро и рублях я не умею считать. Назовите его в донгах или долларах — "
+    "например «до 400 $» или «до 10 млн»."
+)
 
 # Когда два слова — одно и то же слово в разных падежах (`_same_stem`).
 # Падежное окончание просьбу не меняет: «нячанге» и «нячанг» — один город,
@@ -228,6 +242,14 @@ def blocking_question(passport: Passport, asked: Sequence[str]) -> Question | No
     """
     if passport.category is None and "category" not in asked:
         return question_for("category")
+    if passport.budget.currency in UNPRICED_CURRENCIES and "budget.max" not in asked:
+        # Евро и рубли считать нечем (курса нет). Раньше такой бюджет молча не ограничивал
+        # выдачу — человек думал, что фильтр работает. Теперь переспрашиваем один раз, теми же
+        # кнопками суммы, что и обычный вопрос про бюджет: ответ приходит уже в донгах или
+        # долларах, а «не важно» честно оставляет поиск без потолка.
+        question = question_for("budget.max")
+        if question is not None:
+            return replace(question, text=CURRENCY_ASK, options=CURRENCY_CHOICES)
     return None
 
 

@@ -20,6 +20,7 @@ from sniffer.bot import (
     tab_flow,
     threads,
     topics,
+    watch_flow,
     wording,
     wording_plan,
 )
@@ -42,6 +43,7 @@ from sniffer.bot.keyboards import (
 )
 from sniffer.bot.quota import QuotaService
 from sniffer.bot.quota_ledger import account_of, new_quota
+from sniffer.bot.search_gate import Start, start_new_search
 from sniffer.bot.store import Client, PassportStore
 from sniffer.config import get_settings
 from sniffer.domain.clarify import ClarificationPlanner
@@ -88,6 +90,7 @@ def conversation() -> Conversation:
             scoped_finder=CatalogFinder(),
             quota=quota(),
             planner=_planner(),
+            search_limit=watch_flow.DbSearchLimit(),
         )
     return _conversation
 
@@ -125,7 +128,11 @@ async def new_request(message: Message, command: CommandObject) -> None:
     client = _client(message)
     if client is None:  # pragma: no cover — сообщение без автора
         return
-    await conversation().start_new(client)
+    started = await start_new_search(
+        message, client, conversation(), prefer_tab=client.thread_id is not None
+    )
+    if started is not Start.ARMED:
+        return
     query = (command.args or "").strip()
     if not query:
         await message.answer(threads.ASK_WHAT)
@@ -273,8 +280,11 @@ async def manage_request(callback: CallbackQuery, callback_data: RequestsCallbac
     if action == "new":
         # Кнопка делает ровно то же, что команда: поиск открывается следующим
         # сообщением. Второй путь с собственным поведением рассыпался бы первым.
-        await conversation().start_new(client)
-        await message.answer(threads.ASK_WHAT)
+        started = await start_new_search(
+            message, client, conversation(), prefer_tab=client.thread_id is not None
+        )
+        if started is Start.ARMED:
+            await message.answer(threads.ASK_WHAT)
         return
     # Принадлежность — по самому поиску, а не по вхождению в список из пяти:
     # вытесненный из списка поиск остаётся поиском клиента, и его пауза, «Искать

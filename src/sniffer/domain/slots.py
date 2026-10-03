@@ -78,6 +78,10 @@ def assign_expiry(
 
     k-й по порядку получает k-й по долготе срок; кому срока не хватило, тому срок
     «сейчас» — а уже просроченный остаётся как был, история не переписывается.
+    Слот достаётся только АКТИВНОМУ мониторингу: пауза и «Удалить поиск» (архив — та же
+    пауза) освобождают его, иначе слот простаивал бы за поиском, который не следит, а
+    следующий по порядку ждал бы зря. Вернуться в работу такой мониторинг может только
+    через `decide_enable` — тем же путём, что и любой, кому слот нужно получить.
     """
     changes: dict[int, datetime] = {}
     index = 0
@@ -85,8 +89,11 @@ def assign_expiry(
         current = monitor.expires_at
         if current is None:
             continue
-        wanted = ends[index] if index < len(ends) else min(current, now)
-        index += 1
+        if monitor.is_active and index < len(ends):
+            wanted = ends[index]
+            index += 1
+        else:
+            wanted = min(current, now)
         if wanted != current:
             changes[monitor.id] = wanted
     return changes

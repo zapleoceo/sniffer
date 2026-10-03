@@ -112,7 +112,11 @@ class PassportStore:
 
             if client.thread_id is not None:
                 return await self._load_in_thread(
-                    session, user.id, user.editing_passport_root, client.thread_id
+                    session,
+                    user.id,
+                    user.editing_passport_root,
+                    client.thread_id,
+                    starting_new=user.awaiting_new_request,
                 )
             passports = PassportRepository(session)
             current = await passports.get_current(user.id)
@@ -128,7 +132,13 @@ class PassportStore:
             )
 
     async def _load_in_thread(
-        self, session: AsyncSession, user_id: int, editing_root: int | None, thread_id: int
+        self,
+        session: AsyncSession,
+        user_id: int,
+        editing_root: int | None,
+        thread_id: int,
+        *,
+        starting_new: bool = False,
     ) -> Dialogue:
         """Разговор в теме: корень берётся из связи, а не из общего указателя клиента.
 
@@ -145,6 +155,7 @@ class PassportStore:
             passport=current,
             state=replay(await passports.list_events(current.root)),
             editing=editing_root == current.root,
+            starting_new=starting_new,
             thread_id=thread_id,
         )
 
@@ -157,8 +168,10 @@ class PassportStore:
         который `UNIQUE (user_id, message_thread_id)` и призван не пускать.
         """
         async with self._sessions() as session:
-            stored = await self._insert(session, dialogue.user_id, passport, commit=False)
             thread = dialogue.thread_id
+            stored = await self._insert(
+                session, dialogue.user_id, passport, commit=False, move_pointer=thread is None
+            )
             if thread is not None and not await TabRepository(session).claim(
                 dialogue.user_id, stored.root, thread
             ):
@@ -188,10 +201,16 @@ class PassportStore:
         return Dialogue(user_id=dialogue.user_id, passport=stored, state=DialogueState())
 
     async def _insert(
-        self, session: AsyncSession, user_id: int, passport: Passport, *, commit: bool = True
+        self,
+        session: AsyncSession,
+        user_id: int,
+        passport: Passport,
+        *,
+        commit: bool = True,
+        move_pointer: bool = True,
     ) -> StoredPassport:
         passports = PassportRepository(session)
-        stored = await passports.save_new(user_id, passport)
+        stored = await passports.save_new(user_id, passport, move_pointer=move_pointer)
         await passports.add_event(stored.id, EVENT_USER_MESSAGE, {"text": passport.raw_query})
         if commit:
             await session.commit()
@@ -205,7 +224,9 @@ class PassportStore:
             raise ValueError("нечего уточнять: паспорта ещё нет")
         async with self._sessions() as session:
             passports = PassportRepository(session)
-            stored = await passports.save_revision(dialogue.passport, passport)
+            stored = await passports.save_revision(
+                dialogue.passport, passport, move_pointer=dialogue.thread_id is None
+            )
             await passports.add_event(stored.id, kind, payload)
             await session.commit()
         return Dialogue(
@@ -239,7 +260,12 @@ class PassportStore:
         """Переключить контекст только на принадлежащую клиенту цепочку."""
         async with self._sessions() as session:
             passports = PassportRepository(session)
-            if not await passports.select(dialogue.user_id, root, editing=editing):
+            if not await passports.select(
+                dialogue.user_id,
+                root,
+                editing=editing,
+                move_pointer=dialogue.thread_id is None,
+            ):
                 return dialogue
             current = await passports.get_current(dialogue.user_id)
             events = [] if current is None else await passports.list_events(current.root)
