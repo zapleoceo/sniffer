@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.shell_support import Ran, needs_bash, run
+from tests.shell_support import TRACE_CHMOD, Ran, needs_bash, run
 from tests.sql_chain_support import ROOT
 
 SCRIPT = ROOT / "infra" / "backup" / "sniffer-pg-backup.sh"
@@ -103,8 +103,6 @@ def _modes_are_real() -> bool:
 
 
 MODES_ARE_REAL = _modes_are_real()
-# Трассировка `chmod`: на любой файловой системе видно, какие права скрипт запросил.
-TRACE_CHMOD = 'chmod() { echo "$*" >> "$TRACE"; command chmod "$@"; }; export -f chmod'
 
 
 # ── сам скрипт: вид, который нельзя проверить запуском ───────────────────────

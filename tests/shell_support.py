@@ -56,6 +56,12 @@ def run(program: str, *, timeout: int = 120) -> Ran | None:
     )
 
 
+# Трассировка `chmod`: на любой файловой системе видно, какие права скрипт
+# запросил (файловая система вправе их не хранить, как NTFS под MSYS). Строки
+# `<права> <файл>` пишутся в файл из переменной TRACE; вызывающий её задаёт.
+TRACE_CHMOD = 'chmod() { echo "$*" >> "$TRACE"; command chmod "$@"; }; export -f chmod'
+
+
 def _bash_works() -> bool:
     done = run("echo ok")
     return done is not None and done.stdout.startswith("ok")

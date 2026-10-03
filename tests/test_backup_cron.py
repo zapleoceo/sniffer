@@ -20,7 +20,7 @@ import re
 import pytest
 
 from tests.deploy_support import script
-from tests.shell_support import Ran, function_source, needs_bash, run
+from tests.shell_support import TRACE_CHMOD, Ran, function_source, needs_bash, run
 from tests.sql_chain_support import ROOT
 
 BACKUP = ROOT / "infra" / "backup" / "sniffer-pg-backup.sh"
@@ -164,6 +164,38 @@ def test_a_target_that_cannot_be_written_is_a_failure_without_leftovers() -> Non
     assert "RC=1" in done.stdout
     assert "не удалось записать" in done.stderr
     assert done.stdout.split()[-1] == "sniffer-backup", "остался временный файл"
+
+
+@needs_bash
+def test_a_write_that_silently_did_nothing_is_caught() -> None:
+    """`mv` вернул 0, а файла нет: «установлен» без файла — худшая из ошибок."""
+    done = _run('mv() { return 0; }; install_backup_cron; echo "RC=$?"')
+
+    assert "RC=1" in done.stdout
+    assert "не совпал" in done.stderr
+    assert "установлен" not in done.stdout
+
+
+@needs_bash
+def test_the_cron_file_is_asked_to_be_readable_whatever_the_umask() -> None:
+    """Под строгой umask `cat >` создал бы файл 0600: права задаются явно, а не наследуются."""
+    body = (
+        "\n".join(
+            [
+                'export TRACE="$root/trace.txt"',
+                TRACE_CHMOD,
+                "umask 077",
+                "install_backup_cron >/dev/null",
+            ]
+        )
+        + '; cat "$TRACE"'
+    )
+
+    done = _run(body)
+
+    assert re.search(r"^0644 \S+/etc/cron\.d/sniffer-backup\.new$", done.stdout, re.MULTILINE), (
+        done.text
+    )
 
 
 # ── шаг деплоя: предупреждает, но не обрывает ────────────────────────────────
