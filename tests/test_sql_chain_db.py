@@ -16,13 +16,13 @@ import os
 import re
 from datetime import UTC, datetime
 from decimal import Decimal
-from pathlib import Path
 
 import pytest
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from sniffer.db import collection_models, models
+from tests.sql_chain_support import SQL_DIR, chain
 
 # Таблицы сборщика регистрируются в метаданных только импортом этого модуля, а
 # фикстура `db_engine` чистит ВСЕ таблицы метаданных. В полном прогоне модуль
@@ -35,7 +35,6 @@ pytestmark = pytest.mark.skipif(
     reason="TEST_DATABASE_URL не задан: живого Postgres нет",
 )
 
-SQL_DIR = Path(__file__).parents[1] / "infra" / "sql"
 # Только метка времени для посева строк: с `now()` базы тест её не сверяет, но
 # правило `test_db_clock_rule` запрещает зашитую дату во всех тестах с живой базой.
 NOW = datetime.now(UTC)
@@ -64,7 +63,7 @@ async def deploy(engine: AsyncEngine) -> None:
     async with engine.connect() as conn:
         driver = (await conn.get_raw_connection()).driver_connection
         assert driver is not None
-        for path in sorted(SQL_DIR.glob("00*.sql")):
+        for path in chain():
             await driver.execute(path.read_text(encoding="utf-8"))
 
 

@@ -90,9 +90,12 @@ jobs:
       # Тот же файл, что накатывается на боевую базу. Он идемпотентен, и
       # именно поэтому проверять модели есть смысл против него, а не против
       # metadata.create_all: последнее сверяло бы модели с ними же.
+      #
+      # Файлы цепочки берутся по той же маске, что в infra/deploy.sh: трёхзначный
+      # номер. Записи в обоих местах сверяет с тестовой tests/test_migration_mask.py.
       - name: Схема в тестовой базе
         run: |
-          for migration in infra/sql/00*.sql; do
+          for migration in infra/sql/[0-9][0-9][0-9]_*.sql; do
             psql -h localhost -U sniffer -d sniffer_test -v ON_ERROR_STOP=1 -f "$migration"
           done
 
