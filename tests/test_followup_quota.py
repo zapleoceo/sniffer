@@ -53,6 +53,11 @@ def found_items(count: int) -> list[RawItem]:
     ]
 
 
+class _Subscribed:
+    async def slots(self, account: Account, now: datetime) -> int:
+        return 1
+
+
 class World:
     def __init__(self, monkeypatch: pytest.MonkeyPatch, who: list[CollectionRecipient]) -> None:
         self.ledger = MemoryLedger()
@@ -130,6 +135,24 @@ async def test_the_offer_is_not_repeated_to_the_same_person_within_a_day(world: 
     message = render(world.payload(0))
     assert "Honda rental" not in message and "Что можно сделать сейчас" not in message
     assert "Ваши поиски сохранены" in message
+
+
+async def test_a_subscriber_is_not_offered_a_subscription_in_a_deferred_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Потолок подписчика — 300: карточки сверх остатка не «ещё по подписке», предложения нет."""
+    world = World(monkeypatch, recipients(156))
+    world.quota = QuotaService(
+        world.ledger, entitlements=_Subscribed(), clock=Clock(T0), owner_tg_id=OWNER_TG
+    )
+    await world.spend(156, 300)  # потолок исчерпан: остальные карточки удержаны
+
+    await followup.queue_answers(LEASE, quota=world.quota)
+
+    message = render(world.payload(0))
+    assert "Honda rental" not in message
+    assert "по подписке" not in message and "Что можно сделать сейчас" not in message
+    assert world.ledger.offered == {}, "право на предложение даже не занималось"
 
 
 async def test_the_reservation_is_confirmed_when_the_reply_entered_the_outbox(
