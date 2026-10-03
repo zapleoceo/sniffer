@@ -19,8 +19,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Protocol
 
+from sniffer.config import get_settings
 from sniffer.db.engine import session_scope
 from sniffer.db.repositories.delivery import DeliveryRepository
+from sniffer.db.repositories.tabs import TabRepository
 from sniffer.db.repositories.users import UserRepository
 from sniffer.domain.records import OutboxMessage
 
@@ -49,6 +51,14 @@ class Queue(Protocol):
     async def cancel_expired(self, *, now: datetime, ttl: timedelta) -> int: ...
 
 
+class Tabs(Protocol):
+    """Темы Telegram: куда класть сообщение поиска. Нет объекта — нет тем, как до них."""
+
+    async def threads_for(self, subscription_ids: Sequence[int]) -> dict[int, int]: ...
+
+    async def mark_lost(self, subscription_id: int) -> bool: ...
+
+
 class Users(Protocol):
     """Клиенты: нотифаеру нужна одна запись — «писать этому клиенту нельзя»."""
 
@@ -64,6 +74,7 @@ class Work:
     queue: Queue
     users: Users
     commit: Callable[[], Awaitable[None]]
+    tabs: Tabs | None = None
 
 
 Scope = Callable[[], AbstractAsyncContextManager[Work]]
@@ -77,4 +88,6 @@ async def work_scope() -> AsyncIterator[Work]:
             queue=DeliveryRepository(session),
             users=UserRepository(session),
             commit=session.commit,
+            # Без флага тем нотифаер шлёт, как слал: связей он не читает вовсе.
+            tabs=TabRepository(session) if get_settings().topics_enabled else None,
         )

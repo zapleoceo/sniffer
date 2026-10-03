@@ -97,7 +97,10 @@ async def test_archive_pauses_upserts_the_mark_and_resets_the_pointer_in_this_or
         and "ON CONFLICT (user_id, passport_root)" in mark
     )
     assert "'archived'" in mark
-    assert pointer.startswith("UPDATE users") and "active_passport_root = 3" in pointer
+    assert pointer.startswith("UPDATE users") and "active_passport_root=NULL" in pointer.replace(
+        " ", ""
+    )
+    assert "active_passport_root = 3" in pointer
 
 
 def test_archived_searches_are_filtered_out_of_the_menu_query() -> None:

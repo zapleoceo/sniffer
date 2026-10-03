@@ -41,6 +41,11 @@ class Settings(BaseSettings):
         default=48, ge=1, le=720
     )
 
+    # Темы Telegram (Threaded mode) в личном чате: поиск = тема (docs/search-tabs.md). Флаг-
+    # выключатель: молодой API уже ронял отправку в темы (Bot API 10.0, 08.05.2026). Включается
+    # только вместе с `getMe().has_topics_enabled`; режим в @BotFather включает владелец.
+    topics_enabled: bool = False
+
     # Telegram — юзербот (чтение сообществ)
     # Пустая строка в .env — это "не заведено", а не ошибка типа. Без
     # приведения pydantic валится на TG_API_ID= с int_parsing и роняет процесс

@@ -38,6 +38,10 @@ DETAIL_LIMIT = 200
 _TOKEN = re.compile(r"\d{5,}:[A-Za-z0-9_-]{20,}")
 
 
+# Код причины отказа «темы больше нет»: по нему нотифаер уходит в General (docs/search-tabs.md).
+THREAD_GONE = "thread_not_found"
+
+
 class Kind(StrEnum):
     BLOCKED = "blocked"  # 403 и «чат недоступен»: писать этому клиенту нельзя
     RATE_LIMITED = "rate_limited"  # 429: Telegram просит подождать
@@ -63,7 +67,7 @@ BAD_REQUESTS: tuple[tuple[str, Kind, tuple[str, ...]], ...] = (
         ("chat not found", "peer_id_invalid", "user not found", "user is deactivated"),
     ),
     ("too_long", Kind.REJECTED, ("message is too long",)),
-    ("thread_not_found", Kind.REJECTED, ("message thread not found", "topic_deleted")),
+    (THREAD_GONE, Kind.REJECTED, ("message thread not found", "topic_deleted")),
     ("bad_markup", Kind.REJECTED, ("can't parse entities", "can't find end of")),
 )
 

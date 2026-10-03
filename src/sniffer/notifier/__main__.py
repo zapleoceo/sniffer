@@ -18,7 +18,7 @@ from aiogram.enums import ParseMode
 from aiogram.types import LinkPreviewOptions
 
 from sniffer.config import Settings, get_settings
-from sniffer.notifier.delivery import Delivery, Sender
+from sniffer.notifier.delivery import Delivery, Sender, ThreadSender
 from sniffer.notifier.policy import policy_from
 from sniffer.runtime.service import Service, idle_loop, run_service
 from sniffer.telegram_env import bot_session
@@ -40,7 +40,9 @@ async def run(stop: asyncio.Event) -> None:
     log.info("notifier.started")
     settings = get_settings()
     bot = Bot(token=settings.bot_token, session=bot_session(settings))
-    delivery = Delivery(_sender(bot), policy=policy_from(settings))
+    delivery = Delivery(
+        _sender(bot), send_in_thread=_thread_sender(bot), policy=policy_from(settings)
+    )
     try:
         await idle_loop(stop, delivery.tick, service=NAME, poll_interval_s=POLL_INTERVAL_S)
     finally:
@@ -59,6 +61,21 @@ def _sender(bot: Bot) -> Sender:
             parse_mode=ParseMode.HTML,
             # Ссылка на объявление в карточке одна и она же — единственное, что
             # клиенту нужно открыть. Предпросмотр рядом с ней только шумит.
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+        )
+
+    return send
+
+
+def _thread_sender(bot: Bot) -> ThreadSender:
+    """Отправка в тему личного чата: тот же вызов с `message_thread_id`."""
+
+    async def send(user_id: int, text: str, thread_id: int) -> None:
+        await bot.send_message(
+            user_id,
+            text,
+            message_thread_id=thread_id,
+            parse_mode=ParseMode.HTML,
             link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
 

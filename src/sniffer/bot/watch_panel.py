@@ -25,7 +25,7 @@ from sniffer.domain import plans
 from sniffer.domain.records import QueryOverview
 
 LIST, CARD, PAUSE, RESUME = "l", "c", "p", "r"
-MOVE, MOVE_TO, DELETE, DELETE_OK, NEW = "m", "t", "d", "k", "n"
+MOVE, MOVE_TO, DELETE, DELETE_OK, NEW, TAB = "m", "t", "d", "k", "n", "w"
 
 PAID_SEARCHES = plans.PAID_SEARCHES
 ICONS = {"active": "🟢", "paused": "⏸", "expired": "⌛", "off": "▫️"}
@@ -40,6 +40,9 @@ LIMIT_REACHED = (
 UPGRADE = ", либо оформите подписку — тогда можно держать до {paid}"
 MOVED = "Слот перенесён: слежение идёт за новым поиском, с этого момента."
 MOVE_REFUSED = "Не получилось перенести слот: он уже изменился. Откройте панель заново."
+TAB_OPENED = "Открыл вкладку «{name}»: пишите про этот поиск там."
+TAB_FAILED = "Не получилось открыть вкладку. Поиск работает и здесь, в чате."
+NEW_TAB = "Открыл вкладку «{name}». Напишите в ней, что ищете."
 DELETED = "Поиск убран. Слежение за ним остановлено; версии сохранены."
 
 
@@ -91,10 +94,23 @@ def panel_markup(view: PanelView) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def card_footer(item: QueryOverview) -> list[list[InlineKeyboardButton]]:
-    """Ряды управления слежением под карточкой фильтра."""
+def card_footer(
+    item: QueryOverview, *, offer_tab: bool = False
+) -> list[list[InlineKeyboardButton]]:
+    """Ряды управления слежением под карточкой фильтра.
+
+    `offer_tab` — режим тем включён, а темы у поиска нет (или она утрачена).
+    """
     root = item.root
     rows: list[list[InlineKeyboardButton]] = []
+    if offer_tab:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="🗂 Вкладка", callback_data=WatchCallback(a=TAB, root=root).pack()
+                )
+            ]
+        )
     if item.monitoring in {"active", "paused"}:
         toggle = (PAUSE, "⏸ Пауза") if item.monitoring == "active" else (RESUME, "▶️ Включить")
         rows.append(

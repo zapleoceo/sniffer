@@ -13,8 +13,9 @@ from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import BotCommand
 
+from sniffer.bot import topics
 from sniffer.bot.billing_wording import COMMANDS
-from sniffer.bot.handlers import billing, membership, search, watch
+from sniffer.bot.handlers import billing, membership, menu, search, watch
 from sniffer.bot.reachability import MarkReachable
 from sniffer.config import Settings, get_settings
 from sniffer.runtime.service import Service
@@ -44,6 +45,9 @@ def build_dispatcher() -> Dispatcher:
     # числе команды, и без этого порядка `/paysupport` — обязательная по ToS Telegram —
     # уходила бы в поиск как поисковая фраза.
     dispatcher.include_router(billing.router)
+    # Кнопки меню - ДО диалога по той же причине: подпись кнопки - это текст, и общий
+    # обработчик диалога принял бы её за поисковую фразу.
+    dispatcher.include_router(menu.router)
     # Панель слежений - ДО диалога: текстовый обработчик диалога ловит всё, и `/watch`
     # ушла бы в поиск как фраза.
     dispatcher.include_router(watch.router)
@@ -78,6 +82,7 @@ async def run(stop: asyncio.Event) -> None:
     )
     dispatcher = build_dispatcher()
     await publish_commands(bot)
+    await topics.check(bot, settings)
 
     # handle_signals=False: сигналами владеет runtime. Два обработчика на один
     # SIGTERM — это гонка за то, кто первым закроет сессию.

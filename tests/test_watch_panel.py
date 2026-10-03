@@ -80,7 +80,7 @@ def test_a_search_without_a_slot_offers_to_subscribe_with_the_price() -> None:
 
 def test_move_targets_are_searches_without_a_live_slot() -> None:
     source = search(1, "active")
-    others = [source, search(2), search(3, "paused"), search(4, "expired")]
+    others = [source, search(2), search(3, "paused"), search(4, "expired"), search(5, "active")]
     targets = [
         a.to
         for a in data(panel.move_markup(source, others))

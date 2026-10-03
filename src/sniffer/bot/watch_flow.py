@@ -15,6 +15,7 @@ from sniffer.bot.watch_panel import PanelView
 from sniffer.db.engine import session_scope
 from sniffer.db.repositories import PassportRepository, UserRepository
 from sniffer.db.repositories.billing import BillingRepository
+from sniffer.db.repositories.tabs import TabRepository
 from sniffer.db.repositories.watch import Move, WatchRepository
 from sniffer.domain.plans import search_cap
 from sniffer.domain.records import QueryOverview
@@ -78,3 +79,13 @@ async def archive(client: Client, root: int) -> bool:
         done = await WatchRepository(session).archive(user_id, root)
         await session.commit()
     return done
+
+
+async def has_open_tab(client: Client, root: int) -> bool:
+    """Есть ли у поиска живая тема (состояние `open` и известный `message_thread_id`)."""
+    async with session_scope() as session:
+        user_id = await _user_id(session, client)
+        if user_id is None:  # pragma: no cover
+            return False
+        known = await TabRepository(session).tab_of(user_id, root)
+    return known is not None and known[0] is not None and known[2] == "open"

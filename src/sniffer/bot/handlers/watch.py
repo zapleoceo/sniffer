@@ -13,7 +13,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from sniffer.bot import filter_card as card
-from sniffer.bot import filter_flow, query_menu, threads, watch_flow
+from sniffer.bot import filter_flow, query_menu, tab_flow, threads, topics, watch_flow
 from sniffer.bot import watch_panel as panel
 from sniffer.bot.store import Client
 from sniffer.db.repositories.watch import Move
@@ -28,8 +28,9 @@ FREE = {"off", "expired"}
 
 @router.message(Command("watch"))
 async def watch(message: Message) -> None:
-    if message.from_user is not None:
-        await _panel(message, Client(message.from_user.id, message.from_user.username), edit=False)
+    client = topics.client_of_message(message)
+    if client is not None:
+        await _panel(message, client, edit=False)
 
 
 @router.callback_query(panel.WatchCallback.filter())
@@ -38,7 +39,7 @@ async def on_watch(callback: CallbackQuery, callback_data: panel.WatchCallback) 
     message = callback.message
     if not isinstance(message, Message):
         return
-    client = Client(callback.from_user.id, callback.from_user.username)
+    client = topics.client_of_callback(callback, message)
     action, root = callback_data.a, callback_data.root
     if action == panel.LIST:
         await _panel(message, client)
@@ -56,6 +57,9 @@ async def _on_search(message: Message, client: Client, action: str, root: int, t
     if action in {panel.PAUSE, panel.RESUME}:
         if not await query_menu.toggle(client, root, active=action == panel.RESUME):
             await message.answer(threads.MONITORING_ENDED)
+    elif action == panel.TAB:
+        await _open_tab(message, client, root)
+        return
     elif action == panel.MOVE:
         await _choose_target(message, client, item)
         return
@@ -91,10 +95,19 @@ async def _new_search(message: Message, client: Client) -> None:
         text = panel.LIMIT_REACHED.format(used=view.used, cap=view.cap, upgrade=upgrade)
         await message.answer(text)
         return
+    if topics.active() and message.bot is not None:
+        if await tab_flow.create_blank(message.bot, client):
+            await message.answer(panel.NEW_TAB.format(name=tab_flow.NEW_TOPIC_NAME))
+            return
     from sniffer.bot.handlers import search
 
     await search.conversation().start_new(client)
     await message.answer(threads.ASK_WHAT)
+
+
+async def _open_tab(message: Message, client: Client, root: int) -> None:
+    name = None if message.bot is None else await tab_flow.open_tab(message.bot, client, root)
+    await message.answer(panel.TAB_FAILED if name is None else panel.TAB_OPENED.format(name=name))
 
 
 async def _panel(message: Message, client: Client, *, edit: bool = True, note: str = "") -> None:
@@ -115,7 +128,7 @@ async def on_filter(callback: CallbackQuery, callback_data: card.FilterCallback)
     message = callback.message
     if not isinstance(message, Message):
         return
-    client = Client(callback.from_user.id, callback.from_user.username)
+    client = topics.client_of_callback(callback, message)
     root, action = callback_data.root, callback_data.a
     view = await filter_flow.open_card(client, root)
     if view is None:
@@ -146,7 +159,9 @@ async def _card(message: Message, client: Client, root: int, *, note: str | None
         return
     item = QueryOverview(root=root, passport=view.passport, monitoring=view.monitoring)
     text = card.card_text(view) + (f"\n\n{note}" if note else "")
-    await _show(message, text, card.card_markup(view, footer=panel.card_footer(item)))
+    offer = topics.active() and not await watch_flow.has_open_tab(client, root)
+    footer = panel.card_footer(item, offer_tab=offer)
+    await _show(message, text, card.card_markup(view, footer=footer))
 
 
 async def _show(message: Message, text: str, markup: InlineKeyboardMarkup) -> None:

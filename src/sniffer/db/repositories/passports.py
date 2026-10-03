@@ -71,6 +71,25 @@ class PassportRepository(Repository):
             )
         return to_stored_passport(row) if row is not None else None
 
+    async def current_of(self, user_id: int, root: int) -> StoredPassport | None:
+        """Текущая версия поиска по корню — без указателя клиента и без убранных.
+
+        Тема Telegram знает свой корень сама; общий указатель `active_passport_root` для неё
+        был бы гонкой двух быстрых сообщений в разные темы (R6 §1.6, п. 7).
+        """
+        chain = func.coalesce(models.Passport.root_id, models.Passport.id)
+        row = await self._session.scalar(
+            select(models.Passport)
+            .where(
+                models.Passport.user_id == user_id,
+                models.Passport.is_current.is_(True),
+                chain == root,
+                not_archived(),
+            )
+            .limit(1)
+        )
+        return to_stored_passport(row) if row is not None else None
+
     async def select(self, user_id: int, root: int, *, editing: bool = False) -> bool:
         """Выбрать свою цепочку; чужой root не меняет состояние.
 
