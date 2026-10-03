@@ -133,7 +133,7 @@ def test_the_calendar_is_vietnamese_so_a_night_anchor_does_not_slip_a_day() -> N
     assert naive_utc.date() == date(2026, 12, 1)
     # Сдвиг Вьетнама закреплён абсолютным моментом, а не тем же `VIETNAM`, что и в коде.
     assert period_containing(anchor, anchor).end == at("2026-11-29T19:00:00")
-    # Ровно тот случай, где UTC+7 и UTC+8 расходятся на день: 30 октября 23:30 против 31 октября 00:30.
+    # Тот случай, где UTC+7 и UTC+8 расходятся на день: 30 октября 23:30 против 31-го 00:30.
     eve = at("2026-10-30T16:30:00")
     assert period_containing(eve, eve).end == at("2026-11-30T16:30:00")
 
