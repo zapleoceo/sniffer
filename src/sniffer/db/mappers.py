@@ -21,6 +21,7 @@ from sniffer.domain.records import (
     RawMessage,
     SessionState,
     StoredPassport,
+    SubscriptionState,
     User,
 )
 
@@ -153,6 +154,29 @@ def to_stored_passport(row: models.Passport) -> StoredPassport:
             missing_fields=list(row.missing_fields),
             status=PassportStatus(row.status),
         ),
+    )
+
+
+def to_subscription_state(row: models.Subscription, passport: models.Passport) -> SubscriptionState:
+    """Подписка вместе с ТЕКУЩЕЙ версией паспорта её цепочки.
+
+    Незнакомое значение в паспорте падает здесь (см. `to_stored_passport`), поэтому тот,
+    кто читает подписки пачкой, обязан отвечать за каждую строку отдельно: одна больная
+    не должна уносить с собой остальные (`MonitorRepository.claim_due`).
+    """
+    return SubscriptionState(
+        id=row.id,
+        user_id=row.user_id,
+        passport_root=row.passport_root,
+        mode=row.mode,
+        max_per_day=row.max_per_day,
+        quiet_from=row.quiet_from,
+        quiet_to=row.quiet_to,
+        since_listing_id=row.since_listing_id,
+        scan_listing_id=row.scan_listing_id,
+        expires_at=row.expires_at,
+        failed_streak=row.failed_streak,
+        passport=to_stored_passport(passport),
     )
 
 

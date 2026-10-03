@@ -5,9 +5,11 @@ from __future__ import annotations
 from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
 
+import pytest
+
 from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
 from sniffer.domain.records import Listing, StoredPassport, SubscriptionState
-from sniffer.matching import MATCH_MIN_SCORE, filter_for, score, worth_sending
+from sniffer.matching import MATCH_MIN_SCORE, filter_for, needs_usd_rate, score, worth_sending
 from sniffer.worker.matcher import _scheduled
 
 NOW = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
@@ -168,3 +170,46 @@ def test_the_score_never_leaves_zero_to_one() -> None:
     """Оценка — доля, и складывать её с чем-то ещё имеет смысл только так."""
     for candidate in (listing(), listing(posted_at=NOW - timedelta(days=400))):
         assert 0.0 <= score(candidate, passport(), now=NOW) <= 1.0
+
+
+# ── кому нужен курс ─────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("budget", "needed"),
+    [
+        (Budget(max=300, currency=Currency.USD), True),
+        (Budget(max=300, currency=Currency.VND), False),
+        (Budget(min=100, currency=Currency.USD), False),
+        (Budget(currency=Currency.USD), False),
+        (Budget(max=300, currency=Currency.EUR), False),
+        (Budget(max=300), False),
+        (Budget(), False),
+    ],
+    ids=["usd-ceiling", "vnd-ceiling", "usd-floor-only", "usd-empty", "eur", "no-currency", "none"],
+)
+def test_only_a_dollar_ceiling_needs_a_rate(budget: Budget, needed: bool) -> None:
+    assert needs_usd_rate(passport(budget=budget)) is needed
+
+
+def test_the_need_for_a_rate_is_exactly_what_the_ceiling_cannot_build_without_one() -> None:
+    """Два места знают, что долларовый потолок требует курса, и они не вправе разойтись.
+
+    Если `needs_usd_rate` скажет «не нужен» там, где потолок без курса не строится, матчер
+    пошлёт без фильтра бюджета (D2). Если скажет «нужен» там, где потолок строится сам,
+    подписка будет ждать курса зря.
+    """
+    for budget in (
+        Budget(max=300, currency=Currency.USD),
+        Budget(max=5_000_000, currency=Currency.VND),
+        Budget(max=300, currency=Currency.EUR),
+        Budget(min=100, currency=Currency.USD),
+        Budget(),
+    ):
+        subject = passport(budget=budget)
+        without_rate = filter_for(subject, now=NOW)
+        with_rate = filter_for(subject, usd_vnd=26000, now=NOW)
+        assert without_rate is not None and with_rate is not None
+
+        rate_changes_the_ceiling = without_rate.max_price_vnd != with_rate.max_price_vnd
+        assert needs_usd_rate(subject) is rate_changes_the_ceiling, budget

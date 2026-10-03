@@ -135,6 +135,22 @@ def _attribute_fit(listing: Listing, passport: Passport) -> float:
     return matched / known
 
 
+def needs_usd_rate(passport: Passport) -> bool:
+    """Бюджет в долларах с потолком: без курса он не становится потолком в донгах.
+
+    Объявления написаны в донгах, и отбор по долларовому бюджету без курса вырождается
+    в «любая цена подходит» (`_ceiling` ниже отдаёт `None`, а `_price_fit` ставит
+    единицу любой известной цене). Для разового поиска это терпимо — клиент видит
+    выдачу и решает сам. Подписка шлёт без спроса: дорогое она бы отправила как
+    «идеально в бюджете». Поэтому тот, кто зовёт подбор для подписки, обязан по этому
+    признаку дождаться курса, а не звать `filter_for` без него.
+
+    Условие то же, что в ветке USD у `_ceiling`: тест держит их вместе.
+    """
+    budget = passport.budget
+    return budget.max is not None and budget.currency is Currency.USD
+
+
 def _ceiling(passport: Passport, usd_vnd: float | None) -> Decimal | None:
     budget = passport.budget
     if budget.max is None:

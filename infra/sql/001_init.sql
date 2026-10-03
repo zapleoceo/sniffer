@@ -350,6 +350,12 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     scan_listing_id  BIGINT    NOT NULL DEFAULT 0,
     expires_at     TIMESTAMPTZ,
     charge_id      TEXT,
+    -- Состояние монитора (worker/matcher.py, docs/architecture.md 7.1): ротация обхода
+    -- и карантин сбойной подписки. Ниже те же колонки стоят отдельными ALTER.
+    last_scanned_at   TIMESTAMPTZ,
+    failed_streak     INT         NOT NULL DEFAULT 0,
+    last_error        TEXT,
+    quarantined_until TIMESTAMPTZ,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (user_id, passport_root)
 );
@@ -371,6 +377,19 @@ ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS since_listing_id BIGINT NOT N
 ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS scan_listing_id BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
 ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS charge_id TEXT;
+
+-- Состояние монитора подписок. `last_scanned_at` — когда монитор последний раз брал
+-- подписку в обход: по нему обход идёт по кругу («кого не смотрели дольше всех —
+-- первым»), NULL = ещё ни разу, такие первыми. Это ключ ротации, а не «когда
+-- последний раз всё удалось»: подписка, пропущенная из-за недоступного курса, тоже
+-- считается обойдённой, иначе пропускаемые заняли бы всю порцию и заморили остальных.
+-- `failed_streak`/`last_error`/`quarantined_until` — карантин: сколько проходов подряд
+-- подписка падала, чем и до какого времени её не трогаем. Успешный проход всё это
+-- обнуляет. Данные не правим: DEFAULT 0 и NULL — состояние «не падала».
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS last_scanned_at TIMESTAMPTZ;
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS failed_streak INT NOT NULL DEFAULT 0;
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS last_error TEXT;
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS quarantined_until TIMESTAMPTZ;
 
 -- Деньги. Отдельной таблицей, а не колонкой в подписке: у одной подписки
 -- платежей столько, сколько месяцев её продлевали, и продление обязано
@@ -413,7 +432,10 @@ CREATE TABLE IF NOT EXISTS outbox (
     subscription_id BIGINT   REFERENCES subscriptions(id) ON DELETE CASCADE,
     notification_id BIGINT   UNIQUE REFERENCES notifications(id) ON DELETE CASCADE,
     payload      JSONB       NOT NULL,
-    status       TEXT        NOT NULL DEFAULT 'pending',  -- pending|sent|failed
+    -- pending|sent|failed|cancelled. cancelled — право на сообщение кончилось раньше, чем оно
+    -- ушло (подписка истекла, льгота прошла): строку не удаляем, чтобы карточка повторно не
+    -- ставилась и причина молчания читалась по базе.
+    status       TEXT        NOT NULL DEFAULT 'pending',
     attempts     INT         NOT NULL DEFAULT 0,
     scheduled_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     sent_at      TIMESTAMPTZ

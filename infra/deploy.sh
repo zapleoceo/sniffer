@@ -162,6 +162,10 @@ schema_sentinels() {
 listings          source                 # миграция единого каталога, 02.09.2026
 users             awaiting_new_request   # `/new`: следующее сообщение открывает поиск
 passports         last_used_at           # порядок списка поисков: выбор возвращает поиск
+subscriptions     last_scanned_at        # монитор: ротация обхода, кого не смотрели дольше всех
+subscriptions     failed_streak          # монитор, карантин: сколько проходов подряд падала
+subscriptions     last_error             # монитор, карантин: чем
+subscriptions     quarantined_until      # монитор, карантин: до какого времени не трогать
 schema_proposals                         # хвост цепочки на момент введения таблицы (004)
 SENTINELS
 }

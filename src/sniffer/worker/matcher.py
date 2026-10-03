@@ -9,23 +9,46 @@
 подпискам делает один запрос на подписку и берёт сразу пачку — и тот же запрос
 служит курсором.
 
-Курсор у каждой подписки свой и хранится в `notifications`: «что уже слали».
-Отдельной колонки «докуда дошли» нет намеренно — она разошлась бы с фактом
-отправки при любом сбое между двумя записями, а `notifications` и есть факт.
+Курсор у каждой подписки свой: `since_listing_id` — точка начала, `scan_listing_id` —
+докуда карточки просмотрены (он движется и по неподходящим), а `notifications` хранит
+дедуп постановки в очередь: факт отправки курсором не служит.
+
+Четыре свойства защищают проход от собственных сбоев и от выдачи без права
+(docs/architecture.md, 7.1):
+
+* **обход по кругу** — порция из `monitor_batch` подписок, кого не смотрели дольше всех
+  первым, поэтому ни одна не голодает, сколько бы их ни стало;
+* **подписка в своём SAVEPOINT** — сбой одной откатывает только её записи и отправляет её
+  в карантин с причиной, а соседи обслуживаются в том же проходе;
+* **часы и курс — зависимости**, а не вызовы изнутри: проход живёт одним моментом, а
+  подписка с долларовым бюджетом без курса ждёт, а не шлёт без фильтра бюджета;
+* **право на доставку** — первым шагом прохода отменяется очередь подписок, истёкших
+  раньше льготы; новое ставится только подписке, у которой право есть в этот момент.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import structlog
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from sniffer.config import get_settings
 from sniffer.db.engine import session_scope
 from sniffer.db.repositories.delivery import DeliveryRepository
 from sniffer.db.repositories.listings import ListingRepository
+from sniffer.db.repositories.monitors import (
+    BrokenSubscription,
+    MonitorRepository,
+    describe_error,
+)
 from sniffer.domain.records import Listing, SubscriptionState
-from sniffer.matching import filter_for, score, worth_sending
+from sniffer.matching import filter_for, needs_usd_rate, score, worth_sending
+from sniffer.worker.quarantine import quarantine
+from sniffer.worker.usd_rate import RateSource, UsdRate
 
 log = structlog.get_logger(__name__)
 
@@ -33,32 +56,146 @@ log = structlog.get_logger(__name__)
 # скорости: без него первая же подписка на пустой базе прочитала бы весь архив
 # одной транзакцией.
 LISTINGS_PER_SUBSCRIPTION = 100
-SUBSCRIPTIONS_PER_TICK = 50
 DIGEST_HOUR = 18
 LOCAL_ZONE = ZoneInfo("Asia/Ho_Chi_Minh")
+
+# Порт часов. Проход живёт ОДНИМ моментом: срок подписки, окно карточек, граница суток
+# и время постановки в очередь считаются от него, а не от часов, которые каждый вызов
+# снимает сам. Иначе проход «на заданном времени» (тест, догон после простоя)
+# судил бы подписки по одному «сейчас», а карточки — по другому.
+Clock = Callable[[], datetime]
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+@dataclass(slots=True)
+class MatcherCounters:
+    """Что проход сделал НЕ по плану, накопительно с запуска процесса.
+
+    Число, а не только строка в журнале: «сколько подписок ждёт курса» и «сколько в
+    карантине» — вопросы для панели и сторожа, а искать их grep-ом по логу нельзя.
+    """
+
+    skipped_no_rate: int = 0
+    quarantined: int = 0
+    cancelled_lapsed: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _Stores:
+    """Репозитории одного прохода: все на одной сессии, то есть в одной транзакции."""
+
+    monitors: MonitorRepository
+    delivery: DeliveryRepository
+    listings: ListingRepository
 
 
 class Matcher:
     """Один проход сопоставления. Возврат — сколько карточек поставлено в очередь."""
 
-    def __init__(self, *, usd_vnd: float | None = None) -> None:
-        # Курс нужен, чтобы долларовый бюджет стал потолком в донгах. Нет курса
-        # — потолка нет, и подписка проверяет только смысл: занижать бюджет
-        # выдуманным курсом хуже, чем не сужать вовсе.
-        self._usd_vnd = usd_vnd
+    def __init__(
+        self,
+        *,
+        rate: RateSource | None = None,
+        clock: Clock = _utc_now,
+        batch: int | None = None,
+        lapse_grace: timedelta | None = None,
+    ) -> None:
+        # Курс нужен, чтобы долларовый бюджет стал потолком в донгах. Источник не задан
+        # или не ответил — курса нет, и такая подписка ждёт (см. `tick`). Выдуманный курс
+        # занизил бы бюджет, а отбор без курса не сузил бы его вовсе: подписка шлёт сама,
+        # и дорогое объявление ушло бы клиенту как «идеально в бюджете».
+        self._rate = UsdRate(rate)
+        self._clock = clock
+        settings = get_settings()
+        self._batch = settings.monitor_batch if batch is None else batch
+        self._grace = (
+            timedelta(hours=settings.monitor_lapse_grace_hours)
+            if lapse_grace is None
+            else lapse_grace
+        )
+        self.counters = MatcherCounters()
 
     async def tick(self, *, now: datetime | None = None) -> int:
-        moment = now or datetime.now(UTC)
+        moment = now or self._clock()
         queued = 0
         async with session_scope() as session:
-            delivery = DeliveryRepository(session)
-            listings = ListingRepository(session)
-            for subscription in await delivery.active_subscriptions(limit=SUBSCRIPTIONS_PER_TICK):
-                queued += await self._for_subscription(
-                    subscription, delivery, listings, moment=moment
+            stores = _Stores(
+                MonitorRepository(session), DeliveryRepository(session), ListingRepository(session)
+            )
+            # Первым делом — отмена того, что стоит в очереди после льготы: проход, который
+            # ставит новое, не вправе оставлять за собой просроченное старое (D7).
+            lapsed = await stores.monitors.cancel_lapsed(now=moment, grace=self._grace)
+            if lapsed:
+                self.counters.cancelled_lapsed += lapsed
+                log.info("matcher.lapsed_cancelled", cancelled=lapsed)
+            due = await stores.monitors.claim_due(limit=self._batch, now=moment)
+            for sick in due.broken:
+                # Паспорт не разобрался: до подписки дело не дошло, но молчать о ней нельзя.
+                await self._quarantine(stores.monitors, sick, sick.error, moment)
+            waiting: list[int] = []
+            for subscription in due.ready:
+                usd_vnd: float | None = None
+                if needs_usd_rate(subscription.passport.passport):
+                    usd_vnd = await self._rate.get(moment)
+                    if usd_vnd is None:
+                        # Ни слать без бюджета, ни двигать курсор: когда курс вернётся,
+                        # подписка возьмёт всё с того же места, ничего не потеряв. Но
+                        # обойдённой она считается — иначе ждущие стояли бы первыми в
+                        # порции и заморили бы остальных.
+                        waiting.append(subscription.id)
+                        await stores.monitors.touch(subscription.id, now=moment)
+                        continue
+                queued += await self._isolated(
+                    session, stores, subscription, moment=moment, usd_vnd=usd_vnd
                 )
+            if waiting:
+                self.counters.skipped_no_rate += len(waiting)
+                log.warning("matcher.waiting_for_rate", subscriptions=waiting)
             await session.commit()
         return queued
+
+    async def _isolated(
+        self,
+        session: AsyncSession,
+        stores: _Stores,
+        subscription: SubscriptionState,
+        *,
+        moment: datetime,
+        usd_vnd: float | None,
+    ) -> int:
+        """Подписка в своём SAVEPOINT: сбой откатывает только её и уводит её в карантин.
+
+        Охраняем до `Exception`, а не до `BaseException`, и это не недосмотр: остановка
+        процесса (`CancelledError` при SIGTERM, `KeyboardInterrupt`) — не сбой подписки, и
+        отправлять её за это в карантин нельзя. Типы ожидаемых ошибок не перечисляем:
+        список ожиданий и есть дефект, больная подписка роняет проход чем угодно.
+        """
+        try:
+            async with session.begin_nested():
+                queued = await self._for_subscription(
+                    subscription, stores.delivery, stores.listings, moment=moment, usd_vnd=usd_vnd
+                )
+                await stores.monitors.record_scan(subscription.id, now=moment)
+        except Exception as exc:
+            await self._quarantine(
+                stores.monitors, subscription, describe_error(exc), moment, cause=exc
+            )
+            return 0
+        return queued
+
+    async def _quarantine(
+        self,
+        monitors: MonitorRepository,
+        slot: SubscriptionState | BrokenSubscription,
+        error: str,
+        moment: datetime,
+        cause: BaseException | None = None,
+    ) -> None:
+        await quarantine(monitors, slot, error=error, moment=moment, cause=cause)
+        self.counters.quarantined += 1
 
     async def _for_subscription(
         self,
@@ -67,9 +204,10 @@ class Matcher:
         listings: ListingRepository,
         *,
         moment: datetime,
+        usd_vnd: float | None,
     ) -> int:
         passport = subscription.passport.passport
-        spec = filter_for(passport, usd_vnd=self._usd_vnd, now=moment)
+        spec = filter_for(passport, usd_vnd=usd_vnd, now=moment)
         if spec is None:
             # Без города и категории отбор превращается в «покажи всё подряд»,
             # а подписка на всё подряд — это спам, за который бота отключают.
@@ -112,6 +250,7 @@ class Matcher:
                 score=relevance,
                 payload=_payload(listing, delivery_mode=delivery_mode),
                 scheduled_at=_scheduled(subscription, moment, relevance),
+                now=moment,
             )
             if added:
                 queued += 1

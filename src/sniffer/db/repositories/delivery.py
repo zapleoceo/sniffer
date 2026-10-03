@@ -12,52 +12,58 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from sqlalchemy import Table, func, or_, select, update
+from sqlalchemy import (
+    BigInteger,
+    ColumnElement,
+    DateTime,
+    Table,
+    and_,
+    exists,
+    func,
+    literal,
+    or_,
+    select,
+    update,
+)
+from sqlalchemy.dialects.postgresql import REAL
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from sniffer.db import models
-from sniffer.db.mappers import to_stored_passport
+from sniffer.db.mappers import to_subscription_state
 from sniffer.db.repositories.base import Repository
 from sniffer.domain.records import OutboxMessage, Payment, SubscriptionState
 
 OUTBOX_PENDING = "pending"
 OUTBOX_SENT = "sent"
 OUTBOX_FAILED = "failed"
+# Сообщение отменено, а не потеряно: право на него кончилось раньше, чем оно ушло.
+OUTBOX_CANCELLED = "cancelled"
+
+
+def entitled(now: datetime) -> ColumnElement[bool]:
+    """Подписка вправе получать карточки в момент `now`: включена и оплачена по этот момент.
+
+    ОДИН предикат права на всё, что делает монитор: выбор подписок на проход
+    (`MonitorRepository.claim_due`) и постановка в очередь (`enqueue`) спрашивают его, а не
+    свои копии условия. Условие с копиями разъезжается тихо: выбор отсёк просроченную, а
+    постановка, не знавшая про срок, всё равно поставила бы карточку.
+
+    Срок проверяется прямо в запросе, а не отдельным сторожем, который «должен» вовремя
+    выключить подписку: пропущенный проход сторожа означал бы бесплатную рассылку, а
+    пропущенное условие в запросе — ничего не означает, его просто нет.
+
+    `expires_at IS NULL` читается как «бессрочно»: так заведены подписки без платежа
+    (владелец, ручная выдача). Платёж срок ставит всегда. Заменит этот предикат право,
+    считаемое от числа живых подписок Stars (пакет биллинга), — менять его надо здесь,
+    в одном месте.
+    """
+    return and_(
+        models.Subscription.is_active.is_(True),
+        or_(models.Subscription.expires_at.is_(None), models.Subscription.expires_at > now),
+    )
 
 
 class DeliveryRepository(Repository):
-    async def active_subscriptions(
-        self, *, limit: int = 200, now: datetime | None = None
-    ) -> list[SubscriptionState]:
-        """Живые подписки вместе с ТЕКУЩЕЙ версией паспорта.
-
-        Подписка хранит корень цепочки, а не версию: клиент правит запрос, и
-        подписка обязана следовать за правкой, а не застывать на той версии,
-        при которой её создали. Отсюда join по `COALESCE(root_id, id)`.
-        """
-        chain = func.coalesce(models.Passport.root_id, models.Passport.id)
-        rows = await self._session.execute(
-            select(models.Subscription, models.Passport)
-            .join(models.Passport, chain == models.Subscription.passport_root)
-            .where(
-                models.Subscription.is_active.is_(True),
-                models.Passport.is_current.is_(True),
-                # Оплачена по сегодня. Проверка здесь, а не отдельным сторожем,
-                # который «должен» вовремя выключить подписку: пропущенный
-                # проход такого сторожа означал бы бесплатную рассылку, а
-                # пропущенное условие в запросе — ничего не означает, его
-                # просто нет.
-                or_(
-                    models.Subscription.expires_at.is_(None),
-                    models.Subscription.expires_at > (now or datetime.now(UTC)),
-                ),
-            )
-            .order_by(models.Subscription.id)
-            .with_for_update(of=models.Subscription, skip_locked=True)
-            .limit(limit)
-        )
-        return [_subscription(row, passport) for row, passport in rows]
-
     async def advance_scan(self, subscription_id: int, listing_id: int) -> None:
         """Монотонно запомнить последнюю рассмотренную карточку."""
         await self._session.execute(
@@ -75,8 +81,13 @@ class DeliveryRepository(Repository):
         score: float,
         payload: dict[str, Any],
         scheduled_at: datetime | None = None,
+        now: datetime | None = None,
     ) -> bool:
         """Поставить карточку в очередь и запомнить, что она отправлена.
+
+        `False` — карточка не поставлена: либо она уже была в очереди этой подписки, либо
+        подписка в момент `now` не вправе получать (истекла, на паузе). В обоих случаях
+        в базе не появляется ни строки.
 
         Обе записи одной транзакцией и в этом порядке. `ON CONFLICT DO NOTHING`
         по `(subscription_id, listing_id)` — не перестраховка: воркер идёт
@@ -88,11 +99,28 @@ class DeliveryRepository(Repository):
         часов БАЗЫ, то есть проход не может ни отложить доставку (дайджест на
         вечер), ни быть проверен на заданном времени — он зависит от того, что
         показывают чужие часы в момент вставки.
+
+        Тем же правилом `now` задаёт и `notifications.created_at`. Суточный слот
+        занимает именно он, а проход считает остаток слотов от СВОЕЙ полуночи:
+        слот со временем с часов базы и граница суток по часам прохода — это два
+        «сейчас», и при проходе на заданном времени лимит считался бы по чужому.
         """
+        moment = now or datetime.now(UTC)
         table = cast(Table, models.Notification.__table__)
+        # Право проверяется в самой вставке, а не запросом перед ней: между «проверил» и
+        # «вставил» подписка успела бы истечь или встать на паузу. Выбор подписок на проход
+        # уже спрашивал тот же предикат, и здесь он не лишний: постановка — единственное
+        # место, где карточка становится обязательством перед клиентом, и она не вправе
+        # доверять тому, что вызывающий когда-то проверил (D7).
+        still_entitled = select(
+            literal(subscription_id, BigInteger),
+            literal(listing_id, BigInteger),
+            literal(score, REAL),
+            literal(moment, DateTime(timezone=True)),
+        ).where(exists().where(models.Subscription.id == subscription_id, entitled(moment)))
         noted = await self._session.execute(
             pg_insert(table)
-            .values(subscription_id=subscription_id, listing_id=listing_id, score=score)
+            .from_select(["subscription_id", "listing_id", "score", "created_at"], still_entitled)
             .on_conflict_do_nothing(index_elements=["subscription_id", "listing_id"])
             .returning(table.c.id)
         )
@@ -105,7 +133,7 @@ class DeliveryRepository(Repository):
                 subscription_id=subscription_id,
                 notification_id=notification_id,
                 payload=payload,
-                scheduled_at=scheduled_at or datetime.now(UTC),
+                scheduled_at=scheduled_at or moment,
             )
         )
         await self._session.flush()
@@ -294,37 +322,23 @@ class DeliveryRepository(Repository):
             .limit(1)
         )
         row = found.first()
-        return _subscription(row[0], row[1]) if row is not None else None
+        return to_subscription_state(row[0], row[1]) if row is not None else None
 
-    async def set_active(self, *, user_id: int, passport_root: int, active: bool) -> bool:
+    async def set_active(
+        self, *, user_id: int, passport_root: int, active: bool, now: datetime | None = None
+    ) -> bool:
         """Поставить мониторинг на паузу или возобновить оплаченный."""
         changed = await self._session.execute(
             update(models.Subscription)
             .where(
                 models.Subscription.user_id == user_id,
                 models.Subscription.passport_root == passport_root,
-                models.Subscription.expires_at > datetime.now(UTC),
+                models.Subscription.expires_at > (now or datetime.now(UTC)),
             )
             .values(is_active=active)
             .returning(models.Subscription.id)
         )
         return changed.scalar_one_or_none() is not None
-
-
-def _subscription(row: models.Subscription, passport: models.Passport) -> SubscriptionState:
-    return SubscriptionState(
-        id=row.id,
-        user_id=row.user_id,
-        passport_root=row.passport_root,
-        mode=row.mode,
-        max_per_day=row.max_per_day,
-        quiet_from=row.quiet_from,
-        quiet_to=row.quiet_to,
-        since_listing_id=row.since_listing_id,
-        scan_listing_id=row.scan_listing_id,
-        expires_at=row.expires_at,
-        passport=to_stored_passport(passport),
-    )
 
 
 def _outbox(row: models.Outbox, recipient_id: int) -> OutboxMessage:

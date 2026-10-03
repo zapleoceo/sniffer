@@ -16,6 +16,7 @@ import structlog
 
 from sniffer.config import Settings
 from sniffer.runtime.service import Service, idle_loop, run_service
+from sniffer.search.currency import usd_vnd_rate
 from sniffer.worker.archive import ArchivePipeline
 from sniffer.worker.chotot_sync import ChototSync
 from sniffer.worker.expiry import Expiry
@@ -33,11 +34,24 @@ def missing_settings(_settings: Settings) -> list[str]:
     return []
 
 
+def build_matcher() -> Matcher:
+    """Матчер со всем, что ему нужно снаружи.
+
+    Курс — зависимость, которую матчеру ДАЮТ: в тесте он собирается без сети. Но и забыть её
+    здесь нельзя: матчер без источника курса держит каждую подписку с долларовым бюджетом
+    в ожидании вечно. Прежний `Matcher()` без курса молча не сужал бюджет вовсе (D2: у 10
+    из 14 бюджетных паспортов в базе бюджет в USD, замер 03.10.2026), и ни один модульный
+    тест этого не видел — дефект сидел в проводке, а не в самом матчере. Поэтому проводка
+    вынесена в функцию, и её проверяет отдельный тест.
+    """
+    return Matcher(rate=usd_vnd_rate)
+
+
 async def run(stop: asyncio.Event) -> None:
     log.info("worker.started")
     retention = Retention()
     archive = ArchivePipeline()
-    matcher = Matcher()
+    matcher = build_matcher()
     chotot = ChototSync()
     expiry = Expiry()
     recategorize = Recategorize()

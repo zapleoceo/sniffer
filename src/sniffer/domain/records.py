@@ -356,6 +356,9 @@ class SubscriptionState:
     # и по неподходящим карточкам, иначе первая страница вечна.
     scan_listing_id: int = 0
     expires_at: datetime | None = None
+    # Сколько проходов подряд эта подписка падала. Нужен самому проходу: от него растёт
+    # пауза карантина, и без него следующий сбой начинал бы счёт с единицы.
+    failed_streak: int = 0
 
 
 @dataclass(frozen=True, slots=True)
