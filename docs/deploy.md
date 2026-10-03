@@ -18,7 +18,7 @@ SnifferBot живёт на том же Hetzner-сервере, что Вера, 
 | Compose-проект | `sniffer` (сеть `sniffer_default`, том `sniffer_sniffer_pgdata`) |
 | Контейнеры | `sniffer-postgres`, `-collector`, `-worker`, `-bot`, `-notifier`, `-dashboard` |
 | БД | `docker exec sniffer-postgres psql -U sniffer -d sniffer`, хост-порт `127.0.0.1:5434` |
-| Резервные копии БД | `/var/backups/sniffer/`, расписание `/etc/cron.d/sniffer-backup`, журнал `/var/log/sniffer-backup.log` — раздел 10 |
+| Резервные копии БД | `/var/backups/vera/sniffer/` (каталог Веры: NAS забирает только его), расписание `/etc/cron.d/sniffer-backup`, журнал `/var/log/sniffer-backup.log` — раздел 10 |
 
 **Домен настроен и отвечает** (31.08.2026). `lbot.zapleo.com` → A-запись
 `195.201.31.49`, проксируется Cloudflare; на сервере лежит
@@ -1113,52 +1113,61 @@ cgroup, а не утащит машину в тряску. Это осознан
 установленным заданием. В базе теперь платежи и права клиентов, поэтому копия —
 часть деплоя, а не память владельца.
 
-**Что.** `infra/backup/sniffer-pg-backup.sh`: `pg_dump` внутри контейнера
+**Что.** `infra/backup/sniffer-pg-backup.sh`: `pg_dump -Fc` внутри контейнера
 `sniffer-postgres` (роль `sniffer`, по сокету, пароль скрипту не нужен), поток
-сразу в gzip. Формат — обычный SQL: читается `psql`, а не `pg_restore`.
+прямо в файл. Формат — собственный сжатый архив `pg_dump`: читается
+`pg_restore` (а не `psql`) и позволяет восстановить и одну таблицу.
 
-**Когда.** `/etc/cron.d/sniffer-backup`: ежедневно в **03:20 по времени
-сервера**, от root. Файл ставит шаг деплоя «резервная копия БД» (5.75) —
-идемпотентно и из репозитория: ручную правку файла перезапишет следующий деплой.
+**Когда.** `/etc/cron.d/sniffer-backup`: ежедневно в **03:00 по времени
+сервера**, от root. Сервер живёт в UTC, во Вьетнаме (UTC+7) это 10:00. Файл
+ставит шаг деплоя «резервная копия БД» (5.75) — идемпотентно и из репозитория:
+ручную правку файла перезапишет следующий деплой.
 
-**Куда.** `/var/backups/sniffer/sniffer-YYYYmmdd-HHMM.sql.gz`, права файла
-**0600**, каталога 0700. В копии — переписка клиентов, их id и зашифрованная
-строка сессии юзербота, поэтому наружу она уходит только на NAS владельца.
-Журнал запусков — `/var/log/sniffer-backup.log`: статусы и числа (имя файла,
-байты, секунды), содержимого дампа там нет.
+**Куда.** `/var/backups/vera/sniffer/sniffer-YYYYmmdd-HHMM.dump`, права файла
+**0640**, группа `verabackup`, каталог 0750 той же группы. NAS владельца
+забирает **только `/var/backups/vera`** по ключу с `rrsync -ro` (только чтение
+одного каталога), под группой `verabackup`: в любой другой каталог он не
+заглянет, а без группы не прочтёт файл. Поэтому копия лежит внутри каталога
+Веры, а не отдельно. Скрипт проверяет группу (`getent group`, нет группы — код 4)
+и на КАЖДОМ запуске выставляет каталогу `install -d -m 0750 -g verabackup`. В
+копии переписка клиентов, их id и зашифрованная строка сессии юзербота: прочие
+пользователи сервера её не читают. Журнал запусков —
+`/var/log/sniffer-backup.log`: статусы и числа (имя файла, байты, секунды),
+содержимого дампа там нет.
 
-**Сколько хранится.** На сервере — **3 суток**. После каждой ХОРОШЕЙ копии
-удаляются `sniffer-*.sql.gz` старше 72 часов и брошенные недописанные
-`sniffer-*.sql.gz.part.*` старше суток; чужие файлы в каталоге скрипт не трогает.
-Сбойный запуск не удаляет ничего: последняя хорошая копия остаётся. Дольше
-хранит NAS владельца — он забирает каталог сам и сам решает, сколько держать
-(это настраивается на его стороне, не из репозитория). Сервер держит минимум,
-потому что диск общий с Верой и Степаном, а деплой отменяется при занятости
-выше 85% (раздел 8): три копии занимают около трёх размеров дампа, смотреть —
-`du -sh /var/backups/sniffer`.
+**Сколько хранится.** Основную чистку делает не этот скрипт, а серверный
+`vera-backup-prune.sh` Веры: он стирает `sniffer-*.dump` после того, как NAS
+файл прочитал. Собственное удаление скрипта — только страховка на **7 суток**
+на случай, если NAS молчит: после каждой ХОРОШЕЙ копии удаляются
+`sniffer-*.dump` старше 168 часов и брошенные недописанные
+`sniffer-*.dump.part.*` старше суток; чужие файлы в каталоге скрипт не трогает.
+Сбойный запуск не удаляет ничего: последняя хорошая копия остаётся. Срок
+хранения на NAS настраивается на его стороне, не из репозитория. Диск общий с
+Верой и Степаном, а деплой отменяется при занятости выше 85% (раздел 8):
+смотреть `du -sh /var/backups/vera/sniffer`.
 
 **Когда запуск считается неудачным** (код выхода != 0, строка `ОШИБКА` в журнале,
 недописанный файл удалён, старые копии целы):
 
 | Код | Причина |
 |---|---|
-| 1 | `pg_dump` или `gzip` вернули ошибку: контейнер не отвечает, база недоступна |
+| 1 | `pg_dump` вернул ошибку: контейнер не отвечает, база недоступна |
 | 2 | дамп меньше `MIN_BYTES` (4096 байт): пустой дамп при нулевом коде бывает, и на такую «копию» полагаются |
-| 3 | архив не читается (`gzip -t`) |
-| 4 | неверная настройка (`KEEP_DAYS`, `MIN_BYTES`) или каталог недоступен |
+| 3 | архив не читается (`pg_restore -l`) |
+| 4 | неверная настройка (`KEEP_DAYS`, `MIN_BYTES`), нет группы `verabackup` или каталог недоступен |
 
 **Как проверить, что копия делается**
 
 ```bash
 cat /etc/cron.d/sniffer-backup            # расписание на месте, путь к скрипту верный
 systemctl is-active cron                  # демон cron работает
-ls -l /var/backups/sniffer/               # sniffer-*.sql.gz, права -rw-------
+ls -l /var/backups/vera/sniffer/          # sniffer-*.dump, права -rw-r----- группа verabackup
 tail -n 3 /var/log/sniffer-backup.log     # последняя строка содержит «sniffer-pg-backup: OK:»
-gzip -t /var/backups/sniffer/sniffer-<метка>.sql.gz && echo читается
+docker exec -i sniffer-postgres pg_restore -l < /var/backups/vera/sniffer/sniffer-<метка>.dump >/dev/null && echo читается
 bash /var/www/sniffer/infra/backup/sniffer-pg-backup.sh   # снять копию прямо сейчас
 ```
 
-Первая копия появится в 03:20 после деплоя, который поставил расписание; не
+Первая копия появится в 03:00 UTC после деплоя, который поставил расписание; не
 ждать — последняя команда.
 
 **Как проверить, что копия восстанавливается** (раз в месяц; живую базу не
@@ -1169,9 +1178,8 @@ docker run -d --name sniffer-restore-check --memory 768m \
   -e POSTGRES_USER=sniffer -e POSTGRES_DB=sniffer \
   -e POSTGRES_HOST_AUTH_METHOD=trust pgvector/pgvector:pg16
 until docker exec sniffer-restore-check pg_isready -U sniffer -d sniffer; do sleep 2; done
-gunzip -c /var/backups/sniffer/sniffer-<метка>.sql.gz \
-  | docker exec -i sniffer-restore-check psql -U sniffer -d sniffer \
-      -v ON_ERROR_STOP=1 --single-transaction -q
+docker exec -i sniffer-restore-check pg_restore -U sniffer -d sniffer \
+  --exit-on-error --single-transaction < /var/backups/vera/sniffer/sniffer-<метка>.dump
 docker exec sniffer-restore-check psql -U sniffer -d sniffer -tAc "select count(*) from listings"
 docker rm -f sniffer-restore-check
 ```
@@ -1190,9 +1198,8 @@ docker compose --profile agent-catalog stop collector agent-collector worker bot
 docker exec sniffer-postgres psql -U sniffer -d postgres -v ON_ERROR_STOP=1 \
   -c "DROP DATABASE sniffer WITH (FORCE)" -c "CREATE DATABASE sniffer"
 # 3. залить копию одной транзакцией
-gunzip -c /var/backups/sniffer/sniffer-<метка>.sql.gz \
-  | docker exec -i sniffer-postgres psql -U sniffer -d sniffer \
-      -v ON_ERROR_STOP=1 --single-transaction -q
+docker exec -i sniffer-postgres pg_restore -U sniffer -d sniffer \
+  --exit-on-error --single-transaction < /var/backups/vera/sniffer/sniffer-<метка>.dump
 # 4. поднять всё обратно деплоем: он заодно прогонит цепочку миграций и часовых
 bash infra/deploy.sh
 ```

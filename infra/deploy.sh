@@ -212,13 +212,14 @@ check_schema_sentinels() {
 # git с Windows не хранит бит исполнения (docs/deploy.md, раздел 6). PATH задан
 # явно: у cron он урезан до /usr/bin:/bin, и `docker` в нём не найдётся. Вывод уходит
 # в файл журнала на сервере: там статусы и числа, содержимого дампа нет. Время —
-# 03:20 по часам сервера, пользователь root (доступ к сокету docker).
+# 03:00 по часам сервера (он в UTC: 10:00 по Вьетнаму), пользователь root
+# (доступ к сокету docker и право chgrp на verabackup).
 backup_cron_content() {
   cat <<CRON
 # Управляется infra/deploy.sh (шаг «резервная копия БД»): ручные правки перезапишет следующий деплой.
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-20 3 * * * root bash ${DEPLOY_PATH}/infra/backup/sniffer-pg-backup.sh >>/var/log/sniffer-backup.log 2>&1
+0 3 * * * root bash ${DEPLOY_PATH}/infra/backup/sniffer-pg-backup.sh >>/var/log/sniffer-backup.log 2>&1
 CRON
 }
 
@@ -273,7 +274,7 @@ install_backup_cron() {
     echo "   ${target} после записи не совпал с ожидаемым" >&2
     return 1
   fi
-  info "cron резервной копии: ${state} (ежедневно 03:20, ${target})"
+  info "cron резервной копии: ${state} (ежедневно 03:00 UTC, ${target})"
 }
 
 # ── 0. Замок: два деплоя одновременно перетрут друг другу рабочее дерево ─────

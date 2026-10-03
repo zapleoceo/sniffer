@@ -70,12 +70,29 @@ def test_the_installer_writes_the_cron_file() -> None:
     lines = content.splitlines()
     assert "RC=0" in head and "cron резервной копии: установлен" in head
     assert lines[0].startswith("#") and "SHELL=/bin/bash" in lines
-    assert any(line.startswith("PATH=") and "/usr/bin" in line for line in lines)
     assert lines[-1] == (
-        f"20 3 * * * root bash {deploy}/infra/backup/sniffer-pg-backup.sh >>{LOG} 2>&1"
+        f"0 3 * * * root bash {deploy}/infra/backup/sniffer-pg-backup.sh >>{LOG} 2>&1"
     )
     assert content.endswith("\n") and "\r" not in content
     assert mode.strip() == "644"
+
+
+def test_cron_gets_a_full_path_before_the_job_line() -> None:
+    """У cron PATH урезан до /usr/bin:/bin; `docker` и утилиты скрипта должны находиться."""
+    lines = function_source(script(), "backup_cron_content").splitlines()
+    paths = [line for line in lines if line.startswith("PATH=")]
+
+    assert len(paths) == 1, "в cron-файле должна быть ровно одна строка PATH"
+    dirs = paths[0].removeprefix("PATH=").split(":")
+    assert {"/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"} <= set(dirs)
+    job = next(i for i, line in enumerate(lines) if "sniffer-pg-backup.sh" in line)
+    assert lines.index(paths[0]) < job, "PATH объявлен после задания и на него не действует"
+
+
+def test_the_job_runs_at_03_00_server_time_utc() -> None:
+    content = function_source(script(), "backup_cron_content")
+
+    assert re.search(r"^0 3 \* \* \* root ", content, re.MULTILINE)
 
 
 @needs_bash
