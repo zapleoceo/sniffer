@@ -66,6 +66,14 @@ class Settings(BaseSettings):
     broker_url: str = "https://aib.zapleo.com"
     broker_project_key: str = ""
     broker_timeout_s: int = 120
+    # Закрепление модели по ролям (docs/architecture.md, «Модель по роли»).
+    # Имена сверены с каталогом брокера (providers/specs.py, 04.10.2026).
+    # Пустая строка в .env = не закреплять: идёт цепочка брокера по capability.
+    broker_model_intake: str = "gemini/gemini-3.5-flash-lite"
+    broker_model_planner: str = "gemini/gemini-3.5-flash-lite"
+    broker_model_offer_screen: str = "gemini/gemini-3.5-flash-lite"
+    broker_model_extraction: str = "gemini/gemini-3.5-flash-lite"
+    broker_model_guard: str = "gemini/gemini-3.6-flash"
 
     # Cloudflare R2 — пусто означает «медиа не сохраняем»
     r2_account_id: str = ""

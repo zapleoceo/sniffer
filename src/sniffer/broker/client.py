@@ -18,6 +18,7 @@ import structlog
 
 from sniffer.broker.contracts import UsageSink
 from sniffer.broker.output import InvalidOutput, OutputReason, check_schema, parse_object
+from sniffer.broker.pins import pinned_model
 from sniffer.config import get_settings
 
 log = structlog.get_logger(__name__)
@@ -85,6 +86,7 @@ class BrokerClient:
         self._base_url = settings.broker_url.rstrip("/")
         self._key = settings.broker_project_key
         self._timeout_s = settings.broker_timeout_s
+        self._settings = settings
         self._client = client or httpx.AsyncClient(timeout=30.0)
         # Приёмник учёта внедряется и только внедряется. Раньше здесь стояло
         # «None означает учёт по умолчанию», и `default_usage_sink` брался
@@ -108,7 +110,14 @@ class BrokerClient:
         tool_choice: str | dict[str, Any] | None = None,
         max_tokens: int = 1024,
         temperature: float = 0.7,
+        model: str | None = None,
     ) -> BrokerResult:
+        """`model` закрепляет «провайдер/модель»; без него — цепочка брокера.
+
+        Закрепление не гарантия: брокер идёт только по указанной модели и при
+        её отказе (квота, 400 на неизвестное имя, тайм-аут) возвращает ошибку,
+        а не цепочку. Поэтому бот не молчит: один повтор без закрепления.
+        """
         if tools is not None and (not tools or response_format is not None):
             raise ValueError("tools must be nonempty and cannot accompany response_format")
         if tool_choice is not None and tools is None:
@@ -124,10 +133,28 @@ class BrokerClient:
             payload["tools"] = tools
             payload["tool_choice"] = tool_choice if tool_choice is not None else "auto"
 
-        job_id = await self._submit(capability, payload)
-        result = await self._poll(job_id)
+        if model:
+            try:
+                result = await self._run(capability, {**payload, "model": model})
+            except BrokerCapError:
+                # Дневной cap — свойство проекта, а не модели: повтор его не обойдёт.
+                raise
+            except BrokerError as exc:
+                log.warning(
+                    "broker.pinned_model_failed",
+                    capability=capability,
+                    model=model,
+                    error=str(exc)[:200],
+                )
+                result = await self._run(capability, payload)
+        else:
+            result = await self._run(capability, payload)
         await self._account(capability, result)
         return result
+
+    async def _run(self, capability: str, payload: dict[str, Any]) -> BrokerResult:
+        job_id = await self._submit(capability, payload)
+        return await self._poll(job_id)
 
     async def structured(
         self,
@@ -155,6 +182,7 @@ class BrokerClient:
             capability=capability,
             max_tokens=max_tokens,
             temperature=0.1,
+            model=pinned_model(self._settings, schema_name),
             response_format={
                 "type": "json_schema",
                 "json_schema": {"name": schema_name, "strict": True, "schema": schema},
