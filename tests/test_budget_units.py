@@ -57,3 +57,30 @@ def test_metres_are_not_millions_in_a_client_phrase() -> None:
 def test_miles_are_not_millions_in_a_client_phrase() -> None:
     assert parse_budget("до 5 миль от моря, до 400$").max == 400
     assert parse_budget("квартира до 5 миллионов").max == 5_000_000
+
+
+@pytest.mark.parametrize("text", ["скутер 2021", "honda 2019", "2021", "скутер 2021 уехал"])
+def test_a_bare_year_is_not_a_budget(text: str) -> None:
+    """Резерв при молчащей модели читал «скутер 2021» как «до 2021 $» и резал выдачу."""
+    assert parse_budget(text).max is None
+
+
+@pytest.mark.parametrize(
+    ("text", "maximum"),
+    [
+        ("скутер до 2021", 2021),
+        ("скутер 2021$", 2021),
+        ("скутер $2021", 2021),
+        ("скутер 2021 долларов", 2021),
+        ("скутер 2021 usd", 2021),
+        ("квартира 2000-2500$", 2500),
+    ],
+)
+def test_four_digits_stay_a_budget_when_the_client_said_so(text: str, maximum: int) -> None:
+    assert parse_budget(text).max == maximum
+
+
+def test_a_range_of_four_digit_prices_keeps_both_edges() -> None:
+    budget = parse_budget("квартира 2000-2500$")
+
+    assert (budget.min, budget.max) == (2000, 2500)

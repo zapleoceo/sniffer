@@ -15,17 +15,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from html import escape
 
-from aiogram.filters.callback_data import CallbackData
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from sniffer.bot.keyboards import SubscribeCallback
 from sniffer.bot.naming import plural
 from sniffer.bot.slot_wording import FOLLOW_LABEL
 from sniffer.bot.threads import labels
+from sniffer.bot.watch_button import LIST, WatchCallback
 from sniffer.domain import plans
 from sniffer.domain.records import QueryOverview
 
-LIST, CARD, PAUSE, RESUME = "l", "c", "p", "r"
+CARD, PAUSE, RESUME = "c", "p", "r"
 MOVE, MOVE_TO, DELETE, DELETE_OK, NEW, TAB = "m", "t", "d", "k", "n", "w"
 
 PAID_SEARCHES = plans.PAID_SEARCHES
@@ -42,13 +42,9 @@ MOVE_REFUSED = "Не получилось перенести слот: он уж
 TAB_OPENED = "Открыл вкладку «{name}»: пишите про этот поиск там."
 TAB_FAILED = "Не получилось открыть вкладку. Поиск работает и здесь, в чате."
 NEW_TAB = "Открыл вкладку «{name}». Напишите в ней, что ищете."
+REPLACED = "Прежний поиск убран, слежение за ним остановлено; версии сохранены."
+KEPT = "Оставил текущий поиск."
 DELETED = "Поиск убран. Слежение за ним остановлено; версии сохранены."
-
-
-class WatchCallback(CallbackData, prefix="wch"):
-    a: str
-    root: int = 0
-    to: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,19 +60,6 @@ def limit_text(view: PanelView) -> str:
     """Отказ открыть ещё один поиск: сколько их уже и что с этим делать."""
     upgrade = "" if view.paid_slots else UPGRADE.format(paid=PAID_SEARCHES)
     return LIMIT_REACHED.format(used=view.used, noun=plural(view.used, _NOUN), upgrade=upgrade)
-
-
-def limit_markup() -> InlineKeyboardMarkup:
-    """Кнопка к панели: там пауза и «Удалить поиск» у каждого поиска."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🔔 Мои слежения", callback_data=WatchCallback(a=LIST).pack()
-                )
-            ]
-        ]
-    )
 
 
 def panel_text(view: PanelView) -> str:

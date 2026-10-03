@@ -18,7 +18,12 @@ from __future__ import annotations
 
 from sniffer.bot.naming import budget_phrase, category_noun
 from sniffer.domain.passport import Category, Intent, Passport
-from sniffer.domain.plans import FREE_CARDS_PER_PERIOD, PAID_CARDS_PER_PERIOD, SUBSCRIPTION_STARS
+from sniffer.domain.plans import (
+    FREE_CARDS_PER_PERIOD,
+    PAID_CARDS_PER_PERIOD,
+    PAID_SEARCHES,
+    SUBSCRIPTION_STARS,
+)
 from sniffer.search.vocabulary import city_name, served_cities
 
 NOTHING_FOUND = (
@@ -72,9 +77,10 @@ GREETING = (
     "свежими. Карточка, которую вы уже видели в этом периоде, повторно не считается.\n"
     f"Больше — подписка {SUBSCRIPTION_STARS} ⭐ в месяц: до {PAID_CARDS_PER_PERIOD} карточек за "
     "период и слежение за новыми объявлениями.\n\n"
-    "Ищете несколько разных вещей? Начинайте каждую с /new — поиски не перепутаются. "
-    "Последние поиски и переключение между ними — /requests. Остаток карточек и дата "
-    "обновления — /plan."
+    "Бесплатно — один поиск за раз: допишите марку, район или бюджет, и он уточнится. Чтобы "
+    "искать другое, напишите /new: текущий поиск заменится новым, либо удалите его в «Мои "
+    f"слежения». С подпиской — до {PAID_SEARCHES} поисков одновременно. "
+    "Последние поиски — /requests, остаток карточек и дата обновления — /plan."
 )
 
 # Как назвать категорию во множественном числе в заголовке выдачи. Русские слова,

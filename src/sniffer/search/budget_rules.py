@@ -93,6 +93,28 @@ _PERIODS: tuple[tuple[PricePeriod, re.Pattern[str]], ...] = (
 _YEAR_RE = re.compile(r"^\s*(?:год|г\.|г\b|year|гв)", re.IGNORECASE)
 _YEAR_RANGE = range(1990, 2036)
 
+# Голый год без слова «год» («скутер 2021») — тоже год, а не потолок цены: резерв при
+# молчащей модели читал его «до 2021 $» и молча резал выдачу. Бюджетом четыре цифры
+# становятся, только если человек сам это сказал: словом-маркером («до 2021»), валютой
+# рядом («2021$», «$2021», «2021 долларов») или вилкой («2000-2500»).
+_CURRENCY_AFTER_RE = re.compile(
+    r"\s*(?:[$€₫₽]|usd\b|vnd\b|eur\b|rub\b|долл|бакс|донг|евро|руб|у\.\s?е\b)",
+    re.IGNORECASE,
+)
+_CURRENCY_BEFORE_RE = re.compile(r"[$€₫₽]\s*$")
+_RANGE_DASHES = ("-", chr(0x2013), chr(0x2014))
+
+
+def _bare_year(text: str, start: int, end: int, marker: str | None) -> bool:
+    """Четыре цифры года без маркера, валюты и вилки — это не сумма."""
+    if marker is not None:
+        return False
+    before, after = text[:start], text[end:]
+    if _CURRENCY_AFTER_RE.match(after) or _CURRENCY_BEFORE_RE.search(before):
+        return False
+    return not (after.startswith(_RANGE_DASHES) or before.endswith(_RANGE_DASHES))
+
+
 # Число, за которым идёт СЧЁТНАЯ единица (комнаты, срок аренды), а не денежная,
 # — не сумма. «квартиру 2 спальни» → это две спальни, не «до 2 USD»; «на 3 дня»,
 # «на 3 месяца» → это срок, не «до 3». Тот же приём, что у года («2019 года»):
@@ -174,7 +196,14 @@ def _amounts(text: str) -> list[tuple[float, str | None]]:
             continue
         if multiplier == 1 and _NON_MONEY_AFTER_RE.match(text[match.end() :]):
             continue
-        found.append((value, _marker(text[: match.start()])))
+        marker = _marker(text[: match.start()])
+        if (
+            multiplier == 1
+            and int(value) in _YEAR_RANGE
+            and _bare_year(text, match.start(), match.end(), marker)
+        ):
+            continue
+        found.append((value, marker))
     return found
 
 

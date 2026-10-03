@@ -12,6 +12,7 @@ from aiogram.types import CallbackQuery, Chat, Message, User
 
 from sniffer.bot import filter_card as card
 from sniffer.bot import filter_flow, watch_flow
+from sniffer.bot import watch_button as button
 from sniffer.bot import watch_panel as panel
 from sniffer.bot.handlers import watch as handlers
 from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
@@ -178,7 +179,7 @@ async def test_a_new_search_over_the_limit_is_refused_with_the_numbers(
         return False, full
 
     monkeypatch.setattr(watch_flow, "can_open_new", can_open_new)
-    data = panel.WatchCallback(a=panel.NEW)
+    data = button.WatchCallback(a=panel.NEW)
     await handlers.on_watch(callback(data.pack()), data)
 
     assert wire.answered[-1].startswith("У вас уже 1 поиск — поставьте на паузу или удалите один")
@@ -194,7 +195,7 @@ async def test_a_paid_account_over_the_limit_is_not_pitched_a_subscription(
         return False, full
 
     monkeypatch.setattr(watch_flow, "can_open_new", can_open_new)
-    data = panel.WatchCallback(a=panel.NEW)
+    data = button.WatchCallback(a=panel.NEW)
     await handlers.on_watch(callback(data.pack()), data)
     assert wire.answered[-1].startswith("У вас уже 10 поисков")
     assert "подписку" not in wire.answered[-1]

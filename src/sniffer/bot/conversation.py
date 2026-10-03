@@ -59,7 +59,7 @@ from sniffer.search.intake import QueryIntake
 from sniffer.search.intake_rules import parse_query
 from sniffer.search.live import run_plan
 from sniffer.search.planner import SearchPlanner
-from sniffer.search.refinements import merge_edit, price_refinement
+from sniffer.search.refinements import merge_edit, price_refinement, refine, refines
 from sniffer.search.relevance import rank_items, with_vnd_budget
 from sniffer.search.vocabulary import is_served
 from sniffer.sources.base import RawItem, registered_sources
@@ -373,6 +373,18 @@ class Conversation:
             )
             await self._ask_or_search(dialogue, send)
             return
+        if current is not None and refines(current.passport, passport):
+            # Допись под выдачей («honda lead», «автомат», «в Нячанге») — уточнение той же
+            # ветки: категория и город не сменились. Новой веткой она упиралась бы в предел
+            # поисков, хотя сам заголовок выдачи советует именно так дописать запрос.
+            dialogue = await self._store.revise(
+                dialogue,
+                refine(current.passport, passport, message),
+                kind=EVENT_USER_MESSAGE,
+                payload={"refinement": message},
+            )
+            await self._ask_or_search(dialogue, send)
+            return
         await self._open(dialogue, passport, send)
 
     async def _begin_requested(self, dialogue: Dialogue, message: str, send: Send) -> bool:
@@ -399,7 +411,7 @@ class Conversation:
                 # отказали, получал бы отказ на каждое следующее сообщение.
                 if dialogue.starting_new and dialogue.passport is not None:
                     await self._store.select(dialogue, dialogue.passport.root)
-                await send(Reply(full))
+                await send(Reply(full, offer_panel=True))
                 return True
         opened = await open_thread(self._store, dialogue, passport)
         if opened is None:

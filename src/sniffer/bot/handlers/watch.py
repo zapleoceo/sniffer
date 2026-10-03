@@ -14,6 +14,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from sniffer.bot import filter_card as card
 from sniffer.bot import filter_flow, query_menu, tab_flow, threads, topics, watch_flow
+from sniffer.bot import watch_button as button
 from sniffer.bot import watch_panel as panel
 from sniffer.bot.search_gate import Start, start_new_search
 from sniffer.bot.store import Client
@@ -33,18 +34,22 @@ async def watch(message: Message) -> None:
         await _panel(message, client, edit=False)
 
 
-@router.callback_query(panel.WatchCallback.filter())
-async def on_watch(callback: CallbackQuery, callback_data: panel.WatchCallback) -> None:
+@router.callback_query(button.WatchCallback.filter())
+async def on_watch(callback: CallbackQuery, callback_data: button.WatchCallback) -> None:
     await callback.answer()
     message = callback.message
     if not isinstance(message, Message):
         return
     client = topics.client_of_callback(callback, message)
     action, root = callback_data.a, callback_data.root
-    if action == panel.LIST:
+    if action == button.LIST:
         await _panel(message, client)
     elif action == panel.NEW:
         await _new_search(message, client)
+    elif action == button.REPLACE:
+        await _replace(message, client, root)
+    elif action == button.KEEP:
+        await message.edit_text(panel.KEPT)
     else:
         await _on_search(message, client, action, root, callback_data.to)
 
@@ -94,6 +99,13 @@ async def _new_search(message: Message, client: Client) -> None:
     started = await start_new_search(message, client, search.conversation(), prefer_tab=True)
     if started is Start.ARMED:
         await message.answer(threads.ASK_WHAT)
+
+
+async def _replace(message: Message, client: Client, root: int) -> None:
+    """«Заменить»: единственный поиск убирается, и тот же путь, что у «➕», просит новый."""
+    if await watch_flow.archive(client, root):
+        await message.edit_text(panel.REPLACED)
+        await _new_search(message, client)
 
 
 async def _open_tab(message: Message, client: Client, root: int) -> None:
