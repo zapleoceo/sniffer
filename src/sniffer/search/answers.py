@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 
 from sniffer.domain.dialogue import AnswerValue
 from sniffer.search.budget_rules import parse_budget
@@ -77,33 +78,27 @@ def is_skip(text: str) -> bool:
     return bool(_SKIP_RE.search(text))
 
 
-def interpret(field: str, text: str) -> AnswerValue | None:
-    """Слова клиента → значение поля. `None` — «это не ответ на вопрос».
+def _budget(text: str) -> AnswerValue | None:
+    budget = parse_budget(text)
+    return budget if budget.max else None
 
-    `None` важнее, чем кажется: на вопрос про бюджет клиент нередко отвечает
-    новым запросом («ладно, тогда квартиру»), и принять его за сумму значит
-    потерять запрос.
-    """
-    if field == "budget.max":
-        budget = parse_budget(text)
-        return budget if budget.max else None
-    if field == "category":
-        parsed = parse_query(text)
-        if parsed.attributes.get("body_type") == "tay_ga":
-            return "scooter"
-        category = detect_category(text)
-        return category.value if category else None
-    if field == "city":
-        return detect_city(text)
-    if field == "attributes.brand":
-        return detect_brand(text)
-    if field == "attributes.transmission":
-        return detect_transmission(text)
-    if field == "attributes.condition":
-        return _match(_CONDITION_RULES, text)
-    if field == "attributes.rooms":
-        return _rooms(text)
-    return None
+
+def _category(text: str) -> AnswerValue | None:
+    parsed = parse_query(text)
+    if parsed.attributes.get("body_type") == "tay_ga":
+        return "scooter"
+    category = detect_category(text)
+    return category.value if category else None
+
+
+def _model(text: str) -> AnswerValue | None:
+    """Модель словами: «lead», «air blade». Читает тот же разбор, что и первичный запрос."""
+    value = parse_query(text).attributes.get("model")
+    return str(value) if value else None
+
+
+def _condition(text: str) -> AnswerValue | None:
+    return _match(_CONDITION_RULES, text)
 
 
 def _match(rules: tuple[tuple[str, re.Pattern[str]], ...], text: str) -> str | None:
@@ -126,3 +121,29 @@ def _rooms(text: str) -> int | None:
         if pattern.search(text):
             return value
     return None
+
+
+# Слова клиента → значение поля. Ключ — `FieldSpec.field` из `domain/fields.py`:
+# поле без записи здесь отвечает «это не ответ». Одна запись на поле вместо
+# цепочки `if`, которую приходилось править в паре с реестром.
+_READERS: dict[str, Callable[[str], AnswerValue | None]] = {
+    "budget.max": _budget,
+    "category": _category,
+    "city": detect_city,
+    "attributes.brand": detect_brand,
+    "attributes.transmission": detect_transmission,
+    "attributes.condition": _condition,
+    "attributes.rooms": _rooms,
+    "attributes.model": _model,
+}
+
+
+def interpret(field: str, text: str) -> AnswerValue | None:
+    """Слова клиента → значение поля. `None` — «это не ответ на вопрос».
+
+    `None` важнее, чем кажется: на вопрос про бюджет клиент нередко отвечает
+    новым запросом («ладно, тогда квартиру»), и принять его за сумму значит
+    потерять запрос.
+    """
+    reader = _READERS.get(field)
+    return reader(text) if reader is not None else None

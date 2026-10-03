@@ -35,6 +35,8 @@ def listing() -> Listing:
         price_amount=Decimal("12000000"),
         price_currency="VND",
         posted_at=datetime(2026, 9, 2, tzinfo=UTC),
+        district="my khe",
+        attributes={"brand": "honda"},
         id=7,
     )
 
@@ -47,6 +49,9 @@ async def test_archive_returns_the_original_source_identity() -> None:
     assert (item.source, item.external_id) == ("chotot", "ad-42")
     assert item.price_vnd == 12_000_000
     assert catalog.params == {"city": "nha_trang"}
+    # Фасеты (domain/facets.py) читают район и атрибуты отсюда.
+    assert item.raw["district"] == "my khe"
+    assert item.raw["attributes"] == {"brand": "honda"}
 
 
 async def test_archive_failure_degrades_without_breaking_other_sources() -> None:

@@ -30,11 +30,13 @@ from sniffer.bot.showing import show
 from sniffer.bot.store import Client, Dialogue, DialogueStore
 from sniffer.bot.threads import open_thread
 from sniffer.broker.usage import request_scope
+from sniffer.domain.clarify import Ask, ClarificationPlanner
 from sniffer.domain.dialogue import (
     EVENT_FEEDBACK,
     EVENT_MANUAL_EDIT,
     EVENT_QUESTION_ASKED,
     EVENT_USER_MESSAGE,
+    SHOW_ALL,
     SKIP,
     Feedback,
     Question,
@@ -48,6 +50,7 @@ from sniffer.domain.dialogue import (
     question_for,
     restates,
 )
+from sniffer.domain.facets import facets_from
 from sniffer.domain.passport import Passport
 from sniffer.search.answers import interpret, is_skip
 from sniffer.search.currency import usd_vnd_rate
@@ -231,6 +234,7 @@ class Conversation:
         scoped_finder: ScopedFinder | None = None,
         recorder: Recorder | None = None,
         quota: QuotaService | None = None,
+        planner: ClarificationPlanner | None = None,
     ) -> None:
         self._store = store
         self._intake = intake
@@ -238,6 +242,8 @@ class Conversation:
         self._scoped_finder = scoped_finder
         # Без квоты — прежнее поведение: симуляция и тесты диалога лимитов не знают.
         self._quota = quota
+        # Без планировщика вопросов по базе нет: прежнее поведение (симуляция, тесты).
+        self._planner = planner
         # По умолчанию — настоящий журнал: разговор создаётся хендлером без
         # аргументов, и всё, что не подставлено здесь, на боевом пути не
         # появится никогда.
@@ -432,7 +438,14 @@ class Conversation:
             # ответа, а второе нажатие не должно плодить версии паспорта.
             return
 
-        if value == SKIP:
+        if value == SHOW_ALL:
+            # Отказ сужать — след цепочки, а не правка паспорта.
+            dialogue = await self._store.note(
+                dialogue,
+                kind=EVENT_MANUAL_EDIT,
+                payload={"field": question.field, "show_all": True},
+            )
+        elif value == SKIP:
             if not question.skippable:
                 await self._ask(dialogue, question, send)
                 return
@@ -603,6 +616,11 @@ class Conversation:
 
         if turn is not None:
             turn.found = found
+        if self._planner is not None and not found.deferred and found.items:
+            step = self._planner.decide(passport, facets_from(found.items), dialogue.state)
+            if isinstance(step, Ask):
+                await self._ask(dialogue, step.question, send)
+                return
         who = turn.client if turn is not None else None
         await show(
             send,

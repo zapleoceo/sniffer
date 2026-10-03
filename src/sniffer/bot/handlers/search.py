@@ -29,6 +29,8 @@ from sniffer.bot.keyboards import (
 from sniffer.bot.quota import QuotaService
 from sniffer.bot.quota_ledger import account_of, new_quota
 from sniffer.bot.store import Client, PassportStore
+from sniffer.config import get_settings
+from sniffer.domain.clarify import ClarificationPlanner
 from sniffer.domain.dialogue import Feedback
 
 log = structlog.get_logger(__name__)
@@ -53,11 +55,26 @@ def quota() -> QuotaService:
     return _quota
 
 
+def _planner() -> ClarificationPlanner | None:
+    """Вопросы по базе — только на собственном каталоге.
+
+    Каждый шаг сужения повторяет поиск, чтобы пересчитать счёт. Это дёшево на SQL
+    по `listings` и дорого на живом поиске (модель и обход источников на каждый
+    вопрос), поэтому на других режимах планировщика нет.
+    """
+    return ClarificationPlanner() if get_settings().catalog_mode == "listings" else None
+
+
 def conversation() -> Conversation:
     """Один разговор на процесс. Состояние всё равно в базе, а не в нём."""
     global _conversation
     if _conversation is None:
-        _conversation = Conversation(PassportStore(), scoped_finder=CatalogFinder(), quota=quota())
+        _conversation = Conversation(
+            PassportStore(),
+            scoped_finder=CatalogFinder(),
+            quota=quota(),
+            planner=_planner(),
+        )
     return _conversation
 
 

@@ -101,7 +101,7 @@ def test_the_header_and_the_cards_count_the_same_number_when_the_limit_cut_the_p
     reply = present(bike(), Result(found), root=ROOT, gate=gate(found, 2, granted=2, withheld=3))
 
     assert cards_in(reply) == 2
-    assert "показываю 2 самых подходящих" in reply.text
+    assert "показываю 2 лучших" in reply.text
 
 
 def test_the_cards_are_exactly_the_admitted_ones_not_just_the_first_few() -> None:
