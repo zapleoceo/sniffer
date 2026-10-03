@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import Iterator
-from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -41,7 +40,6 @@ pytestmark = pytest.mark.skipif(
     reason="TEST_DATABASE_URL не задан: живого Postgres нет",
 )
 
-NOW = datetime(2026, 8, 31, 12, 0, tzinfo=UTC)
 ENCRYPTION_KEY = "encryption-key-длинный-и-случайный-32+"
 
 
