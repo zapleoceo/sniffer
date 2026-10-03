@@ -1,60 +1,107 @@
-"""Консервативное чтение цены из свободного текста.
+"""Одна цена объявления из свободного текста.
 
-Это не источник и не extractor: одно и то же знание нужно живому Telegram
-поиску и обработке накопленного архива. Число признаём ценой только после
-явной метки, иначе год, пробег и ``125cc`` становятся ложными донгами.
+Это вход живого Telegram-поиска и обработки архива. Что считать суммой, решает
+`price_facts` (контекст и словарь письма в `price_vocab`); здесь — какая из
+найденных сумм и есть цена объявления. Прежний вход ``price_hint`` остался:
+он нужен там, где известны только текст и донги.
 """
 
 from __future__ import annotations
 
-import re
+from dataclasses import replace
 
-# Потолок правдоподобия: 10 млрд донгов — это 380 тысяч долларов. Дороже в
-# Нячанге не продают ни байков, ни квартир; столько же держит колонка
-# `NUMERIC(14,2)`, и совпадение это не случайное — схема и здравый смысл
-# сходятся в одной точке.
-MAX_PLAUSIBLE_VND = 10_000_000_000
+from sniffer.domain.price_bounds import price_bounds
+from sniffer.domain.price_facts import MAX_PLAUSIBLE_VND, PriceFact, parse_prices
+from sniffer.domain.price_vocab import TO_MONTH
 
-_PRICE_RE = re.compile(
-    r"(?:цена|price|giá|gia)\s*[:—-]?\s*"
-    r"(?P<number>\d+(?:[ .]\d{3})+|\d+(?:[.,]\d+)?)\s*"
-    r"(?P<unit>млн\.?|мил\.?|million|triệu|tr|m|тыс\.?|k)?\s*"
-    r"(?P<currency>₫|đ|vnd|dong|донг(?:ов)?)?",
-    re.IGNORECASE,
-)
+__all__ = [
+    "MAX_PLAUSIBLE_VND",
+    "PriceFact",
+    "choose_price",
+    "parse_price",
+    "parse_prices",
+    "price_hint",
+]
+
+# Пометка сильнее: «Цена:» надёжнее значка денег, значок надёжнее голой суммы,
+# а итоговая строка агрегатора — последняя надежда, когда в тексте цены нет.
+_RANK = {"label": 0, "weak": 1, "money": 1, "text": 2, "footer": 3}
+# Только для проверки границ у сумм в долларах, не для показа клиенту.
+_ROUGH_USD_VND = 25_000
+
+
+def _monthly(fact: PriceFact) -> float:
+    return fact.amount * TO_MONTH.get(fact.period or "", 1)
+
+
+def _vnd(fact: PriceFact, *, rent: bool) -> float:
+    base = _monthly(fact) if rent else fact.amount
+    return base * (_ROUGH_USD_VND if fact.currency == "USD" else 1)
+
+
+def _resolved(fact: PriceFact, bounds: tuple[int, int] | None, *, rent: bool) -> PriceFact | None:
+    """Факт внутри границ; сокращённое число получает тот масштаб, что в границы входит."""
+    if bounds is None:
+        return None if fact.bare else fact
+    scales = (1_000, 1_000_000) if fact.bare else (1,)
+    for scale in scales:
+        candidate = (
+            replace(fact, amount=round(fact.value * scale), bare=False) if fact.bare else fact
+        )
+        if bounds[0] <= _vnd(candidate, rent=rent) <= bounds[1]:
+            return candidate
+    return None
+
+
+def choose_price(
+    facts: list[PriceFact], *, rent: bool | None = None, bounds: tuple[int, int] | None = None
+) -> PriceFact | None:
+    """Одна цена объявления из найденных сумм.
+
+    Сначала границы правдоподобия (если известны), потом срок: аренде нужна
+    помесячная цена, продаже — цена без срока, и суточную цену байка с месячной
+    путать нельзя — это разница на порядок. Потом пометка и наименьшая: каталог
+    цен по этажам и срокам сводится к «от 9 млн», остальные уходят в ``up_to``.
+    """
+    pool = [fact for fact in facts if fact.currency == "VND"] or facts
+    pool = [r for fact in pool if (r := _resolved(fact, bounds, rent=bool(rent))) is not None]
+    if not pool:
+        return None
+    fits = {True: (None, "month"), False: (None,)}.get(rent) if rent is not None else None
+    group = [fact for fact in pool if fits is None or fact.period in fits]
+    if not group and rent is not False:
+        # Аренда без помесячной цены довольствуется посуточной или понедельной.
+        # Продаже срок не идёт вовсе: «6 млн/мес» в объявлении о продаже дома —
+        # это доход от аренды соседнего, а не цена дома.
+        group = pool
+    if not group:
+        return None
+    primary = min(group, key=lambda fact: (_RANK[fact.source], _monthly(fact)))
+    peers = [
+        fact
+        for fact in group
+        if (fact.currency, fact.period, fact.source)
+        == (primary.currency, primary.period, primary.source)
+    ]
+    ceiling = max(max(fact.amount, fact.up_to or 0) for fact in peers)
+    return replace(primary, up_to=ceiling if ceiling > primary.amount else None)
+
+
+def parse_price(
+    text: str, *, category: str | None = None, deal_type: str | None = None
+) -> PriceFact | None:
+    """Цена объявления; категория и сторона сделки уточняют срок и границы."""
+    rent = None if deal_type not in {"rent_out", "sell"} else deal_type == "rent_out"
+    return choose_price(parse_prices(text), rent=rent, bounds=price_bounds(category, deal_type))
 
 
 def price_hint(text: str) -> tuple[str, int | None]:
-    """Вернуть написанную цену и её значение в VND либо честное ``None``."""
-    match = _PRICE_RE.search(text)
-    if match is None:
+    """Вернуть написанную цену и её значение в VND либо честное ``None``.
+
+    Вход живого Telegram-поиска: ему нужны только донги, потому что `price_vnd`
+    по определению донги. Сумма в долларах здесь не подходит.
+    """
+    fact = parse_price(text)
+    if fact is None or fact.currency != "VND":
         return "", None
-    raw_number = match.group("number")
-    number = (
-        raw_number.replace(" ", "").replace(".", "")
-        if re.fullmatch(r"\d{1,3}(?:[ .]\d{3})+", raw_number)
-        else raw_number.replace(",", ".")
-    )
-    try:
-        value = float(number)
-    except ValueError:  # pragma: no cover -- регулярное выражение оставляет число
-        return "", None
-    unit = (match.group("unit") or "").casefold().rstrip(".")
-    currency = (match.group("currency") or "").casefold()
-    multiplier = 1_000_000 if unit in {"млн", "мил", "million", "triệu", "tr", "m"} else 1
-    if unit in {"тыс", "k"}:
-        multiplier = 1_000
-    if multiplier == 1 and not currency:
-        return "", None
-    price = int(value * multiplier)
-    if not 0 < price <= MAX_PLAUSIBLE_VND:
-        # Продавцы пишут «21.500.000 млн VND», имея в виду 21.5 млн, и умножение
-        # даёт 21.5 ТРИЛЛИОНА. Живой случай 01.09.2026: такая строка уронила
-        # вставку карточки (`NUMERIC(14,2)`, потолок 10^12), воркер ушёл в цикл
-        # перезапуска, и вся воронка встала из-за одного объявления.
-        #
-        # Правильный ответ здесь — «цены не знаю», а не обрезание до потолка:
-        # обрезанное число выглядит как настоящая цена и попадёт в фильтр по
-        # бюджету, то есть соврёт клиенту тише и опаснее, чем отсутствие цены.
-        return "", None
-    return match.group(0).strip(), price
+    return fact.raw, fact.amount

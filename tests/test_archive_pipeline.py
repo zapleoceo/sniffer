@@ -253,3 +253,38 @@ def test_a_sale_of_housing_named_by_its_verb_stays_a_sale(chat: Chat) -> None:
 
     assert listing.deal_type == "sell"
     assert listing.price_period == "once"
+
+
+OCEANUS_POST = """🇷🇺 OCEANUS 🇻🇳
+
+СДАЁТСЯ СТУДИЯ
+СЕВЕР НЯЧАНГА  🌊🔥😍
+
+➖Полностью меблирована и оснащена всей необходимой техникой
+
+Арендная плата: 12.5 млн VND / месяц
+-залог равен сумме аренды
+-менеджмент 450 тысяч VND
+-wifi 285 тысяч VND
+-свет и вода по счетчикам
+
+Договор от 1 месяца
+"""
+
+
+def test_the_post_whose_price_the_old_reader_missed_gets_its_price(chat: Chat) -> None:
+    """Живая карточка 03.10.2026: «цена не указана» при строке «Арендная плата: …».
+
+    Прежний разбор знал метки «цена/price/giá», а аренду — нет, и 56% карточек
+    жилья в базе остались без цены. Рядом стоят менеджмент и wifi: взять первую
+    сумму значило бы показать клиенту цену интернета.
+    """
+    message = raw(OCEANUS_POST)
+
+    listing = listing_from(
+        message, chat, classify(message, category_hints=DETECTOR), deal_type="rent_out"
+    )
+
+    assert listing.category == "apartment"
+    assert listing.price_amount == 12_500_000
+    assert (listing.price_currency, listing.price_period) == ("VND", "month")
