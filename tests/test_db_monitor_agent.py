@@ -157,16 +157,14 @@ async def test_a_card_without_a_verdict_blocks_until_it_is_screened_or_expires(
     card = await _card(db_session, 9131)
     await db_session.commit()
     assert card.id is not None
-    spec = filter_for(_passport(), now=_now())
-    assert spec is not None
     repo = ListingRepository(db_session)
     fresh_cutoff = _now() - timedelta(minutes=5)
 
-    assert await repo.first_unready_id(spec, after_id=card.id - 1, verdict_before=fresh_cutoff) == (
+    assert await repo.first_unready_id(after_id=card.id - 1, verdict_before=fresh_cutoff) == (
         card.id
     ), "только что извлечённая и непроверенная карточка ждёт вердикта"
     waited = _now() + timedelta(hours=1)
-    assert await repo.first_unready_id(spec, after_id=card.id - 1, verdict_before=waited) is None, (
+    assert await repo.first_unready_id(after_id=card.id - 1, verdict_before=waited) is None, (
         "срок ожидания вышел — карточке доверяем без вердикта"
     )
 
@@ -174,9 +172,9 @@ async def test_a_card_without_a_verdict_blocks_until_it_is_screened_or_expires(
         update(models.Listing).where(models.Listing.id == card.id).values(screened_at=_now())
     )
     await db_session.commit()
-    assert (
-        await repo.first_unready_id(spec, after_id=card.id - 1, verdict_before=fresh_cutoff) is None
-    ), "вердикт есть"
+    assert await repo.first_unready_id(after_id=card.id - 1, verdict_before=fresh_cutoff) is None, (
+        "вердикт есть"
+    )
 
 
 async def test_a_card_from_a_board_never_waits_for_the_model(db_session: AsyncSession) -> None:
@@ -186,11 +184,9 @@ async def test_a_card_from_a_board_never_waits_for_the_model(db_session: AsyncSe
         update(models.Listing).where(models.Listing.id == card.id).values(source="chotot")
     )
     await db_session.commit()
-    spec = filter_for(_passport(), now=_now())
-    assert spec is not None
 
     found = await ListingRepository(db_session).first_unready_id(
-        spec, after_id=card.id - 1, verdict_before=_now() - timedelta(minutes=5)
+        after_id=card.id - 1, verdict_before=_now() - timedelta(minutes=5)
     )
 
     assert found is None, "Chotot проверкой не читается: ждать нечего"
@@ -255,6 +251,47 @@ async def test_a_sent_monitor_card_is_confirmed_in_the_ledger(db_session: AsyncS
     await delivery.mark_sent(message_id, now=sent)
     await db_session.commit()
 
+    assert await db_session.scalar(view) == sent
+
+
+async def test_the_monitor_does_not_start_the_period_until_the_card_is_delivered(
+    db_session: AsyncSession,
+) -> None:
+    """Якорь — момент первого ПОКАЗА: постановка в очередь период не начинает."""
+    user_id, sub_id = await _slot(db_session, 9171)
+    card = await _card(db_session, 9172)
+    await db_session.commit()
+    assert card.id is not None
+    moment = _now()
+    delivery = DeliveryRepository(db_session)
+    await delivery.enqueue(
+        subscription_id=sub_id,
+        user_id=user_id,
+        listing_id=card.id,
+        score=0.9,
+        payload={"a": 1},
+        now=moment,
+    )
+    started = await QuotaRepository(db_session).reserve_if_started(
+        Claim(
+            user_id=user_id, listing_ids=(card.id,), channel=Channel.MONITOR, now=moment, limit=None
+        )
+    )
+    await db_session.commit()
+    anchor = select(models.User.quota_anchor_at).where(models.User.id == user_id)
+    assert started is False
+    assert await db_session.scalar(anchor) is None
+
+    message_id = await db_session.scalar(
+        select(models.Outbox.id).where(models.Outbox.subscription_id == sub_id)
+    )
+    assert message_id is not None
+    sent = moment + timedelta(seconds=3)
+    await delivery.mark_sent(message_id, now=sent)
+    await db_session.commit()
+
+    assert await db_session.scalar(anchor) == sent
+    view = select(models.OfferView.delivered_at).where(models.OfferView.listing_id == card.id)
     assert await db_session.scalar(view) == sent
 
 
@@ -344,3 +381,23 @@ async def test_no_slot_since_is_set_and_cleared(db_session: AsyncSession) -> Non
     await db_session.commit()
     row = await db_session.get(models.Subscription, sub_id, populate_existing=True)
     assert row is not None and row.no_slot_since is None
+
+
+async def test_a_card_of_another_category_still_blocks_the_cursor(
+    db_session: AsyncSession,
+) -> None:
+    """Перекатегоризация сделает её подходящей: курсор не должен уйти за карточку заранее."""
+    card = await _card(db_session, 9151)
+    assert card.id is not None
+    await db_session.execute(
+        update(models.Listing)
+        .where(models.Listing.id == card.id)
+        .values(category="other", deal_type="rent_out", city="nha_trang")
+    )
+    await db_session.commit()
+
+    found = await ListingRepository(db_session).first_unready_id(
+        after_id=card.id - 1, verdict_before=_now() - timedelta(minutes=5)
+    )
+
+    assert found == card.id

@@ -83,7 +83,7 @@ async def serve_slot(
         # Новых карточек в базе нет вовсе: запроса за карточками не нужно (D13).
         return 0
     blocked = await stores.listings.first_unready_id(
-        spec, after_id=cursor, verdict_before=moment - VERDICT_WAIT
+        after_id=cursor, verdict_before=moment - VERDICT_WAIT
     )
     batch = await stores.listings.match(
         spec, after_id=cursor, before_id=blocked, limit=LISTINGS_PER_SUBSCRIPTION
@@ -114,7 +114,7 @@ async def serve_slot(
         if added and listing.id is not None:
             queued.append(listing.id)
     if queued:
-        await stores.ledger.reserve(
+        await stores.ledger.reserve_if_started(
             Claim(
                 user_id=subscription.user_id,
                 listing_ids=tuple(queued),

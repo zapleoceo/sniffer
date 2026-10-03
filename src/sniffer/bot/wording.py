@@ -101,7 +101,9 @@ def _is_broad(passport: Passport) -> bool:
     return not (a.get("model") or a.get("brand") or a.get("engine_cc") or passport.budget.max)
 
 
-def result_header(passport: Passport, total: int, shown: int, *, capped: bool = False) -> str:
+def result_header(
+    passport: Passport, total: int, shown: int, *, capped: bool = False, unpriced: int = 0
+) -> str:
     """Строка над карточками: что нашлось и, если запрос широкий, как сузить.
 
     Объяснение — не вежливость, а ответ на «не объясняя»: пять карточек без
@@ -115,6 +117,10 @@ def result_header(passport: Passport, total: int, shown: int, *, capped: bool = 
     count = f"не меньше {total}" if capped else str(total)
     if total <= shown:
         return "Вот что нашлось:" if total > 1 else "Нашёлся один вариант:"
+    # Бюджет назван, а у части лотов цены нет: они не отсеяны, но и не подтверждены — честно
+    # называем, сколько их, а в самой выдаче они стоят ниже лотов с ценой.
+    if unpriced and passport.budget.max:
+        count = f"{count}, без цены — {unpriced}"
     if _is_broad(passport):
         noun = _CATEGORY_PLURAL.get(passport.category) if passport.category else None
         many = f"{noun} нашлось много" if noun else "нашлось много"

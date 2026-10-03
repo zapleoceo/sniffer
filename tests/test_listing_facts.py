@@ -346,3 +346,21 @@ def test_an_explicit_attribute_beats_the_one_read_from_the_text() -> None:
     assert columns.attributes["floor"] == 3
     assert columns.attributes["area_m2"] == 65
     assert columns.attributes["rooms"] == 2
+
+
+@pytest.mark.parametrize(
+    ("text", "city"),
+    [
+        ("Cho thuê căn hộ Phước Hải, Nha Trang. Giá 8 triệu.", "nha_trang"),
+        # Одно упоминание чужого города при нячангском месте города не меняет.
+        ("Cho thuê căn hộ Phước Hải, Nha Trang. Giá 8 triệu. Chủ nhà ở Đà Nẵng.", "nha_trang"),
+        ("Сдаю квартиру на Чан Фу, Нячанг, 10 млн", "nha_trang"),
+        ("Сдаю квартиру на Чан Фу, Нячанг, 10 млн. Есть ещё варианты в Дананге.", "nha_trang"),
+        # Слово без других мест — голос в полную силу; место Дананга плюс слово — тоже Дананг.
+        ("Сдаю квартиру в Дананге, 10 млн", "da_nang"),
+        ("Cho thuê căn hộ Hải Châu, Đà Nẵng. Giá 8 triệu.", "da_nang"),
+    ],
+)
+def test_one_mention_of_danang_does_not_outvote_a_nha_trang_place(text: str, city: str) -> None:
+    columns = fact_columns(text, category="apartment", deal_type="rent_out", city="nha_trang")
+    assert columns.city == city

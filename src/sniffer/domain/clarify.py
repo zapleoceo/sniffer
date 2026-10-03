@@ -126,7 +126,7 @@ class ClarificationPlanner:
                 best = (gain, spec, facet)
         if best is None:
             return Search("no_useful_question")
-        return Ask(self._question(best[1], best[2], report.total))
+        return Ask(self._question(best[1], best[2], report.total, capped=report.capped))
 
     @staticmethod
     def _worth_asking(
@@ -141,14 +141,15 @@ class ClarificationPlanner:
         )
 
     @staticmethod
-    def _question(spec: FieldSpec, facet: Facet, total: int) -> Question:
+    def _question(spec: FieldSpec, facet: Facet, total: int, *, capped: bool = False) -> Question:
         options = _OPTIONS.get(spec.field, _category_options)(facet)
         note = f", у {facet.unknown} это не указано" if facet.unknown else ""
         return Question(
             field=spec.field,
             code=spec.code,
-            text=f"Подходит {total}{note}. {spec.question.text}",
+            text=f"Подходит {'не меньше ' if capped else ''}{total}{note}. {spec.question.text}",
             options=tuple(options),
             skip_label="Любой",
             show_all=total,
+            capped=capped,
         )

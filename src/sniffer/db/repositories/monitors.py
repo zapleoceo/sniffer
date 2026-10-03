@@ -23,7 +23,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import Select, Update, func, or_, select, update
+from sqlalchemy import ColumnElement, Select, Update, func, or_, select, update
 
 from sniffer.db import models
 from sniffer.db.mappers import to_subscription_state
@@ -60,30 +60,53 @@ class DueSubscriptions:
     broken: list[BrokenSubscription]
 
 
-def _due_statement(
-    *, limit: int, now: datetime
-) -> Select[tuple[models.Subscription, models.Passport]]:
+def _servable(now: datetime) -> list[ColumnElement[bool]]:
+    """Подписки, которые монитор вправе обслуживать, — ОДНО условие на выбор и на ранг.
+
+    Ранг слота считается среди слотов, которые монитор действительно возьмёт: карантинный
+    слот, заблокировавший бота клиент или цепочка без текущей версии паспорта не должны
+    занимать место и отнимать суточный потолок у живого слота (ревью Opus, P5).
+    """
+    return [
+        models.Passport.is_current.is_(True),
+        entitled(now),
+        # Клиент заблокировал бота: слать нечем, ставить в очередь незачем. Пауза выведена
+        # запросом, а не записана в подписку: разблокировал — слежение возобновилось само,
+        # ручная пауза (`is_active`), срок и курсор не тронуты.
+        models.User.bot_blocked_at.is_(None),
+        # Карантин кончается сам: строка с истёкшим сроком снова в обходе.
+        or_(
+            models.Subscription.quarantined_until.is_(None),
+            models.Subscription.quarantined_until <= now,
+        ),
+    ]
+
+
+def _chain() -> ColumnElement[int]:
     # Подписка хранит корень цепочки, а не версию: клиент правит запрос, и подписка обязана
     # следовать за правкой, а не застывать на версии, при которой её создали. Отсюда join
     # по `COALESCE(root_id, id)` и условие `is_current`.
-    chain = func.coalesce(models.Passport.root_id, models.Passport.id)
+    return func.coalesce(models.Passport.root_id, models.Passport.id)
+
+
+def _ranked_statement(user_ids: Sequence[int], *, now: datetime) -> Select[tuple[int, int]]:
+    return (
+        select(models.Subscription.user_id, models.Subscription.id)
+        .join(models.Passport, _chain() == models.Subscription.passport_root)
+        .join(models.User, models.User.id == models.Subscription.user_id)
+        .where(models.Subscription.user_id.in_(list(user_ids)), *_servable(now))
+        .order_by(models.Subscription.user_id, models.Subscription.id)
+    )
+
+
+def _due_statement(
+    *, limit: int, now: datetime
+) -> Select[tuple[models.Subscription, models.Passport]]:
     return (
         select(models.Subscription, models.Passport)
-        .join(models.Passport, chain == models.Subscription.passport_root)
+        .join(models.Passport, _chain() == models.Subscription.passport_root)
         .join(models.User, models.User.id == models.Subscription.user_id)
-        .where(
-            models.Passport.is_current.is_(True),
-            entitled(now),
-            # Клиент заблокировал бота: слать нечем, ставить в очередь незачем. Пауза выведена
-            # запросом, а не записана в подписку: разблокировал — слежение возобновилось само,
-            # ручная пауза (`is_active`), срок и курсор не тронуты.
-            models.User.bot_blocked_at.is_(None),
-            # Карантин кончается сам: строка с истёкшим сроком снова в обходе.
-            or_(
-                models.Subscription.quarantined_until.is_(None),
-                models.Subscription.quarantined_until <= now,
-            ),
-        )
+        .where(*_servable(now))
         # NULLS FIRST: новая подписка (ни разу не смотрели) идёт раньше всех, а дальше —
         # по давности обхода. `id` разводит равные: порядок должен быть полным, иначе
         # две подписки с одним временем могли бы меняться местами от прохода к проходу.
@@ -217,14 +240,11 @@ class MonitorRepository(Repository):
         """Слоты клиентов с правом и без ручной паузы — в порядке приоритета.
 
         Приоритета как колонки пока нет (его даст биллинг слотов), поэтому порядок — по `id`:
-        более ранняя подписка старше. Предикат права тот же `entitled`, что у выбора порции,
-        иначе ранг считался бы среди слотов, которых монитор всё равно не возьмёт.
+        более ранняя подписка старше. Условие то же `_servable`, что у выбора порции, иначе
+        ранг считался бы среди слотов, которых монитор всё равно не возьмёт (карантинных,
+        без текущего паспорта).
         """
-        rows = await self._session.execute(
-            select(models.Subscription.user_id, models.Subscription.id)
-            .where(models.Subscription.user_id.in_(list(user_ids)), entitled(now))
-            .order_by(models.Subscription.user_id, models.Subscription.id)
-        )
+        rows = await self._session.execute(_ranked_statement(user_ids, now=now))
         ranked: dict[int, list[int]] = {}
         for user_id, subscription_id in rows:
             ranked.setdefault(user_id, []).append(subscription_id)

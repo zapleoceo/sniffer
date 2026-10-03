@@ -51,7 +51,10 @@ async def show_more(
     snapshot.cursor = end
     delivered_ok = False
     try:
-        delivered_ok = await _page(send, token, snapshot, offset, end, quota=quota, account=account)
+        landed = await _page(send, token, snapshot, offset, end, quota=quota, account=account)
+        delivered_ok = landed is not None
+        if landed is not None:
+            snapshot.cursor = landed
     finally:
         if not delivered_ok:
             snapshot.cursor = offset
@@ -67,12 +70,18 @@ async def _page(
     *,
     quota: QuotaService,
     account: Account,
-) -> bool:
+) -> int | None:
+    """Страница ушла — вернуть, докуда дошёл курсор; `None` — не ушла.
+
+    Курсор встаёт перед первой карточкой, которую квота удержала, а не в конец
+    страницы: иначе удержанное «перепрыгивалось» бы и после подписки снимок
+    продолжался бы мимо карточек, которых клиент так и не увидел.
+    """
     page = snapshot.items[offset:end]
     result = await admitted(send, quota, account, page, root=snapshot.root, request_id=None)
     if result is None:
-        return False
-    admission, shown = result
+        return None
+    admission, shown, ids = result
     total = len(snapshot.items)
     rest = total - end
     more = MoreOffer(token, end, rest) if continuation(admission, rest) else None
@@ -89,12 +98,20 @@ async def _page(
         await quota.release(admission)
         raise
 
+    gone: list[int] = []
+    position = 0
+
     async def sending() -> None:
+        nonlocal position
         for reply in replies:
             await send(reply)
+            gone.extend(i for i in ids[position : position + reply.cards] if i is not None)
+            position += reply.cards
 
-    await delivered(quota, admission, sending)
+    await delivered(quota, admission, sending, sent=lambda: gone)
     extra = present_offer(gate, root=snapshot.root)
     if extra is not None:
         await send(extra)
-    return True
+    admitted_now = {id(item) for item in shown}
+    held = next((k for k, item in enumerate(page) if id(item) not in admitted_now), len(page))
+    return offset + held

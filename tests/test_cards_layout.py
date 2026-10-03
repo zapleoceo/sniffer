@@ -89,3 +89,15 @@ def test_chunks_split_on_card_borders_and_never_exceed_the_limit() -> None:
 
 def test_nothing_to_chunk_is_no_messages() -> None:
     assert chunk([]) == []
+
+
+def test_visible_len_counts_utf16_units_like_telegram() -> None:
+    """Эмодзи вне базовой плоскости — две единицы: 4096 у Telegram считается в них."""
+    assert visible_len("a\U0001f600") == 3
+    assert visible_len("&amp;<b>x</b>") == 2
+
+
+def test_chunk_does_not_overflow_on_astral_symbols() -> None:
+    block = "\U0001f600" * 1500
+    messages = chunk([block, block, block])
+    assert all(visible_len(message) <= 4096 for message in messages)

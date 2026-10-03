@@ -21,6 +21,11 @@ from typing import Any, Protocol
 
 TARGET_SIZE = 10
 
+# Оставит ли карточку ответ «поле = значение». Отчёт сам этого знать не может:
+# отсев читает текст объявления, а отчёт — атрибуты, и без проверки кнопка
+# обещала карточки, которых отсев после нажатия не пропускал.
+Survives = Callable[["Facetable", str, str], bool]
+
 # Верхняя граница «больше таких нет» для открытых корзин и цены.
 OPEN_END = "max"
 
@@ -68,6 +73,8 @@ class FacetReport:
 
     total: int
     facets: Mapping[str, Facet] = field(default_factory=dict)
+    # Источник отдал ровно потолок выборки: настоящее число подходящих не меньше `total`.
+    capped: bool = False
 
 
 def _attributes(item: Facetable) -> Mapping[str, Any]:
@@ -179,15 +186,27 @@ def _price_facet(items: Sequence[Facetable]) -> Facet:
     return Facet("budget.max", values, unknown=len(items) - len(prices))
 
 
-def facets_from(items: Sequence[Facetable]) -> FacetReport:
-    """Отчёт по тем карточкам, что идут в показ. Порядок значений — по убыванию числа."""
+def facets_from(
+    items: Sequence[Facetable], *, survives: Survives | None = None, capped: bool = False
+) -> FacetReport:
+    """Отчёт по тем карточкам, что идут в показ. Порядок значений — по убыванию числа.
+
+    `survives` — проверка отсева: карточка, которую ответ с этим значением всё
+    равно отсёк бы, в счёт значения не входит (и в «не указано» тоже: она
+    названа, просто не подходит).
+    """
     facets: dict[str, Facet] = {"budget.max": _price_facet(items)}
     for name, read in EXTRACTORS.items():
-        counts = Counter(value for item in items if (value := read(item)) is not None)
+        counts: Counter[str] = Counter()
+        unknown = 0
+        for item in items:
+            value = read(item)
+            if value is None:
+                unknown += 1
+            elif survives is None or survives(item, name, value):
+                counts[value] += 1
         ordered = sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))
         facets[name] = Facet(
-            name,
-            tuple(FacetValue(value, count) for value, count in ordered),
-            unknown=len(items) - sum(counts.values()),
+            name, tuple(FacetValue(value, count) for value, count in ordered), unknown=unknown
         )
-    return FacetReport(total=len(items), facets=facets)
+    return FacetReport(total=len(items), facets=facets, capped=capped)

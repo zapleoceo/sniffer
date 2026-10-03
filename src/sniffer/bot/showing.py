@@ -19,7 +19,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Collection, Sequence
 
 import structlog
 
@@ -87,7 +87,7 @@ async def admitted(
     *,
     root: int | None,
     request_id: int | None,
-) -> tuple[Admission, tuple[RawItem, ...]] | None:
+) -> tuple[Admission, tuple[RawItem, ...], tuple[int | None, ...]] | None:
     """Допуск страницы: что из неё положено показать. `None` — квота недоступна, ответ уже ушёл.
 
     Одна и та же дорога для первой страницы и для «Ещё»: страница, листаемая в обход квоты,
@@ -110,25 +110,39 @@ async def admitted(
         log.exception("quota.admit_failed", user_id=account.user_id)
         await send(Reply(wording_plan.QUOTA_UNAVAILABLE))
         return None
-    shown = tuple(
-        item
+    allowed = [
+        (item, listing)
         for item, listing in zip(page, ids, strict=True)
         if listing is None or admission.allows(listing)
-    )
-    return admission, shown
+    ]
+    # Идентификаторы идут параллельно `shown`: по ним при частичной доставке видно, какие
+    # карточки клиент уже получил.
+    return admission, tuple(item for item, _ in allowed), tuple(listing for _, listing in allowed)
 
 
 async def delivered(
-    quota: QuotaService, admission: Admission, sending: Callable[[], Awaitable[None]]
+    quota: QuotaService,
+    admission: Admission,
+    sending: Callable[[], Awaitable[None]],
+    *,
+    sent: Callable[[], Collection[int]] | None = None,
 ) -> None:
-    """Отправка под резервом: ушло — `confirm`, не ушло — `release`, и ошибка идёт дальше."""
+    """Отправка под резервом: ушло — `confirm`, не ушло — `release`, и ошибка идёт дальше.
+
+    `sent` — какие карточки уже ушли к моменту сбоя (страница из нескольких сообщений):
+    они остаются показом, возвращаются только недоставленные.
+    """
     try:
         await sending()
     except BaseException:
         # Сообщение не ушло (или ушло неизвестно что): слоты, которые этот допуск занял,
         # возвращаются. Из корня иерархии, а не из `Exception`: отмена задачи по таймауту
         # тоже означает «не показано».
-        await quota.release(admission)
+        already = sent() if sent is not None else ()
+        if already:
+            await quota.settle_partial(admission, already)
+        else:
+            await quota.release(admission)
         raise
     await quota.confirm(admission)
 
@@ -160,7 +174,7 @@ async def show(
     result = await admitted(send, quota, account, ordered[:size], root=root, request_id=request_id)
     if result is None:
         return
-    admission, shown = result
+    admission, shown, _ids = result
     more: MoreOffer | None = None
     rest = len(ordered) - size
     if continuation(admission, rest):

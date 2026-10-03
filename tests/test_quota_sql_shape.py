@@ -319,3 +319,31 @@ async def test_the_remainder_comes_from_what_is_already_spent_in_the_period() ->
     assert "withheld_count=(client_requests.withheld_count + 2)" in session.only(
         "UPDATE client_requests SET withheld_count"
     )
+
+
+class NoAnchor(Recorder):
+    async def scalar(self, statement: Any) -> Any:
+        sql = self._text(statement)
+        return (
+            None
+            if sql.startswith("SELECT users.quota_anchor_at")
+            else await super().scalar(statement)
+        )
+
+
+async def test_a_monitor_reserve_never_starts_the_period() -> None:
+    session = NoAnchor()
+    started = await QuotaRepository(session).reserve_if_started(  # type: ignore[arg-type]
+        claim(channel=Channel.MONITOR, limit=None)
+    )
+    assert started is False
+    assert not any(sql.startswith(("UPDATE users", "INSERT")) for sql in session.sql)
+
+
+async def test_a_monitor_reserve_goes_on_when_the_period_exists() -> None:
+    session = Recorder()
+    started = await QuotaRepository(session).reserve_if_started(  # type: ignore[arg-type]
+        claim(channel=Channel.MONITOR, limit=None)
+    )
+    assert started is True
+    assert any(sql.startswith("INSERT INTO offer_views") for sql in session.sql)

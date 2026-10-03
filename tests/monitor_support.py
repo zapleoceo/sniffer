@@ -243,13 +243,13 @@ class FakeListings:
     head: int = 10**9
     unready: int | None = None
     before_ids: list[int | None] = field(default_factory=list)
+    verdict_cutoffs: list[datetime] = field(default_factory=list)
 
     async def max_id(self) -> int:
         return self.head
 
-    async def first_unready_id(
-        self, spec: MatchFilter, *, after_id: int, verdict_before: datetime
-    ) -> int | None:
+    async def first_unready_id(self, *, after_id: int, verdict_before: datetime) -> int | None:
+        self.verdict_cutoffs.append(verdict_before)
         return self.unready
 
     async def match(
@@ -277,12 +277,20 @@ class FakeLedger:
 
     already: set[int] = field(default_factory=set)
     claims: list[Any] = field(default_factory=list)
+    # Период клиента начат другим показом? Нет — слежение резерва не пишет, якорь поставит доставка.
+    started: bool = True
 
     async def seen(self, user_id: int, listing_ids: Any, now: datetime) -> set[int]:
         return {i for i in listing_ids if i in self.already}
 
     async def reserve(self, claim: Any) -> None:
         self.claims.append(claim)
+
+    async def reserve_if_started(self, claim: Any) -> bool:
+        if not self.started:
+            return False
+        await self.reserve(claim)
+        return True
 
 
 @dataclass

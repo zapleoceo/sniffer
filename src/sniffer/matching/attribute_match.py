@@ -8,8 +8,10 @@
 Допуски — решение, а не измерение: клиент называет «примерно», а карточка пишет точное.
 - площадь: ±15% (60 м2 и 64 м2 — одна квартира по запросу);
 - месяцы залога и срока: ±0,5 («1» и «1,5» — разница в слове, «1» и «2» — в деньгах);
-- объём двигателя: полоса `ENGINE_CC_BAND` и направление «от/до» (`engine_cc_dir`),
-  как у отбора выдачи (`passport.engine_cc_bounds`);
+- объём двигателя здесь НЕ сравнивается: полосу и направление «от/до» держит
+  `matching.rules` сам (`passport.engine_cc_bounds`), а `engine_cc` из этого сравнения
+  исключён (`_NOT_EQUALITY`). Своей ветки у объёма тут нет намеренно: мёртвая ветка с
+  копией правила разошлась бы с живой молча;
 - всё прочее число (комнаты, этаж, год, пробег) — точное совпадение, но «2» и «2.0»
   равны, а «2» и «3» нет.
 Нечисловое (марка, коробка, булево) сравнивается как раньше: строка без учёта регистра.
@@ -18,8 +20,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-
-from sniffer.domain.passport import engine_cc_bounds
 
 AREA_RELATIVE_TOLERANCE = 0.15
 MONTHS_TOLERANCE = 0.5
@@ -45,9 +45,6 @@ def matches(field: str, actual: object, wanted: object, wanted_all: Mapping[str,
     have, want = as_number(actual), as_number(wanted)
     if have is None or want is None:
         return str(actual).casefold() == str(wanted).casefold()
-    if field == "engine_cc":
-        low, high = engine_cc_bounds(int(want), wanted_all.get("engine_cc_dir"))
-        return (low is None or have >= low) and (high is None or have <= high)
     if field == "area_m2":
         return abs(have - want) <= want * AREA_RELATIVE_TOLERANCE
     if field in _MONTH_FIELDS:

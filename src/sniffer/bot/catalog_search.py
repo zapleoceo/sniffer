@@ -55,6 +55,7 @@ async def find_catalog(passport: Passport) -> Found:
         stages=watch.stages,
         # Архив режет выборку по `LIMIT`: упёрлись в него — настоящее число подходящих больше.
         capped=len(raw) >= LIMIT,
+        usd_vnd=rate,
     )
 
 

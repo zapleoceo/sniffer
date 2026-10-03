@@ -32,7 +32,9 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sniffer.db import models
 from sniffer.db.mappers import to_subscription_state
 from sniffer.db.repositories.base import Repository
+from sniffer.db.repositories.quota import QuotaRepository
 from sniffer.domain.monitoring import OVERFLOW_KIND
+from sniffer.domain.quota import Channel, Claim, Ticket
 from sniffer.domain.records import OutboxMessage, SubscriptionState
 
 OUTBOX_PENDING = "pending"
@@ -222,7 +224,7 @@ class DeliveryRepository(Repository):
             .where(models.Notification.id == notification_id)
             .subquery()
         )
-        await self._session.execute(
+        confirmed = await self._session.execute(
             update(models.OfferView)
             .where(
                 models.OfferView.channel == "monitor",
@@ -231,7 +233,54 @@ class DeliveryRepository(Repository):
                 models.OfferView.listing_id == select(owner.c.listing_id).scalar_subquery(),
             )
             .values(delivered_at=moment)
+            .returning(models.OfferView.id)
             .execution_options(synchronize_session=False)
+        )
+        if confirmed.first() is None:
+            await self._start_period_by_delivery(notification_id, moment)
+
+    async def _start_period_by_delivery(self, notification_id: int, moment: datetime) -> None:
+        """Строки резерва не было, потому что период клиента не был начат: начинает его доставка.
+
+        Якорь — момент ПЕРВОГО показа (monetization.md), а первым показом оказалась
+        карточка слежения, и то лишь теперь, когда она ушла. Уже подтверждённая строка
+        (`repeated` в журнале) ничего не меняет: `reserve` её только отметит.
+        """
+        row = (
+            await self._session.execute(
+                select(
+                    models.Subscription.user_id,
+                    models.Subscription.passport_root,
+                    models.Notification.listing_id,
+                )
+                .join(
+                    models.Subscription,
+                    models.Subscription.id == models.Notification.subscription_id,
+                )
+                .where(models.Notification.id == notification_id)
+            )
+        ).first()
+        if row is None:
+            return
+        user_id, root, listing_id = row
+        reserved = await QuotaRepository(self._session).reserve(
+            Claim(
+                user_id=user_id,
+                listing_ids=(listing_id,),
+                channel=Channel.MONITOR,
+                now=moment,
+                limit=None,
+                passport_root=root,
+            )
+        )
+        await QuotaRepository(self._session).confirm(
+            Ticket(
+                user_id=user_id,
+                period_id=reserved.period_id,
+                granted=reserved.decision.granted,
+                shown=reserved.decision.granted,
+            ),
+            at=moment,
         )
 
     async def enqueue_notice(

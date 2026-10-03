@@ -36,22 +36,17 @@ NOW = datetime(2026, 10, 4, tzinfo=UTC)
         ("brand", "yamaha", "honda", False),
         ("furnished", True, True, True),
         ("furnished", False, True, False),
-        ("engine_cc", 125, 125, True),
-        ("engine_cc", 150, 125, True),
-        ("engine_cc", 160, 125, False),
-        ("engine_cc", 110, 125, True),
-        ("engine_cc", 90, 125, False),
     ],
 )
 def test_the_same_value_by_meaning(field: str, actual: object, wanted: object, same: bool) -> None:
     assert matches(field, actual, wanted, {field: wanted}) is same
 
 
-def test_the_engine_direction_turns_the_band_into_a_bound() -> None:
-    assert matches("engine_cc", 300, 250, {"engine_cc": 250, "engine_cc_dir": "min"})
-    assert not matches("engine_cc", 200, 250, {"engine_cc": 250, "engine_cc_dir": "min"})
-    assert matches("engine_cc", 100, 125, {"engine_cc": 125, "engine_cc_dir": "max"})
-    assert not matches("engine_cc", 150, 125, {"engine_cc": 125, "engine_cc_dir": "max"})
+def test_the_engine_band_is_not_this_modules_business() -> None:
+    """Полосу объёма держит `matching.rules`; здесь объём — обычное число, а ветки нет."""
+    import inspect
+
+    assert "engine_cc" not in inspect.getsource(matches)
 
 
 @pytest.mark.parametrize("actual", [None, ""])

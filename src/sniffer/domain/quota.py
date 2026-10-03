@@ -144,6 +144,21 @@ class Ticket:
     shown: tuple[int, ...]
     request_id: int | None = None
 
+    def split(self, delivered: Collection[int]) -> tuple[Ticket, Ticket]:
+        """Билет на ушедшие карточки и билет на остальные: подтвердить первый, вернуть второй."""
+        done = set(delivered)
+
+        def part(keep: bool) -> Ticket:
+            return Ticket(
+                user_id=self.user_id,
+                period_id=self.period_id,
+                granted=tuple(i for i in self.granted if (i in done) is keep),
+                shown=tuple(i for i in self.shown if (i in done) is keep),
+                request_id=self.request_id,
+            )
+
+        return part(True), part(False)
+
 
 @dataclass(frozen=True, slots=True)
 class Admission:

@@ -526,3 +526,29 @@ async def test_the_default_grace_period_comes_from_the_settings(
         reload_settings()
 
     assert world.monitors.cancellations[0]["grace"] == timedelta(hours=2)
+
+
+async def test_the_monitor_does_not_write_a_reserve_while_the_period_is_not_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Якорь периода ставит доставка, а не постановка в очередь (ревью Opus, P5)."""
+    world = install(monkeypatch, subscriptions=[subscription()], page=[listing(moment=NOW)])
+    world.ledger.started = False
+
+    assert await MonitorAgent().tick(now=NOW) == 1
+
+    assert world.ledger.claims == []
+
+
+async def test_a_card_waits_for_the_verdict_exactly_the_verdict_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Срок ожидания вердикта — одна константа от «сейчас» прохода, а не свои часы запроса."""
+    from sniffer.worker.monitor_scope import VERDICT_WAIT
+
+    world = install(monkeypatch, subscriptions=[subscription()], page=[listing(moment=NOW)])
+
+    await MonitorAgent().tick(now=NOW)
+
+    assert VERDICT_WAIT == timedelta(minutes=5)
+    assert world.listings.verdict_cutoffs == [NOW - VERDICT_WAIT]

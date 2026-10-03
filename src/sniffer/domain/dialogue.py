@@ -518,9 +518,21 @@ class DialogueState:
     show_all: bool = False
 
 
+def _edits_query(kind: str, payload: dict[str, object]) -> bool:
+    """Событие меняет сам запрос: правка текстом, поправка «не X, а Y», уточнение цены."""
+    if kind == EVENT_USER_MESSAGE:
+        return "correction" in payload
+    return kind == EVENT_MANUAL_EDIT and (
+        payload.get("field") == "query"
+        or (payload.get("field") == "budget.max" and "text" in payload)
+    )
+
+
 def advance(state: DialogueState, kind: str, payload: dict[str, object]) -> DialogueState:
     """Одно событие двигает состояние диалога."""
-    show_all = state.show_all or bool(payload.get("show_all"))
+    # Правка запроса — новый вопрос к базе: прежний отказ сужать к нему не относится.
+    keep = state.show_all and not _edits_query(kind, payload)
+    show_all = keep or bool(payload.get("show_all"))
     if kind != EVENT_QUESTION_ASKED:
         # Любое другое событие — это реакция клиента: вопрос закрыт.
         return DialogueState(asked=state.asked, pending=None, show_all=show_all)
