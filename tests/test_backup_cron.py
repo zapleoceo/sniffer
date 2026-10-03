@@ -156,6 +156,19 @@ def test_an_unsafe_deploy_path_is_refused(name: str) -> None:
 
 
 @needs_bash
+def test_a_relative_deploy_path_is_refused() -> None:
+    """У cron своя рабочая папка: относительный путь в строке задания указывал бы в никуда."""
+    body = 'cd "$root"; DEPLOY_PATH="deploy"; '
+    body += 'install_backup_cron; echo "RC=$?"; ls -A "$root/etc/cron.d"'
+
+    done = _run(body)
+
+    assert "RC=1" in done.stdout
+    assert "абсолютным" in done.stderr
+    assert "sniffer-backup" not in done.stdout
+
+
+@needs_bash
 def test_a_target_that_cannot_be_written_is_a_failure_without_leftovers() -> None:
     body = 'mkdir "$CRON"; install_backup_cron; echo "RC=$?"; ls -A "$root/etc/cron.d"'
 
