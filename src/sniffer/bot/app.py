@@ -27,8 +27,10 @@ def build_dispatcher() -> Dispatcher:
     dispatcher = Dispatcher()
     # Сообщение или нажатие клиента доказывает, что бот ему доступен, и снимает метку
     # блокировки, если она осталась от потерянного апдейта (см. `reachability`). На
-    # `my_chat_member` — не вешать: апдейт о блокировке тоже «от клиента».
-    for observer in (dispatcher.message, dispatcher.callback_query, dispatcher.pre_checkout_query):
+    # `my_chat_member` — не вешать: апдейт о блокировке тоже «от клиента». На
+    # `pre_checkout_query` — тоже нет: отвечать на него надо за десять секунд, а
+    # клиент, который платит, уже нажимал кнопку счёта, то есть доказательство было.
+    for observer in (dispatcher.message, dispatcher.callback_query):
         observer.outer_middleware(MarkReachable())
     dispatcher.include_router(search.router)
     dispatcher.include_router(membership.router)

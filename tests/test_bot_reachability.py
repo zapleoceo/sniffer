@@ -195,13 +195,17 @@ async def test_a_message_without_an_author_marks_nobody(
     assert recorded == []
 
 
-def test_messages_clicks_and_payment_checks_all_carry_the_lifting_middleware(
-    dispatcher: Dispatcher,
-) -> None:
-    observers = (dispatcher.message, dispatcher.callback_query, dispatcher.pre_checkout_query)
-
-    for observer in observers:
+def test_messages_and_clicks_carry_the_lifting_middleware(dispatcher: Dispatcher) -> None:
+    for observer in (dispatcher.message, dispatcher.callback_query):
         assert any(isinstance(m, reachability.MarkReachable) for m in observer.outer_middleware)
+
+
+def test_the_payment_check_is_not_delayed_by_a_database_round_trip(dispatcher: Dispatcher) -> None:
+    """На `pre_checkout_query` Telegram ждёт ответа десять секунд; платящий уже нажимал кнопку."""
+    assert not any(
+        isinstance(m, reachability.MarkReachable)
+        for m in dispatcher.pre_checkout_query.outer_middleware
+    )
 
 
 def test_the_membership_updates_do_not_carry_the_lifting_middleware(dispatcher: Dispatcher) -> None:
