@@ -190,6 +190,7 @@ async def test_mark_sent_stamps_the_given_moment_on_the_row_and_its_notification
 
     await DeliveryRepository(db_session).mark_sent(outbox_id, now=moment)
     await db_session.commit()
+    db_session.expire_all()  # объекты сессии помнят прежние значения: читаем заново из базы
 
     row = await db_session.get(models.Outbox, outbox_id)
     notification = await db_session.get(models.Notification, notification_id)
@@ -241,6 +242,7 @@ async def test_give_up_and_mark_failed_keep_the_reason_and_count_the_attempt(
     await repo.mark_failed(first, retry_at=NOW + timedelta(minutes=1), error="transient: сеть")
     await repo.give_up(second, error="too_long: ...")
     await db_session.commit()
+    db_session.expire_all()  # объекты сессии помнят прежние значения: читаем заново из базы
 
     retried = await db_session.get(models.Outbox, first)
     refused = await db_session.get(models.Outbox, second)
@@ -258,6 +260,7 @@ async def test_mark_sent_clears_the_reason_of_an_earlier_failure(db_session: Asy
 
     await DeliveryRepository(db_session).mark_sent(row_id, now=NOW)
     await db_session.commit()
+    db_session.expire_all()  # объекты сессии помнят прежние значения: читаем заново из базы
 
     row = await db_session.get(models.Outbox, row_id)
     assert row is not None and (row.status, row.last_error) == ("sent", None)
@@ -273,6 +276,7 @@ async def test_cancelling_a_clients_queue_leaves_everyone_elses_and_sent_rows_al
 
     cancelled = await DeliveryRepository(db_session).cancel_pending_of(mine, reason="forbidden")
     await db_session.commit()
+    db_session.expire_all()  # объекты сессии помнят прежние значения: читаем заново из базы
 
     assert cancelled == 1
     rows = {row.id: row for row in await db_session.scalars(select(models.Outbox))}
@@ -290,6 +294,7 @@ async def test_blocking_keeps_the_first_moment_and_unblocking_clears_it(
     assert await users.set_bot_blocked(900, blocked=True, at=first) == user_id
     await users.set_bot_blocked(900, blocked=True, at=later)
     await db_session.commit()
+    db_session.expire_all()  # объекты сессии помнят прежние значения: читаем заново из базы
     blocked = await db_session.get(models.User, user_id)
     assert blocked is not None and blocked.bot_blocked_at == first, "повтор отказа сдвинул момент"
 
@@ -310,6 +315,7 @@ async def test_rows_queued_after_the_block_are_cancelled_by_the_sweep(
 
     cancelled = await DeliveryRepository(db_session).cancel_for_blocked_users(reason="bot_blocked")
     await db_session.commit()
+    db_session.expire_all()  # объекты сессии помнят прежние значения: читаем заново из базы
 
     assert cancelled == 1
     rows = {row.id: row for row in await db_session.scalars(select(models.Outbox))}
