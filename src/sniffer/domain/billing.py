@@ -1,0 +1,86 @@
+"""Деньги в терминах предметной области: виды платежа, строка журнала, событие.
+
+Без ввода-вывода и без Telegram: репозиторий (`db/`) и сервис оплаты (`bot/`)
+договариваются через эти типы, а не через ORM-модели и не через объекты aiogram.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from enum import StrEnum
+from typing import Any
+
+# Статус платежа в журнале (`payments.status`). Движется только вперёд:
+# `paid` → `refunded`; повторная доставка исходного апдейта ничего не воскрешает.
+PAID = "paid"
+REFUNDED = "refunded"
+
+
+class PaymentKind(StrEnum):
+    """Что за платёж пришёл (`payments.kind`).
+
+    `unknown` — не наш счёт, не та сумма или валюта: такой платёж возвращается
+    сам. Остальные виды из схемы (`one_off`, `duplicate`) заводят пакеты, которым
+    они нужны; здесь только то, что эта версия умеет отличать.
+    """
+
+    FIRST = "first"
+    RENEWAL = "renewal"
+    UNKNOWN = "unknown"
+
+
+class EventKind(StrEnum):
+    """Что записано в журнале событий оплаты (`billing_events.kind`)."""
+
+    SUB_CANCELED = "sub_canceled"
+    SUB_ACTIVE = "sub_active"
+    SUB_FAILED = "sub_failed"
+    SUB_OTHER = "sub_other"
+    REFUNDED = "refunded"
+    SUPPORT = "support"
+
+
+@dataclass(frozen=True, slots=True)
+class PaymentRecord:
+    """Платёж, который надо записать в журнал: всё, что прислал Telegram, и наш вердикт."""
+
+    charge_id: str
+    tg_user_id: int
+    amount: int
+    currency: str
+    kind: PaymentKind
+    invoice_payload: str
+    is_recurring: bool
+    is_first_recurring: bool
+    period_end: datetime | None
+    raw: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class StoredPayment:
+    """Строка журнала, как она лежит в базе."""
+
+    charge_id: str
+    tg_user_id: int | None
+    amount: int
+    currency: str
+    kind: str | None
+    status: str
+    invoice_payload: str | None
+    is_recurring: bool
+    is_first_recurring: bool
+    period_end: datetime | None
+    refunded_at: datetime | None
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class BillingEvent:
+    """Событие без своего идентификатора платежа: изменение подписки, обращение."""
+
+    kind: EventKind
+    tg_user_id: int
+    payload: dict[str, Any]
+    charge_id: str | None = None
+    update_id: int | None = None

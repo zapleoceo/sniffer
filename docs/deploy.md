@@ -690,6 +690,35 @@ docker exec sniffer-postgres psql -U sniffer -d sniffer -c "\d payments" | head 
 `payments`. Схема накатывается ДО деплоя: старому коду новые колонки не мешают,
 новый без них падает на первом же запросе подписок.
 
+Подписка выдаётся **только ссылкой** `createInvoiceLink` (параметр
+`subscription_period` есть у него и нет у `sendInvoice`), поэтому «счёт-сообщение с
+кнопкой Pay» в этой записи прежних версий — не рабочий путь, а историческая ошибка
+(`docs/monetization.md`, раздел «Подписка: Telegram Stars»).
+
+#### Оплата звёздами: журнал платежей (03.10.2026)
+
+Всё в одном файле `infra/sql/011_stars_billing.sql`, и он идемпотентен:
+
+```bash
+docker exec -i sniffer-postgres psql -U sniffer -d sniffer -v ON_ERROR_STOP=1   < infra/sql/011_stars_billing.sql
+docker exec sniffer-postgres psql -U sniffer -d sniffer -c "\d payments" | grep -E "kind|raw|period_end"
+docker exec sniffer-postgres psql -U sniffer -d sniffer -c "\dt user_consents billing_events"
+```
+
+Появятся колонки `payments.tg_user_id`, `invoice_payload`, `kind`, `is_first_recurring`,
+`period_end`, `refunded_at`, `raw` и таблицы `user_consents` (согласие с условиями:
+версия и время) и `billing_events` (отмена, возврат и сбой подписки, обращения в
+поддержку). Колонки `payments` лежат и в теле `CREATE TABLE` в `001_init.sql`, и в
+`ALTER` — как все колонки, добавленные после первого запуска; каждая колонка из
+`ALTER` имеет часового `require_column` в `infra/deploy.sh`, а любая новая без часового
+краснит `tests/test_deploy_sentinels.py`.
+
+Файл `011_*` подхватывается только маской по трёхзначному номеру
+(`infra/sql/[0-9][0-9][0-9]_*.sql`): прежняя `00*.sql` пропускала его молча — схема не
+доезжала до базы, а деплой рапортовал успех. Правки данных (`UPDATE`, `DELETE`) в
+цепочке нет и быть не может: деплой гонит её на каждом запуске
+(`tests/test_sql_chain.py`).
+
 #### Диалог-паспорт
 
 Файл `001_init.sql` идемпотентен целиком, поэтому на существующем томе его

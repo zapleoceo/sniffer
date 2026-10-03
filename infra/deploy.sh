@@ -408,6 +408,15 @@ if [ -n "${PG_CID:-}" ]; then
   require_column listings source               # миграция единого каталога, 02.09.2026
   require_column users awaiting_new_request    # `/new`: следующее сообщение открывает поиск
   require_column passports last_used_at        # порядок списка поисков: выбор возвращает поиск
+  # Оплата звёздами (011_stars_billing.sql): без этих колонок первый же платёж не
+  # запишется, а звёзды уже сняты. Каждая колонка из ALTER — свой часовой.
+  require_column payments tg_user_id            # чей платёж: нужен для возврата по charge_id
+  require_column payments invoice_payload       # по какому счёту: так различаются подписки
+  require_column payments kind                  # first | renewal | unknown
+  require_column payments is_first_recurring    # первый платёж подписки: его id отменяет подписку
+  require_column payments period_end            # срок от Telegram, не наша арифметика
+  require_column payments refunded_at           # когда вернули
+  require_column payments raw                   # SuccessfulPayment как пришёл
   # Часовой ПОСЛЕДНЕЙ миграции в цепочке. Цикл выше применяет их по порядку и
   # падает на ошибке, но это доказывает только то, что psql не вернул ошибку на
   # ЗАПУЩЕННОМ файле: новый файл, не попавший в `git pull`, не запустится вовсе
