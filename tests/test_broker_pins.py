@@ -269,3 +269,24 @@ def test_role_table_matches_schema_names_used_in_code() -> None:
     assert used == set(ROLE_BY_SCHEMA)
     for role in ROLE_BY_SCHEMA.values():
         assert hasattr(Settings(_env_file=None), f"broker_model_{role}")  # type: ignore[call-arg]
+
+
+async def test_a_pinned_failure_then_an_invalid_retry_is_two_sends_not_three(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Платный повтор один на всю цепочку: `chat` уже повторил, `structured` не повторяет."""
+    fake = FakeBroker(pinned_error="no provider available", unpinned_text="not json at all")
+    client, _ = make(fake, settings(), monkeypatch)
+    with pytest.raises(BrokerOutputError):
+        await ask(client, "listing_guard")
+    assert ["model" in s for s in fake.submitted] == [True, False]
+
+
+async def test_an_invalid_pinned_answer_still_gets_exactly_one_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeBroker(pinned_text="not json at all", unpinned_text="still not json")
+    client, _ = make(fake, settings(), monkeypatch)
+    with pytest.raises(BrokerOutputError):
+        await ask(client, "listing_guard")
+    assert ["model" in s for s in fake.submitted] == [True, False]

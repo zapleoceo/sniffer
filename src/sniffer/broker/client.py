@@ -118,6 +118,36 @@ class BrokerClient:
         её отказе (квота, 400 на неизвестное имя, тайм-аут) возвращает ошибку,
         а не цепочку. Поэтому бот не молчит: один повтор без закрепления.
         """
+        result, _fell_back = await self._chat(
+            messages,
+            capability=capability,
+            response_format=response_format,
+            tools=tools,
+            tool_choice=tool_choice,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            model=model,
+        )
+        return result
+
+    async def _chat(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        capability: str,
+        response_format: dict[str, Any] | None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        max_tokens: int,
+        temperature: float,
+        model: str | None,
+    ) -> tuple[BrokerResult, bool]:
+        """`chat` и признак «закреплённая модель отказала, ответ дан цепочкой».
+
+        Признак нужен `structured`: платный повтор по цепочке в цепочке запросов один, и если
+        его уже сделал `chat`, второй (из-за негодного ответа) был бы третьей отправкой.
+        """
+        fell_back = False
         if tools is not None and (not tools or response_format is not None):
             raise ValueError("tools must be nonempty and cannot accompany response_format")
         if tool_choice is not None and tools is None:
@@ -147,10 +177,11 @@ class BrokerClient:
                     error=str(exc)[:200],
                 )
                 result = await self._run(capability, payload)
+                fell_back = True
         else:
             result = await self._run(capability, payload)
         await self._account(capability, result)
-        return result
+        return result, fell_back
 
     async def _run(self, capability: str, payload: dict[str, Any]) -> BrokerResult:
         job_id = await self._submit(capability, payload)
@@ -169,8 +200,9 @@ class BrokerClient:
         """Request a schema, then independently validate the paid response.
 
         Provider constraints do not prevent truncation or refusal. Never repair
-        output. The only resubmit is ONE unpinned retry when a pinned model
-        returned invalid output (logged); a cap error is never retried.
+        output. The only resubmit is ONE unpinned retry for the whole call: either `chat`
+        fell back after a pinned failure, or the pinned model returned invalid output
+        (logged), never both; a cap error is never retried.
         """
         check_schema(schema)
         messages: list[dict[str, Any]] = []
@@ -183,7 +215,7 @@ class BrokerClient:
             "json_schema": {"name": schema_name, "strict": True, "schema": schema},
         }
         pin = pinned_model(self._settings, schema_name)
-        result = await self.chat(
+        result, fell_back = await self._chat(
             messages,
             capability=capability,
             max_tokens=max_tokens,
@@ -194,7 +226,9 @@ class BrokerClient:
         try:
             return _validated(result, schema)
         except BrokerOutputError as exc:
-            if pin is None:
+            # Без закрепления, либо ответ и так дан цепочкой после отказа закреплённой
+            # модели (повтор уже был): вторая платная отправка в одной цепочке запрещена.
+            if pin is None or fell_back:
                 raise
             # Закреплённая модель ответила, но ответ негоден (слабая модель
             # ломает схему). Цель бота: не молчать и не ошибаться, поэтому
