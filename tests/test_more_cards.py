@@ -27,6 +27,9 @@ PASSPORT = parse_query("скутер в Нячанге")
 ROOT = 7
 
 
+pytestmark = pytest.mark.usefixtures("sales_on")
+
+
 @dataclass
 class Result:
     items: list[RawItem] = field(default_factory=list)

@@ -14,6 +14,7 @@ from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import CallbackQuery, Message
 
 from sniffer.bot import (
+    billing_wording,
     more_cards,
     paging,
     query_menu,
@@ -148,7 +149,7 @@ async def plan(message: Message) -> None:
     if client is None:  # pragma: no cover — сообщение без автора
         return
     standing = await quota().standing(await account_of(client))
-    await message.answer(wording_plan.plan_text(standing))
+    await message.answer(wording_plan.plan_text(standing, selling=get_settings().selling))
 
 
 @router.message(F.text)
@@ -262,6 +263,9 @@ async def plan_action(callback: CallbackQuery, callback_data: PlanCallback, bot:
     await callback.answer()
     message = callback.message
     if not isinstance(message, Message) or callback_data.action != "subscribe":
+        return
+    if not get_settings().selling:
+        await message.answer(billing_wording.SOON)
         return
     await show_confirmation(message, bot, callback.from_user.id)
 

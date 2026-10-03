@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from sniffer.bot import wording, wording_plan
 from sniffer.bot.presenter import Gate, Reply, present, present_offer
 from sniffer.domain.dialogue import feedback_buttons
@@ -20,6 +22,9 @@ from sniffer.sources.base import RawItem
 ROOT = 41
 END = datetime(2026, 11, 17, 2, 30, tzinfo=UTC)
 FRESH = datetime.now(UTC) - timedelta(days=1)
+
+
+pytestmark = pytest.mark.usefixtures("sales_on")
 
 
 @dataclass
@@ -90,7 +95,7 @@ def test_a_partial_issue_has_the_balance_the_header_of_what_is_shown_and_the_hon
     )
     assert reply.text.startswith(expected_head)
     assert cards_in(reply) == 4
-    assert reply.text.endswith(wording_plan.more_line(33, limit=10, renews=END))
+    assert reply.text.endswith(wording_plan.more_line(33, limit=10, renews=END, selling=True))
     assert reply.feedback == feedback_buttons(passport)
     assert reply.offer_subscription is True and reply.passport_root == ROOT
 
@@ -242,3 +247,42 @@ def test_without_a_gate_the_presenter_still_works_as_before() -> None:
     reply = present(bike(), Result(found), root=ROOT)
 
     assert "осталось" not in reply.text.lower() and cards_in(reply) == 3
+
+
+# ── продажа выключена (SALES_ENABLED=false): факты без призыва купить ───────
+
+
+def test_with_sales_off_an_exhausted_quota_says_how_much_is_used_and_when_it_renews(
+    sales_off: None,
+) -> None:
+    found = items(37)
+
+    reply = present(bike(), Result(found), root=ROOT, gate=gate(found, 0, withheld=5, offer=True))
+
+    assert reply.text == wording_plan.exhausted_closed(total=37, renews=END)
+    assert "Использовано 10 из 10" in reply.text and "17 ноября" in reply.text
+    assert "⭐" not in reply.text and "подписк" not in reply.text.lower()
+    assert reply.offer_plan is False and reply.offer_subscription is False
+
+
+def test_with_sales_off_there_is_no_separate_offer_after_a_partial_issue(sales_off: None) -> None:
+    found = items(10)
+
+    assert present_offer(gate(found, 4, granted=4, withheld=3, offer=True), root=ROOT) is None
+
+
+def test_with_sales_off_the_honest_rest_does_not_point_to_a_subscription(sales_off: None) -> None:
+    found = items(37)
+
+    reply = present(bike(), Result(found), root=ROOT, gate=gate(found, 4, granted=4, withheld=1))
+
+    assert "после обновления лимита 17 ноября" in reply.text
+    assert "по подписке" not in reply.text
+
+
+def test_with_sales_on_the_exhausted_quota_is_still_the_offer(sales_on: None) -> None:
+    found = items(37)
+
+    reply = present(bike(), Result(found), root=ROOT, gate=gate(found, 0, withheld=5, offer=True))
+
+    assert reply.offer_plan is True and "⭐" in reply.text

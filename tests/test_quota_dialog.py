@@ -35,6 +35,9 @@ SEARCH = "скутер в Нячанге"
 FRESH = datetime.now(UTC) - timedelta(days=1)
 
 
+pytestmark = pytest.mark.usefixtures("sales_on")
+
+
 class Rules:
     async def parse(self, text: str) -> Passport:
         return parse_query(text)
@@ -242,7 +245,9 @@ async def test_a_partial_issue_shows_the_remainder_then_the_honest_rest_then_one
     assert "Бесплатно осталось 0 из 10 до 17 ноября." in shown.text
     assert "Показываю 2" in shown.text
     assert shown.text.endswith(
-        wording_plan.more_line(3, limit=10, renews=datetime(2026, 11, 17, 9, 30, tzinfo=UTC))
+        wording_plan.more_line(
+            3, limit=10, renews=datetime(2026, 11, 17, 9, 30, tzinfo=UTC), selling=True
+        )
     )
     assert offer.text == wording_plan.exhausted_offer(
         total=None, renews=datetime(2026, 11, 17, 9, 30, tzinfo=UTC)

@@ -94,6 +94,9 @@ class World:
         await self.quota.confirm(await self.quota.admit(who, list(range(1, count + 1))))
 
 
+pytestmark = pytest.mark.usefixtures("sales_on")
+
+
 @pytest.fixture
 def world(monkeypatch: pytest.MonkeyPatch) -> World:
     return World(monkeypatch, recipients(156, 157))
@@ -221,3 +224,15 @@ async def test_the_collector_hands_its_quota_to_the_reply_and_defaults_to_none(
     answered.reset_mock()
     await collector.Collector()._reply(LEASE)
     answered.assert_awaited_once_with(LEASE)
+
+
+async def test_with_sales_off_a_deferred_reply_has_facts_and_no_offer(
+    world: World, sales_off: None
+) -> None:
+    await world.spend(156, 10)
+
+    await followup.queue_answers(LEASE, quota=world.quota)
+
+    message = render(world.payload(0))
+    assert "Использовано 10 из 10" in message and "17 ноября" in message
+    assert "⭐" not in message and "по подписке" not in message

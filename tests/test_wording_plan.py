@@ -96,14 +96,14 @@ def test_without_a_limit_a_remainder_or_a_date_there_is_no_balance_line(
 def test_the_number_of_held_back_cards_is_declined_like_a_person_would_say_it(
     count: int, noun: str
 ) -> None:
-    line = wording_plan.more_line(count, limit=FREE_CARDS_PER_PERIOD, renews=END)
+    line = wording_plan.more_line(count, limit=FREE_CARDS_PER_PERIOD, renews=END, selling=True)
 
     assert line == f"Ещё {count} {noun} — по подписке {SUBSCRIPTION_STARS} ⭐/мес."
 
 
 def test_a_subscriber_at_the_ceiling_is_not_sold_a_subscription_that_adds_nothing() -> None:
     """Потолок один на аккаунт; вторая подписка прибавляет слежение, а не карточки."""
-    line = wording_plan.more_line(40, limit=PAID_CARDS_PER_PERIOD, renews=END)
+    line = wording_plan.more_line(40, limit=PAID_CARDS_PER_PERIOD, renews=END, selling=True)
 
     assert "подписке" not in line
     assert "после обновления лимита 17 ноября" in line
@@ -154,27 +154,27 @@ def test_without_a_known_renewal_date_the_text_still_says_when_in_words() -> Non
 
 
 def test_the_plan_of_a_free_person_in_the_middle_of_a_period() -> None:
-    text = wording_plan.plan_text(Standing(used=5, limit=10, period_end=END))
+    text = wording_plan.plan_text(Standing(used=5, limit=10, period_end=END), selling=True)
 
     assert text.startswith("Бесплатно: использовано 5 из 10 карточек.\nОбновится 17 ноября.")
     assert f"{SUBSCRIPTION_STARS} ⭐" in text
 
 
 def test_the_plan_before_the_first_card_says_the_period_has_not_started() -> None:
-    text = wording_plan.plan_text(Standing(used=0, limit=10, period_end=None))
+    text = wording_plan.plan_text(Standing(used=0, limit=10, period_end=None), selling=True)
 
     assert "начнётся с первой выданной карточки" in text and "использовано 0" in text
 
 
 def test_the_plan_of_a_subscriber_is_not_an_advertisement() -> None:
-    text = wording_plan.plan_text(Standing(used=59, limit=300, period_end=END))
+    text = wording_plan.plan_text(Standing(used=59, limit=300, period_end=END), selling=True)
 
     assert text == "По подписке: использовано 59 из 300 карточек.\nОбновится 17 ноября."
 
 
 def test_the_plan_after_a_lapsed_subscription_tells_the_truth_about_both_numbers() -> None:
     """Выдано было 250, потолок снова 10: «250 из 10» читалось бы как ошибка."""
-    text = wording_plan.plan_text(Standing(used=250, limit=10, period_end=END))
+    text = wording_plan.plan_text(Standing(used=250, limit=10, period_end=END), selling=True)
 
     assert "использовано 250, потолок сейчас 10" in text
 
@@ -182,7 +182,7 @@ def test_the_plan_after_a_lapsed_subscription_tells_the_truth_about_both_numbers
 def test_the_owner_is_told_there_is_no_limit() -> None:
     standing = Standing(used=9999, limit=None, period_end=None)
 
-    assert wording_plan.plan_text(standing) == "Для вас лимита карточек нет."
+    assert wording_plan.plan_text(standing, selling=True) == "Для вас лимита карточек нет."
 
 
 # ── приветствие и словарь ───────────────────────────────────────────────────
@@ -205,11 +205,12 @@ def test_every_text_about_the_limit_says_search_not_request_or_branch() -> None:
         wording_plan.QUOTA_UNAVAILABLE,
         wording_plan.UNKNOWN_COMMAND,
         wording_plan.SUBSCRIBE_LABEL,
-        wording_plan.more_line(3, limit=FREE_CARDS_PER_PERIOD, renews=END),
+        wording_plan.more_line(3, limit=FREE_CARDS_PER_PERIOD, renews=END, selling=True),
         wording_plan.exhausted_offer(total=5, renews=END),
         wording_plan.exhausted_short(total=5, renews=END),
         wording_plan.exhausted_cap(total=5, renews=END),
-        wording_plan.plan_text(Standing(1, 10, END)),
+        wording_plan.exhausted_closed(total=5, renews=END),
+        wording_plan.plan_text(Standing(1, 10, END), selling=True),
     ]
 
     for text in texts:
@@ -225,8 +226,9 @@ def test_the_texts_are_valid_telegram_html() -> None:
         wording_plan.exhausted_offer(total=5, renews=END),
         wording_plan.exhausted_short(total=5, renews=END),
         wording_plan.exhausted_cap(total=5, renews=END),
-        wording_plan.plan_text(Standing(1, 10, END)),
-        wording_plan.more_line(2, limit=10, renews=END),
+        wording_plan.exhausted_closed(total=5, renews=END),
+        wording_plan.plan_text(Standing(1, 10, END), selling=True),
+        wording_plan.more_line(2, limit=10, renews=END, selling=True),
     ]
     for text in plain:
         assert not re.search(r"[<>&]", text), text
@@ -252,3 +254,30 @@ def test_importing_the_plan_wording_does_not_pull_the_database_or_telegram() -> 
 
     assert done.returncode == 0, done.stderr
     assert done.stdout.strip() == "0", f"поднято модулей базы или Telegram: {done.stdout.strip()}"
+
+
+def test_the_closed_text_has_facts_and_no_call_to_buy() -> None:
+    text = wording_plan.exhausted_closed(total=8100, renews=END)
+
+    assert "Использовано 10 из 10" in text and "17 ноября" in text and "8100" in text
+    assert "⭐" not in text and "подписк" not in text.lower()
+    assert "в начале следующего периода" in wording_plan.exhausted_closed(total=None, renews=None)
+
+
+def test_a_free_person_is_not_pointed_to_a_subscription_while_sales_are_off() -> None:
+    line = wording_plan.more_line(5, limit=FREE_CARDS_PER_PERIOD, renews=END, selling=False)
+    assert "по подписке" not in line and "17 ноября" in line
+    assert "подписк" not in wording_plan.plan_text(Standing(0, 10, None), selling=False).lower()
+
+
+@pytest.mark.parametrize(
+    ("flag", "owner", "expected"),
+    [(False, 0, False), (False, 5, False), (True, 0, False), (True, 5, True)],
+)
+def test_sales_are_open_only_with_the_flag_and_an_owner(
+    flag: bool, owner: int, expected: bool
+) -> None:
+    from sniffer.config import Settings
+
+    cfg = Settings(_env_file=None, sales_enabled=flag, owner_chat_id=owner)  # type: ignore[call-arg]
+    assert cfg.selling is expected

@@ -157,6 +157,15 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     @property
+    def selling(self) -> bool:
+        """Подписку предлагают людям: флаг включён И есть кому отвечать за возвраты.
+
+        Единственное место, где это условие записано для слов и кнопок бота: пока оно ложно,
+        экраны не зовут купить и не рисуют «Подписку» как покупку (`bot/sales_gate.py`).
+        """
+        return self.sales_enabled and self.owner_chat_id != 0
+
+    @property
     def telegram_test_environment(self) -> bool:
         return self.telegram_env.strip().lower() == "test"
 

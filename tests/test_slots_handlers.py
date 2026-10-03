@@ -29,6 +29,9 @@ from tests.thread_support import bike
 ROOT = 7
 
 
+pytestmark = pytest.mark.usefixtures("sales_on")
+
+
 class FakeSlotService:
     """`DbSlots` без базы: исход «Следить» задаёт тест, вызовы записываются."""
 
@@ -197,3 +200,33 @@ async def test_an_unknown_slot_action_is_a_stale_button_not_a_crash(
 def test_the_follow_label_carries_no_price() -> None:
     """У подписчика со свободным слотом «Следить» бесплатно: цена на кнопке врала бы."""
     assert "⭐" not in words.FOLLOW_LABEL
+
+
+# ── продажа выключена: путь к покупке заменён одной строкой ─────────────────
+
+
+@pytest.mark.parametrize("outcome", [Outcome.NEEDS_SUBSCRIPTION, Outcome.NO_FREE_SLOT])
+async def test_with_sales_off_follow_never_leads_to_a_purchase(
+    wired: Wired,
+    slots: FakeSlotService,
+    known_searches: dict[int, QueryOverview],
+    sales_off: None,
+    outcome: Outcome,
+) -> None:
+    slots.outcome = outcome
+
+    await wired.feed(press())
+
+    assert [m.text for m in wired.messages()] == [billing_wording.SOON]
+    assert billing_wording.SOON == "Расширенный тариф скоро."
+
+
+async def test_with_sales_off_an_already_available_slot_still_enables_tracking(
+    wired: Wired,
+    slots: FakeSlotService,
+    known_searches: dict[int, QueryOverview],
+    sales_off: None,
+) -> None:
+    await wired.feed(press())
+
+    assert [m.text for m in wired.messages()] == [words.ENABLED]

@@ -119,6 +119,8 @@ def _quota_view(found: FoundCards, share: Cut) -> dict[str, object]:
     if not share.shown:
         if admission.limit != FREE_CARDS_PER_PERIOD:
             text = wording_plan.exhausted_cap(total=found.total, renews=renews)
+        elif not get_settings().selling:
+            text = wording_plan.exhausted_closed(total=found.total, renews=renews)
         elif share.offer:
             text = wording_plan.exhausted_offer(total=found.total, renews=renews)
         else:
@@ -133,7 +135,12 @@ def _quota_view(found: FoundCards, share: Cut) -> dict[str, object]:
     lines.append(f"Нашёл {count} подходящих {word}:")
     if admission.withheld:
         lines.append(
-            wording_plan.more_line(found.total - count, limit=admission.limit, renews=renews)
+            wording_plan.more_line(
+                found.total - count,
+                limit=admission.limit,
+                renews=renews,
+                selling=get_settings().selling,
+            )
         )
     return {"intro": "\n".join(lines), "items": [_item(item) for item in share.shown]}
 

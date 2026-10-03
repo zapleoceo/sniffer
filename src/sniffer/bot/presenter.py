@@ -162,7 +162,10 @@ def _gated(passport: Passport, found: Results, root: int | None, gate: Gate) -> 
         # Остаток есть, а кнопки «Ещё» нет: лимит отрезал его или исчерпан на этой странице.
         # Честное число вместо молча отброшенного хвоста (раньше он пропадал без слова).
         text += "\n\n" + wording_plan.more_line(
-            rest, limit=admission.limit, renews=admission.period_end
+            rest,
+            limit=admission.limit,
+            renews=admission.period_end,
+            selling=get_settings().selling,
         )
     return Reply(
         text,
@@ -180,6 +183,12 @@ def _exhausted(total: int, root: int | None, gate: Gate) -> Reply:
         # Потолок подписчика: подписка ничего не добавит, поэтому ни кнопки, ни продажи.
         return Reply(
             wording_plan.exhausted_cap(total=total, renews=admission.period_end), passport_root=root
+        )
+    if not get_settings().selling:
+        # Продажи нет: только факт и дата обновления, ни кнопки оплаты, ни «Подписки».
+        return Reply(
+            wording_plan.exhausted_closed(total=total, renews=admission.period_end),
+            passport_root=root,
         )
     if gate.offer:
         return Reply(
@@ -202,7 +211,7 @@ def present_offer(gate: Gate, *, root: int | None) -> Reply | None:
     admission = gate.admission
     if not (gate.offer and gate.shown and admission.withheld):
         return None
-    if admission.limit != FREE_CARDS_PER_PERIOD:
+    if admission.limit != FREE_CARDS_PER_PERIOD or not get_settings().selling:
         return None
     return Reply(
         wording_plan.exhausted_offer(total=None, renews=admission.period_end),
@@ -227,7 +236,12 @@ def present_page(total: int, offset: int, gate: Gate, *, root: int | None) -> li
     rest = total - offset - len(gate.shown)
     if rest > 0 and gate.more is None:
         blocks.append(
-            wording_plan.more_line(rest, limit=admission.limit, renews=admission.period_end)
+            wording_plan.more_line(
+                rest,
+                limit=admission.limit,
+                renews=admission.period_end,
+                selling=get_settings().selling,
+            )
         )
     head = chr(10).join(part for part in parts if part)
     messages = pack(blocks, head=head)

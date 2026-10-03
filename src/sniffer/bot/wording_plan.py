@@ -72,7 +72,7 @@ def _when(renews: datetime | None) -> str:
     return ru_date(renews) if renews is not None else "в начале следующего периода"
 
 
-def more_line(count: int, *, limit: int | None, renews: datetime | None) -> str:
+def more_line(count: int, *, limit: int | None, renews: datetime | None, selling: bool) -> str:
     """Честное число того, что лимит не пустил: «ещё 33 подходящих варианта — по подписке».
 
     У подписчика на потолке 300 подписка ничего не добавит: второй слот прибавляет
@@ -80,7 +80,7 @@ def more_line(count: int, *, limit: int | None, renews: datetime | None) -> str:
     говорят про обновление лимита, а не про оплату.
     """
     found = f"Ещё {count} {plural(count, _FOUND)}"
-    if limit == FREE_CARDS_PER_PERIOD:
+    if limit == FREE_CARDS_PER_PERIOD and selling:
         return f"{found} — по подписке {SUBSCRIPTION_STARS} ⭐/мес."
     return f"{found} — после обновления лимита {_when(renews)}."
 
@@ -102,6 +102,22 @@ def exhausted_offer(*, total: int | None, renews: datetime | None) -> str:
         "карточек за период и слежение за одним поиском, новое придёт сразу.",
         f"• Или подождать до {when}: ваши поиски сохранены, список — /requests.",
     ]
+    return "\n".join(lines)
+
+
+def exhausted_closed(*, total: int | None, renews: datetime | None) -> str:
+    """Бесплатное кончилось, а подписку пока не продаём: факты и дата, без призыва купить.
+
+    Сколько использовано и когда период обновится — то, ради чего человек читает это
+    сообщение; кнопки оплаты и «по подписке» нет, пока владелец не включил продажу.
+    """
+    lines = [
+        f"Использовано {FREE_CARDS_PER_PERIOD} из {FREE_CARDS_PER_PERIOD} бесплатных карточек. "
+        f"Период обновится {_when(renews)}."
+    ]
+    if total is not None:
+        lines.append(f"Сейчас подходящих объявлений: {total} — это число я показываю и без лимита.")
+    lines.append("Ваши поиски сохранены: /requests.")
     return "\n".join(lines)
 
 
@@ -128,7 +144,7 @@ def exhausted_cap(*, total: int, renews: datetime | None) -> str:
     )
 
 
-def plan_text(standing: Standing) -> str:
+def plan_text(standing: Standing, *, selling: bool) -> str:
     """`/plan`: сколько занято, какой потолок, когда обновится. Только чтение."""
     if standing.limit is None:
         return "Для вас лимита карточек нет."
@@ -136,7 +152,7 @@ def plan_text(standing: Standing) -> str:
     if standing.period_end is None:
         return (
             f"Бесплатно — {standing.limit} карточек за период. Он начнётся с первой выданной "
-            f"карточки: пока использовано 0.\n{_more_by_subscription()}"
+            f"карточки: пока использовано 0." + (f"\n{_more_by_subscription()}" if selling else "")
         )
     used = (
         f"использовано {standing.used} из {standing.limit}"
@@ -146,7 +162,7 @@ def plan_text(standing: Standing) -> str:
     when = ru_date(standing.period_end)
     head = "По подписке" if subscribed else "Бесплатно"
     text = f"{head}: {used} карточек.\nОбновится {when}."
-    return text if subscribed else f"{text}\n{_more_by_subscription()}"
+    return text if subscribed or not selling else f"{text}\n{_more_by_subscription()}"
 
 
 def _more_by_subscription() -> str:

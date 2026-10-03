@@ -25,6 +25,9 @@ from tests.quota_support import Clock
 T0 = datetime(2026, 10, 17, 9, 30, tzinfo=UTC)
 
 
+pytestmark = pytest.mark.usefixtures("sales_on")
+
+
 class FakeUser:
     def __init__(self, user_id: int = 42) -> None:
         self.id = user_id
@@ -139,7 +142,7 @@ async def test_plan_reads_the_standing_and_writes_nothing(monkeypatch: pytest.Mo
     await handler.plan(cast(Message, message))
 
     assert message.answers == [
-        wording_plan.plan_text(await quota.standing(who)),
+        wording_plan.plan_text(await quota.standing(who), selling=True),
     ]
     assert "использовано 5 из 10" in message.answers[0] and "17 ноября" in message.answers[0]
     assert len(ledger.rows(1)) == before
@@ -196,3 +199,46 @@ def test_a_reply_without_any_buttons_has_no_keyboard() -> None:
 
 def test_the_plan_button_fits_the_telegram_callback_limit() -> None:
     assert len(PlanCallback(action="subscribe").pack().encode()) <= 64
+
+
+# ── продажа выключена: «Подписка» и /plan не продают ─────────────────────────
+
+
+async def test_with_sales_off_the_subscription_button_only_says_it_is_coming(
+    monkeypatch: pytest.MonkeyPatch, sales_off: None
+) -> None:
+    monkeypatch.setattr(handler, "Message", FakeMessage)
+    shown: list[int] = []
+
+    async def show(message: object, bot: object, tg_user_id: int) -> None:
+        shown.append(tg_user_id)
+
+    monkeypatch.setattr(handler, "show_confirmation", show)
+    message = FakeMessage("")
+
+    await handler.plan_action(
+        cast(Any, FakeCallback(message)), PlanCallback(action="subscribe"), cast(Any, object())
+    )
+
+    assert message.answers == ["Расширенный тариф скоро."] and shown == []
+
+
+async def test_with_sales_off_the_plan_command_has_no_subscription_pitch(
+    monkeypatch: pytest.MonkeyPatch, sales_off: None
+) -> None:
+    quota = QuotaService(MemoryLedger(), clock=Clock(T0))
+    who = Account(user_id=1, tg_user_id=42)
+    await quota.confirm(await quota.admit(who, [1, 2, 3, 4, 5]))
+
+    async def account_of(_client: Client) -> Account:
+        return who
+
+    monkeypatch.setattr(handler, "quota", lambda: quota)
+    monkeypatch.setattr(handler, "account_of", account_of)
+    message = FakeMessage("/plan")
+
+    await handler.plan(cast(Message, message))
+
+    (text,) = message.answers
+    assert "использовано 5 из 10" in text and "17 ноября" in text
+    assert "подписк" not in text.lower() and "⭐" not in text

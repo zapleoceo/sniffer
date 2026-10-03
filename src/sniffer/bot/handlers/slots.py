@@ -19,12 +19,13 @@ from aiogram import Bot, Router
 from aiogram.filters.callback_data import CallbackData
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from sniffer.bot import query_menu, threads
+from sniffer.bot import billing_wording, query_menu, threads
 from sniffer.bot import slot_wording as words
 from sniffer.bot.billing_slots import DbSlots
 from sniffer.bot.handlers.billing import show_confirmation
 from sniffer.bot.keyboards import SubscribeCallback
 from sniffer.bot.store import Client
+from sniffer.config import get_settings
 from sniffer.domain.slots import Outcome
 
 router = Router(name="slots")
@@ -79,6 +80,10 @@ async def follow_button(
         await message.answer(words.ENABLED)
     elif outcome is Outcome.ALREADY_ON:
         await message.answer(words.ALREADY_ON)
+    elif not get_settings().selling:
+        # Дальше только покупка (подписка или второй слот), а её пока не продаём. Уже
+        # включённое слежение работает как работало.
+        await message.answer(billing_wording.SOON)
     elif outcome is Outcome.NEEDS_SUBSCRIPTION:
         await message.answer(words.NEEDS_SUBSCRIPTION)
         await show_confirmation(message, bot, client.tg_user_id)
