@@ -460,6 +460,20 @@ async def the_standing_ignores_the_monitor(kit: Kit) -> None:
     assert (await quota.standing(who)).used == 2
 
 
+@scenario
+async def the_standing_after_a_period_change_does_not_sum_past_periods(kit: Kit) -> None:
+    """Занято считается по номеру текущего периода: прошлый период в сумму не входит."""
+    _, who = await started(kit)
+    quota = service(kit)
+    edge = datetime(2026, 11, 17, 9, 30, tzinfo=UTC)
+    await quota.confirm(await quota.admit(who, await kit.listings(FREE_CARDS_PER_PERIOD)))
+    assert (await quota.standing(who, now=edge - timedelta(seconds=1))).used == 10
+
+    assert (await quota.standing(who, now=edge)).used == 0, "новый период начат, выдач в нём нет"
+    await quota.admit(who, await kit.listings(3), now=edge)
+    assert (await quota.standing(who, now=edge)).used == 3, "десять прошлых не прибавляются"
+
+
 # ── один набор сценариев, две реализации ────────────────────────────────────
 
 
