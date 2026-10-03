@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "Telegram-агент: паспорт запроса, подбор предложений из сообществ, подписка на новые"
 requires-python = ">=3.12"
 dependencies = [
-    "aiogram>=3.13",
+    # 3.30: апдейт `subscription` (Bot API 10.2) и поля подписки в платеже. Нижняя
+    # граница честная: прод стоит на lock 3.31, но граница ничего не обещала.
+    "aiogram>=3.30",
     "telethon>=1.36",
     "sqlalchemy[asyncio]>=2.0",
     "asyncpg>=0.30",
