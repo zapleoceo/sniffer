@@ -33,6 +33,7 @@ def test_the_section_states_the_defaults_of_the_script() -> None:
     section = _section()
 
     assert _default("BACKUP_DIR") in section
+    assert f"`{_default('BACKUP_GROUP')}`" in section
     assert f"**{_default('KEEP_DAYS')} суток**" in section
     assert f"{_default('MIN_BYTES')} байт" in section
 
