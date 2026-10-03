@@ -169,7 +169,8 @@ class BrokerClient:
         """Request a schema, then independently validate the paid response.
 
         Provider constraints do not prevent truncation or refusal. Never repair
-        output or silently resubmit a paid call; callers choose their fallback.
+        output. The only resubmit is ONE unpinned retry when a pinned model
+        returned invalid output (logged); a cap error is never retried.
         """
         check_schema(schema)
         messages: list[dict[str, Any]] = []
@@ -177,29 +178,44 @@ class BrokerClient:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
 
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {"name": schema_name, "strict": True, "schema": schema},
+        }
+        pin = pinned_model(self._settings, schema_name)
         result = await self.chat(
             messages,
             capability=capability,
             max_tokens=max_tokens,
             temperature=0.1,
-            model=pinned_model(self._settings, schema_name),
-            response_format={
-                "type": "json_schema",
-                "json_schema": {"name": schema_name, "strict": True, "schema": schema},
-            },
+            model=pin,
+            response_format=response_format,
         )
-        if result.refusal:
-            raise BrokerOutputError("refusal", result)
-        if result.finish_reason is not None and (
-            not isinstance(result.finish_reason, str)
-            or result.finish_reason.lower() not in {"stop", "end_turn", "completed"}
-        ):
-            raise BrokerOutputError("incomplete", result)
         try:
-            return parse_object(result.text, schema)
-        except InvalidOutput as exc:
-            # Do not chain jsonschema's exception: it contains the raw instance.
-            raise BrokerOutputError(exc.reason, result) from None
+            return _validated(result, schema)
+        except BrokerOutputError as exc:
+            if pin is None:
+                raise
+            # Закреплённая модель ответила, но ответ негоден (слабая модель
+            # ломает схему). Цель бота: не молчать и не ошибаться, поэтому
+            # ОДИН платный повтор по цепочке брокера. Первый ответ уже учтён
+            # в chat() под фактической моделью; повтор учтётся под своей.
+            log.warning(
+                "broker.pinned_model_invalid",
+                capability=capability,
+                model=pin,
+                served_model=result.model,
+                reason=exc.reason,
+                request_id=result.request_id,
+            )
+        retry = await self.chat(
+            messages,
+            capability=capability,
+            max_tokens=max_tokens,
+            temperature=0.1,
+            response_format=response_format,
+        )
+        return _validated(retry, schema)
 
     async def transcribe(self, audio: bytes, *, filename: str = "voice.ogg") -> str:
         """Голос → текст. Синхронный запрос: у брокера это прокси, не очередь.
@@ -303,6 +319,21 @@ class BrokerClient:
         # Широкий except намеренно: см. докстринг — ответ уже оплачен.
         except Exception as exc:
             log.warning("broker.usage_not_recorded", kind=type(exc).__name__, error=str(exc))
+
+
+def _validated(result: BrokerResult, schema: dict[str, Any]) -> dict[str, Any]:
+    if result.refusal:
+        raise BrokerOutputError("refusal", result)
+    if result.finish_reason is not None and (
+        not isinstance(result.finish_reason, str)
+        or result.finish_reason.lower() not in {"stop", "end_turn", "completed"}
+    ):
+        raise BrokerOutputError("incomplete", result)
+    try:
+        return parse_object(result.text, schema)
+    except InvalidOutput as exc:
+        # Do not chain jsonschema's exception: it contains the raw instance.
+        raise BrokerOutputError(exc.reason, result) from None
 
 
 def _as_int(value: Any) -> int | None:
