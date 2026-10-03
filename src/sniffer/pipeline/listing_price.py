@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from decimal import Decimal
 
-from sniffer.domain.prices import PriceFact
+from sniffer.domain.prices import PriceFact, fits_budget
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,7 +35,7 @@ def price_columns(fact: PriceFact | None, deal_type: str) -> PriceColumns:
     if fact is None:
         return PriceColumns()
     rent = deal_type == "rent_out"
-    if fact.currency == "VND" and (not rent or fact.period in (None, "month")):
+    if fits_budget(fact, rent=rent):
         extra: dict[str, object] = {"price_up_to": fact.up_to} if fact.up_to else {}
         return PriceColumns(Decimal(fact.amount), "VND", "month" if rent else "once", extra)
     kept: dict[str, object] = {

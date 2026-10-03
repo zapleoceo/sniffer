@@ -37,7 +37,15 @@ from sniffer.config import Settings, get_settings
 from sniffer.sources.base import RawItem, Source, register
 from sniffer.sources.chat_directory import new_directory
 from sniffer.sources.telegram_client import missing_reader_settings, new_reader
-from sniffer.sources.telegram_mapping import album_key, chats_limit, messages_limit, to_item
+from sniffer.sources.telegram_mapping import (
+    NO_CONTEXT,
+    PriceContext,
+    album_key,
+    chats_limit,
+    messages_limit,
+    price_context,
+    to_item,
+)
 from sniffer.sources.telegram_reference import (
     FLOOD_BACKOFF_BASE,
     MAX_ATTEMPTS_PER_CHAT,
@@ -128,13 +136,14 @@ class TelegramGroupsSource(Source):
             return []
 
         limit = messages_limit(params)
+        context = price_context(params)
         items: list[RawItem] = []
         failed = 0
         for chat in chats:
             if self._left() <= 0:
                 log.warning("telegram.budget_exceeded", budget_s=self._budget_s, done=len(items))
                 break
-            found = await self._from_chat(client, chat, text, limit)
+            found = await self._from_chat(client, chat, text, limit, context)
             if found is None:
                 failed += 1
             else:
@@ -209,6 +218,7 @@ class TelegramGroupsSource(Source):
         chat: ChatLike,
         query: str,
         limit: int,
+        context: PriceContext = NO_CONTEXT,
     ) -> list[RawItem] | None:
         """Находки одного чата либо `None`, если чат не ответил."""
         # username, а не id: по имени сущность разрешается с холодной сессии,
@@ -257,18 +267,32 @@ class TelegramGroupsSource(Source):
                     error=f"{type(exc).__name__}: {exc}",
                 )
                 return None
-            return self._items(chat, messages)
+            return self._items(chat, messages, context)
         # Недостижимо: последняя попытка возвращает результат либо `None` выше.
         return None
 
-    def _items(self, chat: ChatLike, messages: Sequence[Any]) -> list[RawItem]:
+    def _items(
+        self, chat: ChatLike, messages: Sequence[Any], context: PriceContext = NO_CONTEXT
+    ) -> list[RawItem]:
         """Находки чата без повторов одного альбома."""
         items: list[RawItem] = []
         for message in messages:
             key = album_key(chat, message)
             if key is not None and key in self._albums:
                 continue
-            item = to_item(chat, message)
+            try:
+                item = to_item(chat, message, context)
+            except Exception as exc:
+                # Одно кривое сообщение не смеет унести находки всех остальных: контракт
+                # источника — не бросать наружу. Разбор цены уже ронял воронку на табе
+                # внутри числа, и на живом поиске это стоило бы запроса целиком.
+                log.warning(
+                    "telegram.item_failed",
+                    chat=chat.tg_id,
+                    message=getattr(message, "id", None),
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                continue
             if item is None:
                 continue
             if key is not None:

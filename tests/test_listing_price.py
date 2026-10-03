@@ -64,3 +64,11 @@ def test_dollars_never_pose_as_dong() -> None:
     assert (columns.amount, columns.currency) == (None, None)
     assert columns.attributes["rate_currency"] == "USD"
     assert columns.attributes["rate_per"] == "month"
+
+
+def test_the_upper_bound_of_a_daily_range_stays_next_to_the_rate() -> None:
+    """«от 250 до 400 тыс в сутки» — вилка ставки: верх держится в атрибутах, а не теряется."""
+    columns = price_columns(fact(250_000, period="day", up_to=400_000), "rent_out")
+
+    assert columns.attributes["rate_up_to"] == 400_000
+    assert "price_up_to" not in columns.attributes

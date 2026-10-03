@@ -27,7 +27,7 @@ from structlog.testing import capture_logs
 from telethon.errors import AuthKeyUnregisteredError, FloodWaitError, SessionRevokedError
 
 from sniffer.config import Settings
-from sniffer.sources import telegram_groups
+from sniffer.sources import telegram_groups, telegram_mapping
 from sniffer.sources.base import get_source, registered_sources
 from sniffer.sources.chat_directory import EmptyChatDirectory
 from sniffer.sources.telegram_groups import TelegramGroupsSource
@@ -710,3 +710,49 @@ async def test_an_empty_registry_says_so_out_loud() -> None:
     assert any(entry["event"] == "telegram.no_chats" for entry in logs), (
         "пустой реестр остался незаметным в логе"
     )
+
+
+async def test_one_message_that_breaks_the_mapping_does_not_take_the_rest_with_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Разбор одного сообщения упал — остальные находки запроса целы.
+
+    Разбор цены уже ронял воронку на таб-разделителе внутри числа, а `_items` стоял
+    вне охраны: исключение из одного сообщения уносило находки всех чатов запроса.
+    """
+    real = telegram_mapping.to_item
+
+    def flaky(chat: Any, message: Any, context: Any) -> Any:
+        if message.id == 55120:
+            raise ValueError("кривое сообщение")
+        return real(chat, message, context)
+
+    monkeypatch.setattr(telegram_groups, "to_item", flaky)
+
+    with capture_logs() as logs:
+        items = await adapter(FakeTelegram(replies=fixture_replies())).search("байк", {})
+
+    assert "-1001657234891:55120" not in {item.external_id for item in items}
+    assert len(items) == 4
+    failed = [entry for entry in logs if entry["event"] == "telegram.item_failed"]
+    assert [(entry["chat"], entry["message"]) for entry in failed] == [(-1001657234891, 55120)]
+
+
+async def test_the_plan_context_reaches_every_message_of_every_chat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[Any] = []
+    real = telegram_mapping.to_item
+
+    def spy(chat: Any, message: Any, context: Any) -> Any:
+        seen.append(context)
+        return real(chat, message, context)
+
+    monkeypatch.setattr(telegram_groups, "to_item", spy)
+
+    await adapter(FakeTelegram(replies=fixture_replies())).search(
+        "байк", {"category": "motorbike", "intent": "buy"}
+    )
+
+    assert seen
+    assert {(context.category, context.deal_type) for context in seen} == {("motorbike", "sell")}

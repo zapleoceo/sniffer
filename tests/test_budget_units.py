@@ -1,0 +1,54 @@
+"""Бюджет клиента читает те же единицы суммы, что и цена в объявлении.
+
+Раньше у бюджета был свой короткий список («к», «млн», «tr»…), и «до 15кк», «до 2 tỷ»
+и «до 20🍋» читались как 15, 2 и 20 долларов — а «цена 15кк» в объявлении при этом
+читалась как 15 миллионов донгов. Одно знание — «как пишут миллион» — жило в двух местах.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from sniffer.domain.passport import Currency
+from sniffer.domain.price_numbers import factor
+from sniffer.domain.price_vocab import UNIT_FACTORS
+from sniffer.search.budget_rules import parse_budget
+
+# «м» — метры, «ml» — миллилитры: в объявлении рядом с суммой они читаются деньгами
+# («36 m» одной строкой), а в речи клиента («400 м от моря») нет.
+NOT_A_BUDGET_UNIT = {"м", "ml"}
+
+
+@pytest.mark.parametrize(
+    ("text", "maximum"),
+    [
+        ("сниму квартиру до 15кк", 15_000_000),
+        ("куплю квартиру до 2 tỷ", 2_000_000_000),
+        ("куплю дом до 1,5 млрд", 1_500_000_000),
+        ("байк до 20🍋", 20_000_000),
+        ("квартира до 10 млн", 10_000_000),
+        ("скутер до 300к", 300_000),
+        ("квартира до 10tr", 10_000_000),
+        ("квартира до 10 triệu", 10_000_000),
+        ("квартира до 800 nghìn", 800_000),
+    ],
+)
+def test_the_budget_understands_every_way_listings_write_a_million(text: str, maximum: int) -> None:
+    budget = parse_budget(text)
+
+    assert budget.max == maximum
+    assert budget.currency is Currency.VND
+
+
+@pytest.mark.parametrize(
+    "name", [name for name, _ in UNIT_FACTORS if name not in NOT_A_BUDGET_UNIT]
+)
+def test_every_unit_of_the_price_vocabulary_is_a_unit_of_the_budget(name: str) -> None:
+    """Связь, а не список: новая единица в `price_vocab` сразу понятна и бюджету."""
+    assert parse_budget(f"до 5{name}").max == 5 * factor(name)
+
+
+def test_metres_are_not_millions_in_a_client_phrase() -> None:
+    budget = parse_budget("квартира в 400 м от моря, до 10 млн")
+
+    assert budget.max == 10_000_000

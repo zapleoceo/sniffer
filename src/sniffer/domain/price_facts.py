@@ -37,22 +37,29 @@ from sniffer.domain.price_numbers import (
     scale,
 )
 from sniffer.domain.price_vocab import (
+    AGGREGATOR_LINE_RE,
     AMOUNT_RE,
     BOUNDARY_RE,
     COUNT_AFTER_RE,
     DIRECT_LABEL_RE,
-    FOOTER_RE,
+    FEATURE_BEFORE_RE,
     HEADER_LABEL_RE,
+    INCLUDED_RE,
+    LABEL_FIELD_RE,
+    LABEL_LEAD_RE,
     LABEL_RE,
     MONEY,
+    NEUTRAL_AFTER_RE,
     OTHER_AFTER_RE,
     OTHER_BEFORE_RE,
     PERIOD_AFTER,
     PERIOD_BEFORE,
+    PERIOD_LABELLED,
     SURCHARGE_RE,
     UPTO_RE,
     WEAK_LABEL_RE,
     WEAK_UNITS,
+    WORD_AFTER_RE,
 )
 from sniffer.domain.text_clean import clean_text
 
@@ -61,19 +68,21 @@ _MAX_TEXT = 6_000
 _MAX_PER_LINE = 60
 _LETTERS_RE = re.compile(r"[^\W\d_]")
 _NOISE_RE = re.compile(r"#\w+|<[^>]*>")
+_HASHTAG_RE = re.compile(r"#[\w-]+")
 _DIGIT_RE = re.compile(r"\d")
-_LABELED = frozenset({"label", "weak"})
+_LABELED = frozenset({"label", "weak", "inline"})
 
 
 @dataclass(frozen=True, slots=True)
 class PriceFact:
     """Цена из текста: сколько, в чём, за какой срок и чем подтверждена.
 
-    ``source`` — сила пометки: ``label`` («Цена:», «Аренда»), ``weak`` (метка и
-    слова без двоеточия), ``money`` (значок денег перед суммой), ``text`` (сумма
-    без пометки), ``footer`` (итоговая строка бота-агрегатора). ``bare`` — число
-    без единицы и валюты, слишком малое для донгов («Цена 19.500»): ``value``
-    хранит его как написано, а масштаб выбирают границы правдоподобия.
+    ``source`` — сила пометки: ``label`` («Цена:», «Аренда» в начале фразы),
+    ``weak`` (метка и слова без двоеточия), ``inline`` (метка в середине фразы:
+    «Прошёл ТО стоимостью 4,2 млн»), ``money`` (значок денег перед суммой),
+    ``text`` (сумма без пометки). ``bare`` — число без единицы и валюты, слишком
+    малое для донгов («Цена 19.500»): ``value`` хранит его как написано, а масштаб
+    выбирают границы правдоподобия.
     """
 
     raw: str
@@ -111,14 +120,18 @@ def _period(segment: str, post: str) -> str | None:
     for name, pattern in PERIOD_AFTER:
         if pattern.search(post):
             return name
-    return next((name for name, pattern in PERIOD_BEFORE if pattern.search(segment)), None)
+    for name, pattern in (*PERIOD_BEFORE, *PERIOD_LABELLED):
+        if pattern.search(segment):
+            return name
+    return None
 
 
-def _source(line: str, lead: str, segment: str, *, carried: bool) -> str:
-    if len(line) <= _WINDOW and FOOTER_RE.match(line):
-        return "footer"
+def _source(lead: str, segment: str, *, carried: bool) -> str:
     bare = not segment.strip(" :—–-")
-    if LABEL_RE.search(segment) or (bare and carried):
+    if LABEL_RE.search(segment):
+        field = LABEL_LEAD_RE.match(segment) or LABEL_FIELD_RE.search(segment)
+        return "label" if field else "inline"
+    if bare and carried:
         return "label"
     if WEAK_LABEL_RE.search(segment):
         return "weak"
@@ -137,23 +150,31 @@ def _around(line: str, match: re.Match[str], *, carried: bool) -> _Around:
     before = line[max(0, match.start() - _WINDOW) : match.start()]
     lead, segment = _split(before)
     post = line[match.end() : match.end() + 60]
-    source = _source(line, lead, segment, carried=carried)
+    source = _source(lead, segment, carried=carried)
     return _Around(
         before, lead, segment, post, source, _is_alone(line, match), _period(segment, post)
     )
 
 
-def _rejected(ctx: _Around, code: str | None) -> bool:
-    """Контекст говорит, что это не цена предмета: сбор, залог, надбавка, потолок запроса.
+def _names_a_fee(segment: str) -> bool:
+    """Слово вплотную перед суммой называет сбор («Залог: 10 млн»), а не свойство предмета.
 
     Слова до суммы смотрим лишь после последней метки цены: в строке без знаков
-    препинания «…пробег 21к цена 21млн» пробег относится к «21к», а не к цене.
+    препинания «…пробег 21к цена 21млн» пробег относится к «21к», а не к цене. А
+    «без комиссии 12 млн» и «с парковкой 15 млн» слово называет то, что в цену
+    входит или не входит, — сама сумма остаётся ценой.
     """
-    label = LABEL_RE.search(ctx.segment)
-    nearby = ctx.segment[label.start() :] if label else ctx.segment[-80:]
+    label = LABEL_RE.search(segment)
+    nearby = segment[label.start() :] if label else segment[-80:]
+    named = OTHER_BEFORE_RE.search(nearby)
+    return named is not None and FEATURE_BEFORE_RE.search(nearby[: named.start()]) is None
+
+
+def _rejected(ctx: _Around, code: str | None) -> bool:
+    """Контекст говорит, что это не цена предмета: сбор, залог, надбавка, потолок запроса."""
     return (
         code == "OTHER"
-        or OTHER_BEFORE_RE.search(nearby) is not None
+        or _names_a_fee(ctx.segment)
         or OTHER_AFTER_RE.match(ctx.post) is not None
         or SURCHARGE_RE.search(ctx.before) is not None
         or UPTO_RE.search(ctx.segment) is not None
@@ -164,9 +185,14 @@ def _unit_ok(unit: str | None, code: str | None, ctx: _Around) -> bool:
     """Слабая единица («35 m», «500 ml», «130к») — деньги лишь при подтверждении."""
     if not unit or unit.casefold() not in WEAK_UNITS:
         return True
-    if unit.casefold() == "ml" and code is None and ctx.source == "text":
+    if unit.casefold() == "ml" and code is None and ctx.source == "text" and not ctx.period:
         return False
     return bool(code or ctx.source != "text" or ctx.alone or ctx.period)
+
+
+def _figure_ends(post: str, *, periodic: bool) -> bool:
+    """После числа не идёт слово: «8.5 (1 этаж)» — цена, «2 с ванной» — нет."""
+    return periodic or WORD_AFTER_RE.match(post) is None or NEUTRAL_AFTER_RE.match(post) is not None
 
 
 def _bare_number(match: re.Match[str], amount: int, ctx: _Around) -> str | None:
@@ -175,9 +201,11 @@ def _bare_number(match: re.Match[str], amount: int, ctx: _Around) -> str | None:
     Не год, не этаж, не телефон и не номер: без метки порог выше, потому что
     нечем отличить цену от «2025». «Цена 19.500» у байка и «Цена 8.5» у квартиры —
     сокращённые тысячи и миллионы: сам по себе такой ответ не поймёшь, и его
-    масштаб выбирают границы правдоподобия (`prices.choose_price`), но только
-    если метка стоит вплотную: «договор на 3 месяца» — не три миллиона. Срок
-    сразу за числом («7,500,000/month») делает его ценой и без метки.
+    масштаб выбирают границы правдоподобия (`prices.choose_price`). Верим этому
+    только слову «цена» вплотную («договор на 3 месяца» — не три миллиона) либо
+    значку денег и заголовку списка цен, но тогда после числа не может стоять
+    слово: под заголовком «Аренда в районе Мипеко:» строка «2 с ванной» — не два
+    миллиона. Срок сразу за числом («7,500,000/month») делает его ценой и без метки.
     """
     digits = re.sub(r"\D", "", match.group("lo"))
     if digits.startswith("0") or COUNT_AFTER_RE.match(ctx.post):
@@ -187,24 +215,27 @@ def _bare_number(match: re.Match[str], amount: int, ctx: _Around) -> str | None:
         return None
     if (1_000_000 if ctx.source == "text" and not periodic else 100_000) <= amount < 2_000_000_000:
         return "price"
-    direct = (
-        ctx.source == "money"
-        or DIRECT_LABEL_RE.search(ctx.segment) is not None
-        or (ctx.source == "label" and not ctx.segment.strip(" :—–-"))
-    )
-    return "small" if direct and amount < 100_000 else None
+    if amount >= 100_000:
+        return None
+    direct = DIRECT_LABEL_RE.search(ctx.segment) is not None
+    listed = ctx.source == "money" or (ctx.source == "label" and not ctx.segment.strip(" :—–-"))
+    if direct or (listed and _figure_ends(ctx.post, periodic=periodic)):
+        return "small"
+    return None
 
 
 def _fact(line: str, match: re.Match[str], *, carried: bool) -> PriceFact | None:
     ctx = _around(line, match, carried=carried)
     unit, written = match.group("unit"), match.group("cur") or match.group("pcur")
     code = currency_code(written)
-    parts = numbers(match)
-    if parts is None or _rejected(ctx, code) or not _unit_ok(unit, code, ctx):
+    figure = numbers(match)
+    if figure is None or _rejected(ctx, code) or not _unit_ok(unit, code, ctx):
         return None
-    low, high, start = parts
+    low, high = figure.low, figure.high
     factor = scale(unit, written, code, low)
-    amount = int(low * factor)
+    # `round`, а не `int`: «2.05 млн» в числах с плавающей точкой — 2049999.9999999998, и
+    # усечение давало 2 049 999 ₫ вместо 2 050 000 (у 3,6% десятичных записей).
+    amount = round(low * factor)
     bare = False
     if unit is None and code is None:
         verdict = _bare_number(match, amount, ctx)
@@ -223,8 +254,8 @@ def _fact(line: str, match: re.Match[str], *, carried: bool) -> PriceFact | None
         if ctx.source in _LABELED
         else None
     )
-    raw = (ctx.segment[label.start() :] if label else "") + line[start : match.end()]
-    up_to = int(high * factor) if high else None
+    raw = (ctx.segment[label.start() :] if label else "") + line[figure.start : figure.end]
+    up_to = round(high * factor) if high else None
     return PriceFact(raw.strip(), amount, code, ctx.period, ctx.source, up_to, low, bare)
 
 
@@ -237,6 +268,11 @@ def parse_prices(text: str) -> list[PriceFact]:
     found: list[PriceFact] = []
     carried = False
     for line in expand_compact(clean_text(text[:_MAX_TEXT])).splitlines():
+        if len(line) <= _WINDOW and AGGREGATOR_LINE_RE.match(line):
+            continue
+        # Хэштег — ярлык, а не текст: «#от10до15млн» — корзина фильтра агрегатора,
+        # и читать её как вилку цен значит дать «10 млн» объявлению за 12.
+        line = _HASHTAG_RE.sub(lambda tag: " " * len(tag.group()), line)
         here = [
             fact
             for match in islice(AMOUNT_RE.finditer(line), _MAX_PER_LINE)
@@ -248,7 +284,9 @@ def parse_prices(text: str) -> list[PriceFact]:
             # Метка над списком — строка без цифр: «Цены:», «Условия аренды:».
             # Строка с цифрами, чью сумму отбросил контекст («Плата за
             # управление: 700 000»), метки списку не даёт.
-            carried = HEADER_LABEL_RE.search(stripped) is not None and not _DIGIT_RE.search(
-                stripped
+            carried = (
+                HEADER_LABEL_RE.search(stripped) is not None
+                and not _DIGIT_RE.search(stripped)
+                and not INCLUDED_RE.search(stripped)
             )
     return found

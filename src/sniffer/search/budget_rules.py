@@ -10,20 +10,19 @@ from __future__ import annotations
 import re
 
 from sniffer.domain.passport import Budget, Currency, Intent, PricePeriod
+from sniffer.domain.price_numbers import factor
+from sniffer.domain.price_vocab import UNIT_FACTORS
 
-# Множители пишут цифрами, словом и по-вьетнамски: «400к», «10 млн», «10tr»,
-# «10 triệu».
-_MULTIPLIERS: dict[str, int] = {
-    "k": 1_000,
-    "к": 1_000,
-    "тыс": 1_000,
-    "m": 1_000_000,
-    "млн": 1_000_000,
-    "миллион": 1_000_000,
-    "лям": 1_000_000,
-    "tr": 1_000_000,
-    "triệu": 1_000_000,
-}
+# Единицы суммы клиента — те же слова, что в объявлениях (`price_vocab`): иначе «до
+# 15кк», «до 2 tỷ» и «до 20🍋» читались долларами (15, 2 и 20), а «цена 15кк» в
+# объявлении — миллионами. Без «м» и «ml»: клиент пишет «400 м от моря» и «500 мл», и
+# это не деньги. Длинные названия впереди, чтобы «млрд» не уступило «м».
+_NOT_A_BUDGET_UNIT = frozenset({"м", "ml"})
+_UNITS = "|".join(
+    re.escape(name)
+    for name, _ in sorted(UNIT_FACTORS, key=lambda item: -len(item[0]))
+    if name not in _NOT_A_BUDGET_UNIT
+)
 
 # Пробел внутри числа только обычный и неразрывный: `\s` пустил бы перенос
 # строки и склеил два числа из соседних строк в одно. Хвост `\w*` живёт внутри
@@ -38,7 +37,7 @@ _MULTIPLIERS: dict[str, int] = {
 # обязателен: иначе из «cbr250» прочиталось бы «50» — хвост, стоящий за цифрой.
 _AMOUNT_RE = re.compile(
     r"(?<!\w)"
-    r"(?P<num>\d[\d\u00a0 .,]*\d|\d)\s*(?:(?P<mult>k|к|тыс|млн|миллион|лям|tr|triệu|m)\w*)?",
+    rf"(?P<num>\d[\d\u00a0 .,]*\d|\d)\s*(?:(?P<mult>{_UNITS})\w*)?",
     re.IGNORECASE,
 )
 
@@ -160,7 +159,7 @@ def _without_rejected(text: str) -> str:
 def _amounts(text: str) -> list[tuple[float, str | None]]:
     found: list[tuple[float, str | None]] = []
     for match in _AMOUNT_RE.finditer(text):
-        multiplier = _MULTIPLIERS.get((match.group("mult") or "").lower(), 1)
+        multiplier = factor(match.group("mult"))
         number = _to_number(match.group("num"))
         if number is None:
             continue

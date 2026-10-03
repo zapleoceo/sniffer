@@ -51,13 +51,6 @@ LABELS = [
         "month",
     ),
     case(
-        "aggregator_footer_is_the_last_resort",
-        "Сдам студию у моря, свободна с 1.10\n💰 9 000 000 ₫/мес #booking",
-        APARTMENT,
-        9_000_000,
-        "month",
-    ),
-    case(
         "money_emoji_without_label", "🌿 Studio\n💵 14M VND/month", APARTMENT, 14_000_000, "month"
     ),
     case(
@@ -270,7 +263,7 @@ NOT_A_PRICE = [
 OUT_OF_BOUNDS = [
     pytest.param("Цена: 1.4 млн VND/мес (1 комн.)", id="below_the_apartment_floor"),
     pytest.param("Цена: 350 млн VND/мес (55 м²)", id="above_the_apartment_ceiling"),
-    pytest.param("Сдам студию\n💰 500 000 ₫/мес #booking", id="aggregator_footer_gone_wrong"),
+    pytest.param("Сдам студию\n💰 500 000 ₫/мес", id="money_sign_below_the_apartment_floor"),
 ]
 
 
@@ -321,7 +314,7 @@ def test_a_price_in_dollars_is_kept_but_never_passed_off_as_dong() -> None:
     assert price_hint("Rent: 2,000 USD") == ("", None)
 
 
-def test_the_price_in_the_text_beats_the_aggregator_footer() -> None:
+def test_the_price_in_the_text_is_not_overridden_by_the_aggregator_footer() -> None:
     """Бот-агрегатор вынимает цену наивно («200 тысяч» за шлемы вместо «10 млн» за байк)."""
     text = "Цена: 13 млн VND/месяц\n💰 12 000 000 ₫/мес #booking"
 
@@ -329,6 +322,7 @@ def test_the_price_in_the_text_beats_the_aggregator_footer() -> None:
 
     assert fact is not None
     assert fact.amount == 13_000_000
+    assert [item.amount for item in parse_prices(text)] == [13_000_000]
 
 
 def test_a_period_price_is_never_the_price_of_a_sale() -> None:
