@@ -95,6 +95,8 @@ class Store:
         self.rows: dict[int, Row] = {row.id: copy.deepcopy(row) for row in rows}
         # Кто заблокировал бота: Telegram id → когда. Это `users.bot_blocked_at`.
         self.blocked: dict[int, datetime] = {}
+        # Подписки, на которые ссылаются строки: id → (активна ли, когда кончается).
+        self.subscriptions: dict[int, tuple[bool, datetime | None]] = {}
         self.events: list[str] = []
         # Строки, запертые чужой транзакцией: `SKIP LOCKED` проходит мимо них.
         self.locked_elsewhere: set[int] = set()
@@ -205,6 +207,22 @@ class Txn:
         self._step("cancel_for_blocked_users")
         rows = [r for r in self._rows.values() if r.recipient_id in self._blocked]
         return self._cancel(rows, reason)
+
+    async def cancel_expired(
+        self, *, now: datetime, ttl: timedelta, lost_right_ttl: timedelta
+    ) -> int:
+        self._step("cancel_expired")
+
+        def right_lost(row: Row) -> bool:
+            if row.subscription_id is None:
+                return False
+            active, expires = self._store.subscriptions.get(row.subscription_id, (True, None))
+            return not active or (expires is not None and expires <= now)
+
+        rows = list(self._rows.values())
+        lapsed = [r for r in rows if right_lost(r) and r.scheduled_at < now - lost_right_ttl]
+        cancelled = self._cancel(lapsed, "right_lost")
+        return cancelled + self._cancel([r for r in rows if r.scheduled_at < now - ttl], "expired")
 
     def _cancel(self, rows: list[Row], reason: str) -> int:
         pending = [row for row in rows if row.status == "pending"]

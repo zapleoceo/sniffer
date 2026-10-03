@@ -12,6 +12,7 @@ import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from sqlalchemy import select, update
@@ -83,14 +84,14 @@ async def _rows(session: AsyncSession, user_ids: list[int], **overrides: object)
     return [row.id for row in rows]
 
 
-async def _subscriber(session: AsyncSession) -> tuple[int, int]:
-    """Клиент (Telegram id 555) с подпиской на свой паспорт: (users.id, subscriptions.id)."""
-    user = await UserRepository(session).get_or_create(555, username="подписчик")
+async def _subscriber(session: AsyncSession, tg_id: int = 555, **fields: Any) -> tuple[int, int]:
+    """Клиент с подпиской на свой паспорт: (users.id, subscriptions.id)."""
+    user = await UserRepository(session).get_or_create(tg_id, username="подписчик")
     assert user.id is not None
     passport = Passport(intent=Intent.BUY, category=Category.MOTORBIKE, city="nha_trang")
     stored = await PassportRepository(session).save_new(user.id, passport)
     await session.flush()
-    subscription = models.Subscription(user_id=user.id, passport_root=stored.id)
+    subscription = models.Subscription(user_id=user.id, passport_root=stored.id, **fields)
     session.add(subscription)
     await session.flush()
     assert subscription.id is not None
@@ -353,3 +354,72 @@ async def test_a_403_on_a_real_database_blocks_the_client_and_cancels_their_queu
     assert (rows[ids[0]].last_error or "").startswith("forbidden")
     assert user is not None and user.bot_blocked_at == NOW
     assert telegram.recipients == [900, 901], "второе сообщение заблокировавшего не отправлялось"
+
+
+# ── срок годности ───────────────────────────────────────────────────────────
+
+
+async def test_expired_rows_are_cancelled_with_the_reason_each_term_gives(
+    db_session: AsyncSession,
+) -> None:
+    """Сутки для всех, шесть часов — когда у подписки нет права: срок вышел или пауза."""
+    hour = timedelta(hours=1)
+    entitled_user, entitled = await _subscriber(db_session, 601, expires_at=NOW + 5 * hour)
+    lapsed_user, lapsed = await _subscriber(db_session, 602, expires_at=NOW - hour)
+    paused_user, paused = await _subscriber(db_session, 603, is_active=False)
+    plain_user = (await _clients(db_session, 1))[0]
+    plan = {
+        "active_7h": (entitled_user, entitled, 7 * hour, "pending", None),
+        "active_25h": (entitled_user, entitled, 25 * hour, "cancelled", "expired"),
+        "lapsed_7h": (lapsed_user, lapsed, 7 * hour, "cancelled", "right_lost"),
+        "lapsed_5h": (lapsed_user, lapsed, 5 * hour, "pending", None),
+        "paused_7h": (paused_user, paused, 7 * hour, "cancelled", "right_lost"),
+        "plain_7h": (plain_user, None, 7 * hour, "pending", None),
+        "plain_25h": (plain_user, None, 25 * hour, "cancelled", "expired"),
+    }
+    rows = {
+        name: models.Outbox(
+            user_id=user_id,
+            subscription_id=subscription_id,
+            payload=dict(PAYLOAD),
+            scheduled_at=NOW - age,
+        )
+        for name, (user_id, subscription_id, age, _, _) in plan.items()
+    }
+    delivered = models.Outbox(
+        user_id=plain_user, payload=dict(PAYLOAD), scheduled_at=NOW - 30 * hour, status="sent"
+    )
+    db_session.add_all([*rows.values(), delivered])
+    await db_session.commit()
+
+    cancelled = await DeliveryRepository(db_session).cancel_expired(
+        now=NOW, ttl=24 * hour, lost_right_ttl=6 * hour
+    )
+    await db_session.commit()
+
+    assert cancelled == 4
+    for name, row in rows.items():
+        await db_session.refresh(row)
+        _, _, _, status, reason = plan[name]
+        assert (row.status, row.last_error) == (status, reason), name
+    await db_session.refresh(delivered)
+    assert delivered.status == "sent", "ушедшее срок не трогает"
+
+
+async def test_a_subscription_without_an_end_date_keeps_its_right(db_session: AsyncSession) -> None:
+    """`expires_at IS NULL` — бессрочная (так сегодня читает и матчер), а не просроченная."""
+    user_id, subscription_id = await _subscriber(db_session, 604)
+    row = models.Outbox(
+        user_id=user_id,
+        subscription_id=subscription_id,
+        payload=dict(PAYLOAD),
+        scheduled_at=NOW - timedelta(hours=7),
+    )
+    db_session.add(row)
+    await db_session.commit()
+
+    cancelled = await DeliveryRepository(db_session).cancel_expired(
+        now=NOW, ttl=timedelta(hours=24), lost_right_ttl=timedelta(hours=6)
+    )
+
+    assert cancelled == 0

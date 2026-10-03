@@ -38,6 +38,7 @@ GUARDED_STEPS = ("render", "send")
 DATABASE_STEPS = [
     ("take_pending", 0),
     ("cancel_for_blocked_users", 0),
+    ("cancel_expired", 0),
     ("lock_pending", 0),
     ("mark_sent", 0),
     ("commit", 1),

@@ -16,7 +16,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Protocol
 
 from sniffer.db.engine import session_scope
@@ -45,6 +45,10 @@ class Queue(Protocol):
     async def cancel_pending_of(self, user_id: int, *, reason: str) -> int: ...
 
     async def cancel_for_blocked_users(self, *, reason: str) -> int: ...
+
+    async def cancel_expired(
+        self, *, now: datetime, ttl: timedelta, lost_right_ttl: timedelta
+    ) -> int: ...
 
 
 class Users(Protocol):

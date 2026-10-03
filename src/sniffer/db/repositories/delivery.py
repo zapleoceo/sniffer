@@ -10,10 +10,10 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
-from sqlalchemy import Table, func, or_, select, update
+from sqlalchemy import Table, and_, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from sniffer.db import models
@@ -25,6 +25,9 @@ OUTBOX_PENDING = "pending"
 OUTBOX_SENT = "sent"
 OUTBOX_FAILED = "failed"
 OUTBOX_CANCELLED = "cancelled"
+# Почему строка отменена: пишется в `outbox.last_error` и читается человеком.
+REASON_EXPIRED = "expired"
+REASON_RIGHT_LOST = "right_lost"
 
 
 class DeliveryRepository(Repository):
@@ -234,6 +237,41 @@ class DeliveryRepository(Repository):
         """
         blocked = select(models.User.id).where(models.User.bot_blocked_at.is_not(None))
         return await self._cancel(models.Outbox.user_id.in_(blocked), reason=reason)
+
+    async def cancel_expired(
+        self, *, now: datetime, ttl: timedelta, lost_right_ttl: timedelta
+    ) -> int:
+        """Отменить строки, которые слать уже поздно. Возврат — сколько строк отменено.
+
+        Возраст строки — от времени, на которое она назначена (`scheduled_at`), а
+        не от постановки: подборка на вечерние 18:00 созревает вечером, и вчерашней
+        она становится от этого часа, а не от утра, когда её поставили. Повтор после
+        сбоя сдвигает `scheduled_at` вперёд, но попыток конечное число, так что
+        застрявшая строка всё равно упрётся в потолок попыток.
+
+        Две причины, и они различаются в `last_error`. Если у подписки уже нет
+        права на слежение (срок вышел или она на паузе), строка живёт `lost_right_ttl`
+        — найденное, пока право было, ещё можно доставить, но недолго. Остальные —
+        `ttl`: у строки без подписки (отложенный ответ после сбора) права нет по
+        определению, и ждёт она так же, как все.
+        """
+        lost = select(models.Subscription.id).where(
+            or_(
+                models.Subscription.is_active.is_(False),
+                and_(
+                    models.Subscription.expires_at.is_not(None),
+                    models.Subscription.expires_at <= now,
+                ),
+            )
+        )
+        cancelled = await self._cancel(
+            models.Outbox.subscription_id.in_(lost),
+            models.Outbox.scheduled_at < now - lost_right_ttl,
+            reason=REASON_RIGHT_LOST,
+        )
+        return cancelled + await self._cancel(
+            models.Outbox.scheduled_at < now - ttl, reason=REASON_EXPIRED
+        )
 
     async def _cancel(self, *conditions: Any, reason: str) -> int:
         done = await self._session.execute(

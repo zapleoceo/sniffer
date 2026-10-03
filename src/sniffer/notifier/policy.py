@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
 
+from sniffer.config import Settings
 from sniffer.notifier.outcome import DETAIL_LIMIT, Failure, Kind
 
 # Попыток на сообщение. Раньше было три по пятнадцать минут — и «третья означает,
@@ -39,6 +40,12 @@ class Policy:
     backoff_base: timedelta = timedelta(minutes=1)
     backoff_cap: timedelta = BACKOFF_CAP
     system_pause: timedelta = SYSTEM_PAUSE
+    # Срок годности строки очереди, от времени, на которое она назначена. Пока у
+    # подписки есть право на слежение — сутки; когда права нет (срок вышел или
+    # пауза) — шесть часов: найденное, пока право было, ещё можно доставить, но
+    # недолго. Числа повторены в настройках (`outbox_ttl_h`), равенство сторожит тест.
+    ttl: timedelta = timedelta(hours=24)
+    lost_right_ttl: timedelta = timedelta(hours=6)
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +53,14 @@ class Verdict:
     action: Action
     until: datetime | None = None  # RETRY — когда повторить, PAUSE — когда снова слать
     note: str = ""  # что записать в `outbox.last_error`
+
+
+def policy_from(settings: Settings) -> Policy:
+    """Политика с числами из окружения: срок годности меняется конфигом, а не правкой кода."""
+    return Policy(
+        ttl=timedelta(hours=settings.outbox_ttl_h),
+        lost_right_ttl=timedelta(hours=settings.outbox_lost_right_ttl_h),
+    )
 
 
 def backoff(policy: Policy, attempts_made: int) -> timedelta:

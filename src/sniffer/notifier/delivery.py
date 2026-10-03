@@ -88,6 +88,13 @@ class Delivery:
             # Очередь тех, кто заблокировал бота, отменяется до выборки: её
             # наполняют и те, кто о блокировке не знает (матчер, сборщик ответов).
             await work.queue.cancel_for_blocked_users(reason=BLOCKED_NOTE)
+            # Просроченное не доставляется вчерашним: после простоя нотифаера
+            # «мгновенные» двухдневной давности — шум, а не новости.
+            expired = await work.queue.cancel_expired(
+                now=moment, ttl=self._policy.ttl, lost_right_ttl=self._policy.lost_right_ttl
+            )
+            if expired:
+                log.info("notifier.expired", cancelled=expired)
             pending = await work.queue.take_pending(limit=BATCH, now=moment)
             await work.commit()
         sent, called = 0, False
