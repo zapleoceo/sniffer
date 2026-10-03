@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import structlog
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import CallbackQuery, Message
 
-from sniffer.bot import query_menu, threads, wording, wording_plan
+from sniffer.bot import more_cards, paging, query_menu, threads, wording, wording_plan
 from sniffer.bot import voice as voice_input
 from sniffer.bot.catalog_finder import CatalogFinder
 from sniffer.bot.commands import looks_like_command
@@ -20,11 +21,13 @@ from sniffer.bot.conversation import Conversation, Reply, Send
 from sniffer.bot.keyboards import (
     AnswerCallback,
     FeedbackCallback,
+    PageCallback,
     PlanCallback,
     RequestsCallback,
     markup,
     request_actions,
     requests_markup,
+    without_paging,
 )
 from sniffer.bot.quota import QuotaService
 from sniffer.bot.quota_ledger import account_of, new_quota
@@ -271,3 +274,41 @@ async def _show_requests(message: Message, client: Client) -> None:
         # `/new`, это неправда, и отметки нет.
         reply_markup=requests_markup(menu.items, marked=not menu.starting_new),
     )
+
+
+@router.callback_query(PageCallback.filter())
+async def more(callback: CallbackQuery, callback_data: PageCallback) -> None:
+    """«Ещё N» и «Показать все N»: следующая страница снимка выдачи."""
+    message = callback.message
+    if not isinstance(message, Message):
+        await callback.answer()
+        return
+    snapshot = paging.SNAPSHOTS.get(callback_data.token)
+    if snapshot is None or snapshot.owner != callback.from_user.id:
+        # Чужой снимок и просроченный неотличимы для клиента, и объяснять первое не нужно.
+        await callback.answer(paging.EXPIRED, show_alert=True)
+        return
+    client = Client(callback.from_user.id, callback.from_user.username)
+    outcome = await more_cards.show_more(
+        _sender(message),
+        callback_data.token,
+        snapshot,
+        callback_data.action,
+        callback_data.offset,
+        quota=quota(),
+        account=await account_of(client),
+    )
+    if outcome is more_cards.Result.STALE:
+        await callback.answer(paging.ALREADY_SHOWN)
+        return
+    if outcome is more_cards.Result.FAILED:
+        await callback.answer(paging.TRY_AGAIN, show_alert=True)
+        return
+    await callback.answer()
+    # Кнопки продолжения под прежней страницей снимаем: новая страница несёт свои.
+    # Остальные кнопки (обратная связь, подписка) остаются.
+    try:
+        await message.edit_reply_markup(reply_markup=without_paging(message.reply_markup))
+    except TelegramBadRequest as exc:
+        # Разметка уже снята или сообщение не даёт править: карточки показаны, это косметика.
+        log.info("bot.page_markup_kept", error=str(exc))

@@ -198,3 +198,22 @@ def test_engine_bounds_follow_the_direction(
     engine_cc: object, direction: object, bounds: tuple[int | None, int | None]
 ) -> None:
     assert engine_cc_bounds(engine_cc, direction) == bounds
+
+
+async def test_a_selection_cut_at_the_archive_limit_is_reported_as_a_lower_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Архив режет выборку по LIMIT: «нашёл 100» при упоре в потолок — ложь с круглой цифрой."""
+    from sniffer.sources.archive import LIMIT
+
+    async def full(plan: SearchPlan, *, budget_s: float = 90.0) -> list[RawItem]:
+        return [_item("archive", str(n), 1_000_000, age_days=0) for n in range(LIMIT)]
+
+    async def short(plan: SearchPlan, *, budget_s: float = 90.0) -> list[RawItem]:
+        return [_item("archive", "1", 1_000_000, age_days=0)]
+
+    passport = parse_query("honda lead", default_city=CITY)
+    monkeypatch.setattr(catalog_search, "run_plan", full)
+    assert (await find_catalog(passport)).capped is True
+    monkeypatch.setattr(catalog_search, "run_plan", short)
+    assert (await find_catalog(passport)).capped is False

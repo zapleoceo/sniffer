@@ -45,6 +45,7 @@ BLOCKED_NOTE = "bot_blocked"
 # Заголовок писал незнакомый человек и длиной он не ограничен: без потолка одна
 # карточка с заголовком на тысячи знаков занимала бы целое сообщение.
 TITLE_LIMIT = 200
+FACTS_LIMIT = 120
 
 Sender = Callable[[int, str], Awaitable[None]]
 Clock = Callable[[], datetime]
@@ -205,6 +206,11 @@ def render(payload: dict[str, Any]) -> str:
     url = escape(str(payload.get("url") or ""))
     price = _price(payload)
     lines = [f"<b>{title}</b>", price]
+    # Факты (марка, объём, год, пробег) собраны при постановке в очередь той же функцией, что и
+    # карточка в чате (`domain.card_facts`): три поверхности не должны пересказывать их по-своему.
+    facts = str(payload.get("facts") or "").strip()
+    if facts:
+        lines.append(escape(_clip(facts, FACTS_LIMIT)))
     summary = str(payload.get("summary") or "").strip()
     if summary:
         lines.append(escape(summary[:300]))

@@ -15,6 +15,7 @@ from sniffer.db.repositories.collection_tasks import (
     CollectionRecipient,
     CollectionTaskRepository,
 )
+from sniffer.domain.card_facts import facts_line
 from sniffer.domain.plans import FREE_CARDS_PER_PERIOD
 from sniffer.sources.base import RawItem
 
@@ -196,8 +197,10 @@ def _payload(intro: str, items: list[RawItem]) -> dict[str, object]:
 
 
 def _item(item: RawItem) -> dict[str, object]:
+    attributes = item.raw.get("attributes")
     return {
         "title": item.title,
+        "facts": facts_line(attributes if isinstance(attributes, dict) else None, title=item.title),
         "summary": "",
         "url": item.url,
         "price_display": item.price_raw

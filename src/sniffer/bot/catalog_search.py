@@ -26,6 +26,7 @@ from sniffer.search.currency import usd_vnd_rate
 from sniffer.search.live import run_plan
 from sniffer.search.plan import TOP_PRIORITY, SearchPlan, SearchTask, context_params
 from sniffer.search.relevance import rank_items, with_vnd_budget
+from sniffer.sources.archive import LIMIT
 from sniffer.sources.archive import SOURCE_NAME as ARCHIVE
 
 log = structlog.get_logger(__name__)
@@ -44,13 +45,16 @@ async def find_catalog(passport: Passport) -> Found:
     rate = await usd_vnd_rate() if passport.budget.currency is Currency.USD else None
     plan = with_vnd_budget(catalog_plan(passport), passport, rate)
     watch.lap("plan_ms")
-    items = rank_items(passport, await run_plan(plan), usd_vnd=rate)
+    raw = await run_plan(plan)
+    items = rank_items(passport, raw, usd_vnd=rate)
     watch.lap("search_ms")
     log.info("catalog.found", items=len(items))
     return Found(
         items=items,
         sources=tuple(sorted({item.source for item in items})),
         stages=watch.stages,
+        # Архив режет выборку по `LIMIT`: упёрлись в него — настоящее число подходящих больше.
+        capped=len(raw) >= LIMIT,
     )
 
 

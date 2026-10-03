@@ -19,7 +19,9 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from sniffer.bot import wording_plan
 from sniffer.bot.billing_wording import SUBSCRIBE_LABEL
 from sniffer.bot.conversation import Reply
+from sniffer.bot.paging import MoreOffer, all_label, more_label
 from sniffer.bot.threads import labels
+from sniffer.config import get_settings
 from sniffer.domain.records import QueryOverview
 
 # Сколько кнопок в ряд. Три коротких («автомат», «механика», «не важно») в один
@@ -70,6 +72,49 @@ class PlanCallback(CallbackData, prefix="plan"):
     action: str
 
 
+class PageCallback(CallbackData, prefix="pg"):
+    """«Ещё» / «Показать все»: ключ снимка выдачи, действие и с какого места продолжать."""
+
+    token: str
+    action: str
+    offset: int
+
+
+def _page_row(offer: MoreOffer) -> list[InlineKeyboardButton]:
+    """Кнопки продолжения; «все» не рисуем, когда оно то же, что и «Ещё»."""
+    step = get_settings().max_cards
+    row = [
+        InlineKeyboardButton(
+            text=more_label(min(step, offer.rest)),
+            callback_data=PageCallback(
+                token=offer.token, action="more", offset=offer.offset
+            ).pack(),
+        )
+    ]
+    if offer.rest > step:
+        row.append(
+            InlineKeyboardButton(
+                text=all_label(offer.rest),
+                callback_data=PageCallback(
+                    token=offer.token, action="all", offset=offer.offset
+                ).pack(),
+            )
+        )
+    return row
+
+
+def without_paging(keyboard: InlineKeyboardMarkup | None) -> InlineKeyboardMarkup | None:
+    """Та же клавиатура без кнопок продолжения: нажатая страница не должна звать второй раз."""
+    if keyboard is None:
+        return None
+    prefix = f"{PageCallback.__prefix__}{PageCallback.__separator__}"
+    rows = [
+        [button for button in row if not (button.callback_data or "").startswith(prefix)]
+        for row in keyboard.inline_keyboard
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=[row for row in rows if row])
+
+
 def markup(reply: Reply) -> InlineKeyboardMarkup | None:
     """Разметка сообщения. Нет кнопок — нет и клавиатуры."""
     if reply.question is not None:
@@ -84,7 +129,7 @@ def markup(reply: Reply) -> InlineKeyboardMarkup | None:
             )
             for option in reply.question.buttons
         )
-    if reply.feedback or reply.offer_subscription:
+    if reply.feedback or reply.offer_subscription or reply.more:
         buttons = [
             InlineKeyboardButton(
                 text=option.label,
@@ -95,6 +140,9 @@ def markup(reply: Reply) -> InlineKeyboardMarkup | None:
             for option in reply.feedback
         ]
         rows = [buttons[start : start + ROW] for start in range(0, len(buttons), ROW)]
+        if reply.more is not None:
+            # Первой строкой: продолжить выдачу — главное действие под страницей.
+            rows.insert(0, _page_row(reply.more))
         if reply.offer_subscription:
             # Отдельной строкой и во всю ширину: это не ещё один вариант
             # обратной связи, а действие с деньгами. Рядом с «дешевле» и «не то»
@@ -107,13 +155,14 @@ def markup(reply: Reply) -> InlineKeyboardMarkup | None:
                     )
                 ]
             )
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text=SEARCHES_LABEL, callback_data=RequestsCallback(action="list").pack()
-                )
-            ]
-        )
+        if reply.feedback or reply.offer_subscription:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=SEARCHES_LABEL, callback_data=RequestsCallback(action="list").pack()
+                    )
+                ]
+            )
         return InlineKeyboardMarkup(inline_keyboard=rows)
     if reply.offer_plan:
         # Цена на самой кнопке (R2 §3.5): кнопка, ведущая к деньгам без цифры, — тёмный
