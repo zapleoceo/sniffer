@@ -8,9 +8,11 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
-from sniffer.domain.prices import parse_price, price_hint
+from sniffer.domain.prices import parse_price, parse_prices, price_hint
 
 APARTMENT = {"category": "apartment", "deal_type": "rent_out"}
 HOUSE = {"category": "house", "deal_type": "rent_out"}
@@ -334,3 +336,51 @@ def test_a_period_price_is_never_the_price_of_a_sale() -> None:
     text = "Продам дом, соседний сдаётся за 6 млн/месяц"
 
     assert parse_price(text, deal_type="sell") is None
+
+
+POISON_PILLS = {
+    "digits_and_spaces": "1 " * 2000,
+    "grouped_numbers": "1 000 " * 700,
+    "keycap_spam": "1️⃣" * 1300,
+    "one_endless_number": "9" * 4000,
+    "ranges": "10-20-30-40-50-" * 280,
+    "labels_with_numbers": "цена 5 " * 600,
+}
+
+
+@pytest.mark.parametrize("text", POISON_PILLS.values(), ids=POISON_PILLS.keys())
+def test_a_hostile_text_neither_crashes_nor_stalls_the_funnel(text: str) -> None:
+    """Воронка обрабатывает сообщения по одному: одно кривое не смеет её остановить.
+
+    Прогон 4-килобайтных текстов 03.10.2026 нашёл оба дефекта: строка из тысячи
+    чисел считалась по четыре секунды (контекст каждой суммы резал всю строку), а
+    число из четырёх тысяч девяток давало `OverflowError` на `int(inf)`.
+    """
+    started = time.perf_counter()
+
+    parse_prices(text)
+    parse_price(text, **APARTMENT)
+
+    assert time.perf_counter() - started < 1.5
+
+
+def test_the_limits_that_keep_the_funnel_fast_are_part_of_the_contract() -> None:
+    """Предел цены контекста — часть договора, а не случайность реализации.
+
+    Окно слева 200 знаков (метка дальше окна метка не считается), 60 сумм на
+    строку, 6000 знаков на текст: объявление, у которого цена стоит после них, —
+    не объявление, а простыня, и читать её дальше значит платить временем воронки.
+    """
+    far_label = "цена" + " " * 300 + "12 млн"
+    crowded_line = "1 " * 70 + "цена 12 млн"
+    long_text = "x" * 6_100 + "\nЦена: 12 млн"
+
+    near = parse_price("Цена: 12 млн", **APARTMENT)
+    far = parse_price(far_label, **APARTMENT)
+
+    assert near is not None
+    assert near.source == "label"
+    assert far is not None
+    assert far.source == "text"
+    assert parse_price(crowded_line, **APARTMENT) is None
+    assert parse_price(long_text, **APARTMENT) is None

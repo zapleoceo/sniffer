@@ -11,7 +11,8 @@ from __future__ import annotations
 from dataclasses import replace
 
 from sniffer.domain.price_bounds import price_bounds
-from sniffer.domain.price_facts import MAX_PLAUSIBLE_VND, PriceFact, parse_prices
+from sniffer.domain.price_facts import PriceFact, parse_prices
+from sniffer.domain.price_numbers import MAX_PLAUSIBLE_VND
 from sniffer.domain.price_vocab import TO_MONTH
 
 __all__ = [
