@@ -74,10 +74,10 @@ class Settings(BaseSettings):
     # Имена сверены с каталогом брокера (providers/specs.py, 04.10.2026).
     # Пустая строка в .env = не закреплять: идёт цепочка брокера по capability.
     broker_model_intake: str = "gemini/gemini-3.5-flash-lite"
-    broker_model_planner: str = "gemini/gemini-3.5-flash-lite"
+    broker_model_planner: str = ""
     broker_model_offer_screen: str = "gemini/gemini-3.5-flash-lite"
-    broker_model_extraction: str = "gemini/gemini-3.5-flash-lite"
-    broker_model_guard: str = "gemini/gemini-3.6-flash"
+    broker_model_extraction: str = ""
+    broker_model_guard: str = ""
 
     # Cloudflare R2 — пусто означает «медиа не сохраняем»
     r2_account_id: str = ""

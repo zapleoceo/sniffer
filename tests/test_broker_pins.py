@@ -28,6 +28,8 @@ SCHEMA = {
     "additionalProperties": False,
 }
 LITE = "gemini/gemini-3.5-flash-lite"
+# Умолчание guard пустое; роль в тестах включается явно, как её включит оператор.
+GUARD_PIN = "gemini/gemini-3.6-flash"
 
 
 def settings(**over: Any) -> Settings:
@@ -109,16 +111,16 @@ async def ask(client: BrokerClient, schema_name: str) -> dict[str, Any]:
 
 async def test_each_role_sends_its_own_pin(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeBroker()
-    client, _ = make(fake, settings(), monkeypatch)
+    client, _ = make(fake, settings(broker_model_guard=GUARD_PIN), monkeypatch)
     for schema_name in ROLE_BY_SCHEMA:
         await ask(client, schema_name)
-    sent = {s["response_format"]["json_schema"]["name"]: s["model"] for s in fake.submitted}
+    sent = {s["response_format"]["json_schema"]["name"]: s.get("model") for s in fake.submitted}
     assert sent == {
         "query_passport": LITE,
-        "search_plan": LITE,
+        "search_plan": None,
         "offer_screen": LITE,
-        "catalog_facts": LITE,
-        "listing_guard": "gemini/gemini-3.6-flash",
+        "catalog_facts": None,
+        "listing_guard": GUARD_PIN,
     }
 
 
@@ -133,7 +135,7 @@ async def test_unknown_schema_and_plain_chat_are_not_pinned(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake = FakeBroker()
-    client, _ = make(fake, settings(), monkeypatch)
+    client, _ = make(fake, settings(broker_model_guard=GUARD_PIN), monkeypatch)
     await ask(client, "something_else")
     await client.chat([{"role": "user", "content": "hi"}], capability="chat:sales")
     assert all("model" not in s for s in fake.submitted)
@@ -141,7 +143,7 @@ async def test_unknown_schema_and_plain_chat_are_not_pinned(
 
 async def test_chat_accepts_explicit_model(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeBroker()
-    client, _ = make(fake, settings(), monkeypatch)
+    client, _ = make(fake, settings(broker_model_guard=GUARD_PIN), monkeypatch)
     await client.chat([{"role": "user", "content": "hi"}], model="gpt-oss-120b")
     assert fake.submitted[0]["model"] == "gpt-oss-120b"
 
@@ -150,12 +152,12 @@ async def test_job_error_on_pinned_model_retries_once_without_pin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake = FakeBroker(pinned_error="no provider available")
-    client, accounted = make(fake, settings(), monkeypatch)
+    client, accounted = make(fake, settings(broker_model_guard=GUARD_PIN), monkeypatch)
     with structlog.testing.capture_logs() as logs:
         assert await ask(client, "listing_guard") == {"a": "x"}
     assert ["model" in s for s in fake.submitted] == [True, False]
     failed = [e for e in logs if e["event"] == "broker.pinned_model_failed"]
-    assert len(failed) == 1 and failed[0]["model"] == "gemini/gemini-3.6-flash"
+    assert len(failed) == 1 and failed[0]["model"] == GUARD_PIN
     # Учёт хранит ту модель, что ответила на самом деле, и ровно один раз.
     assert [r.model for r in accounted] == ["deepseek-flash"]
 
@@ -164,14 +166,14 @@ async def test_submit_400_on_unknown_pin_also_falls_back(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake = FakeBroker(submit_status=400)
-    client, _ = make(fake, settings(), monkeypatch)
+    client, _ = make(fake, settings(broker_model_guard=GUARD_PIN), monkeypatch)
     assert await ask(client, "query_passport") == {"a": "x"}
     assert ["model" in s for s in fake.submitted] == [True, False]
 
 
 async def test_cap_error_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeBroker(pinned_error="daily budget cap reached")
-    client, accounted = make(fake, settings(), monkeypatch)
+    client, accounted = make(fake, settings(broker_model_guard=GUARD_PIN), monkeypatch)
     with pytest.raises(BrokerError):
         await ask(client, "listing_guard")
     assert len(fake.submitted) == 1 and accounted == []
@@ -185,7 +187,9 @@ async def test_failure_of_the_unpinned_retry_is_raised(
             return httpx.Response(202, json={"job_id": 1})
         return httpx.Response(200, json={"status": "error", "error": "boom"})
 
-    monkeypatch.setattr("sniffer.broker.client.get_settings", lambda: settings())
+    monkeypatch.setattr(
+        "sniffer.broker.client.get_settings", lambda: settings(broker_model_guard=GUARD_PIN)
+    )
     client = BrokerClient(httpx.AsyncClient(transport=httpx.MockTransport(handle)))
     with pytest.raises(BrokerError, match="boom"):
         await ask(client, "listing_guard")
@@ -204,12 +208,12 @@ async def test_invalid_pinned_answer_retries_once_without_pin(
     monkeypatch: pytest.MonkeyPatch, text: str, extra: dict[str, Any], reason: str
 ) -> None:
     fake = FakeBroker(pinned_text=text, pinned_extra=extra)
-    client, accounted = make(fake, settings(), monkeypatch)
+    client, accounted = make(fake, settings(broker_model_guard=GUARD_PIN), monkeypatch)
     with structlog.testing.capture_logs() as logs:
         assert await ask(client, "listing_guard") == {"a": "x"}
     assert ["model" in s for s in fake.submitted] == [True, False]
     invalid = [e for e in logs if e["event"] == "broker.pinned_model_invalid"]
-    assert len(invalid) == 1 and invalid[0]["model"] == "gemini/gemini-3.6-flash"
+    assert len(invalid) == 1 and invalid[0]["model"] == GUARD_PIN
     assert invalid[0]["served_model"] == "gemini-3.5-flash-lite"
     assert invalid[0]["reason"] == reason
     assert "not json" not in str(invalid[0])
@@ -221,7 +225,7 @@ async def test_invalid_answer_of_the_retry_is_raised_and_not_retried_again(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake = FakeBroker(pinned_text="junk", unpinned_text="junk")
-    client, accounted = make(fake, settings(), monkeypatch)
+    client, accounted = make(fake, settings(broker_model_guard=GUARD_PIN), monkeypatch)
     with pytest.raises(BrokerOutputError):
         await ask(client, "listing_guard")
     assert len(fake.submitted) == 2 and len(accounted) == 2
@@ -229,7 +233,7 @@ async def test_invalid_answer_of_the_retry_is_raised_and_not_retried_again(
 
 async def test_cap_on_the_retry_is_raised_as_cap(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeBroker(pinned_text="junk", unpinned_error="daily budget cap reached")
-    client, accounted = make(fake, settings(), monkeypatch)
+    client, accounted = make(fake, settings(broker_model_guard=GUARD_PIN), monkeypatch)
     with pytest.raises(BrokerCapError):
         await ask(client, "listing_guard")
     assert len(fake.submitted) == 2 and len(accounted) == 1
@@ -237,7 +241,7 @@ async def test_cap_on_the_retry_is_raised_as_cap(monkeypatch: pytest.MonkeyPatch
 
 async def test_valid_pinned_answer_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeBroker()
-    client, accounted = make(fake, settings(), monkeypatch)
+    client, accounted = make(fake, settings(broker_model_guard=GUARD_PIN), monkeypatch)
     with structlog.testing.capture_logs() as logs:
         await ask(client, "listing_guard")
     assert len(fake.submitted) == 1 and len(accounted) == 1
@@ -253,10 +257,20 @@ async def test_invalid_answer_without_pin_is_not_retried(monkeypatch: pytest.Mon
 
 
 def test_pinned_model_resolution() -> None:
-    assert pinned_model(settings(), "listing_guard") == "gemini/gemini-3.6-flash"
+    assert pinned_model(settings(broker_model_guard=GUARD_PIN), "listing_guard") == GUARD_PIN
     assert pinned_model(settings(broker_model_intake="  "), "query_passport") is None
     assert pinned_model(settings(broker_model_intake=" x/y "), "query_passport") == "x/y"
     assert pinned_model(settings(), "nope") is None
+
+
+def test_only_intake_and_offer_screen_are_pinned_by_default() -> None:
+    # A/B 04.10.2026: 3.6-flash на extraction и guard — валидный ответ в 4 из 17.
+    cfg = settings()
+    assert cfg.broker_model_planner == ""
+    assert cfg.broker_model_extraction == ""
+    assert cfg.broker_model_guard == ""
+    assert cfg.broker_model_intake == LITE
+    assert cfg.broker_model_offer_screen == LITE
 
 
 def test_role_table_matches_schema_names_used_in_code() -> None:
@@ -276,7 +290,7 @@ async def test_a_pinned_failure_then_an_invalid_retry_is_two_sends_not_three(
 ) -> None:
     """Платный повтор один на всю цепочку: `chat` уже повторил, `structured` не повторяет."""
     fake = FakeBroker(pinned_error="no provider available", unpinned_text="not json at all")
-    client, _ = make(fake, settings(), monkeypatch)
+    client, _ = make(fake, settings(broker_model_guard=GUARD_PIN), monkeypatch)
     with pytest.raises(BrokerOutputError):
         await ask(client, "listing_guard")
     assert ["model" in s for s in fake.submitted] == [True, False]
@@ -286,7 +300,7 @@ async def test_an_invalid_pinned_answer_still_gets_exactly_one_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake = FakeBroker(pinned_text="not json at all", unpinned_text="still not json")
-    client, _ = make(fake, settings(), monkeypatch)
+    client, _ = make(fake, settings(broker_model_guard=GUARD_PIN), monkeypatch)
     with pytest.raises(BrokerOutputError):
         await ask(client, "listing_guard")
     assert ["model" in s for s in fake.submitted] == [True, False]
