@@ -1222,18 +1222,20 @@ async def test_matcher_advances_past_a_rejected_page(
         update(models.Subscription).where(models.Subscription.id == sub_id).values(max_per_day=100)
     )
     raw_ids = await RawMessageRepository(db_session).add_many([_raw(1), _raw(2)])
-    for raw_id, brand in zip(raw_ids, ("yamaha", "honda"), strict=True):
+    # Первая карточка проходит отбор в базе (марка та же), но старше суток: слежение её
+    # не пошлёт (`worth_sending`), и страница из одной такой карточки не должна закрыть вторую.
+    for raw_id, posted in zip(raw_ids, (NOW - timedelta(days=3), NOW), strict=True):
         await ListingRepository(db_session).add(
             Listing(
                 raw_message_id=raw_id,
                 deal_type="sell",
                 category="motorbike",
                 city="nha_trang",
-                title=f"{brand} bike",
+                title="honda bike",
                 summary="fresh",
                 tg_link=f"https://t.me/c/1/{raw_id}",
-                attributes={"brand": brand},
-                posted_at=NOW,
+                attributes={"brand": "honda"},
+                posted_at=posted,
             )
         )
     await _screen_all(db_session)
@@ -1423,6 +1425,7 @@ async def test_a_subscription_only_gets_listings_newer_than_itself(
         db_session, user.id, stored.id, until=NOW + timedelta(days=30), since_listing_id=seen.id
     )
     fresh = await listings.add(_card(new_raw, "Появилось после подписки"))
+    await _screen_all(db_session)
     await db_session.commit()
     assert fresh.id is not None
 
