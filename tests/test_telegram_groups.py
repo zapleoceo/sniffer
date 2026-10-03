@@ -233,9 +233,26 @@ async def test_fields_absent_in_telegram_stay_empty() -> None:
     items = await adapter(FakeTelegram(replies=fixture_replies())).search("байк", {})
     assert [item.seller_name for item in items] == [""] * 5
     assert [item.title for item in items] == [""] * 5
-    assert [item.price_raw for item in items] == [""] * 5
-    assert all(item.price_vnd is None for item in items)
     assert all(item.images == [] for item in items)
+
+
+async def test_the_price_is_read_from_the_text_the_group_gives() -> None:
+    """Отдельного поля цены у поста нет, она живёт в тексте — и читается оттуда.
+
+    Раньше цена бралась только после слова «цена», и все пять находок выдачи
+    приходили без цены при тексте «13 млн донгов». Шлем за 1,8 млн — цена шлема:
+    предмет объявления решает не извлечение цены, а отбор по запросу.
+    """
+    items = await adapter(FakeTelegram(replies=fixture_replies())).search("байк", {})
+
+    assert [item.price_vnd for item in items] == [
+        13_000_000,
+        9_500_000,
+        24_000_000,
+        1_200_000,
+        1_800_000,
+    ]
+    assert [item.price_raw for item in items][:3] == ["13 млн донгов", "9.5 млн", "24 млн."]
 
 
 async def test_empty_result_is_not_a_breakdown() -> None:

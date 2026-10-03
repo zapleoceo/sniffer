@@ -8,12 +8,11 @@ LLM не является обязательным для появления к�
 
 from __future__ import annotations
 
-from decimal import Decimal
-
 from sniffer.domain.passport import Category, Intent, default_deal_type
-from sniffer.domain.prices import price_hint
+from sniffer.domain.prices import parse_price
 from sniffer.domain.records import Chat, Listing, RawMessage
 from sniffer.pipeline.gate import CategoryDetector, GateResult, gate
+from sniffer.pipeline.listing_price import price_columns
 
 STAGE_GATED = "gated"
 STAGE_EXTRACTED = "extracted"
@@ -79,29 +78,25 @@ def listing_from(
         raise ValueError("raw message without database id")
     if not result.passed or not result.categories:
         raise ValueError("cannot build listing from rejected message")
-    price_raw, price_vnd = price_hint(raw.text)
+    category = result.categories[0].value
+    prices = price_columns(parse_price(raw.text, category=category, deal_type=deal_type), deal_type)
     return Listing(
         raw_message_id=raw.id,
         source="telegram_archive",
         external_id=f"{raw.chat_tg_id}:{raw.msg_id}",
         deal_type=deal_type,
-        category=result.categories[0].value,
+        category=category,
         city=city or chat.city,
         title=_title(raw.text),
         summary=_summary(raw.text),
         tg_link=_link(chat.tg_id, chat.username, raw.msg_id),
         posted_at=raw.posted_at,
         seller_id=raw.seller_id,
-        price_amount=Decimal(price_vnd) if price_vnd is not None else None,
-        price_currency="VND" if price_vnd is not None else None,
-        # Период цены следует за стороной сделки: сдают помесячно, продают
-        # разово. Раньше «13 млн» у сдаваемой квартиры значились разовой
-        # ценой, и помесячный бюджет арендатора сравнивать было не с чем.
-        price_period=(
-            ("month" if deal_type == "rent_out" else "once") if price_vnd is not None else None
-        ),
-        attributes=dict(attributes or {}),
-        confidence=0.55 if price_raw else 0.4,
+        price_amount=prices.amount,
+        price_currency=prices.currency,
+        price_period=prices.period,
+        attributes={**(attributes or {}), **prices.attributes},
+        confidence=0.55 if prices.amount is not None or prices.attributes else 0.4,
         lang=None,
     )
 
