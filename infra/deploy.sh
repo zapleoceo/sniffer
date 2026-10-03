@@ -167,11 +167,18 @@ SENTINELS
 }
 
 check_schema_sentinels() {
-  local table column
+  local table column checked=0
   while read -r table column _; do
     [ -n "$table" ] || continue
     require_column "$table" "$column"
+    checked=$((checked + 1))
   done < <(schema_sentinels | sed 's/#.*//')
+  # Пустая таблица (стёрли строки, сломали heredoc) не должна быть зелёной: цикл
+  # без единого прохода не проверил ничего, а выглядит как «всё на месте».
+  if [ "$checked" -eq 0 ]; then
+    echo "   таблица часовых пуста — деплой ничего не проверил" >&2
+    FAIL=1
+  fi
 }
 
 # Расписание резервной копии БД. Копию делает infra/backup/sniffer-pg-backup.sh, а в

@@ -170,6 +170,18 @@ def test_a_docker_that_does_not_answer_turns_every_row_red() -> None:
 
 
 @needs_bash
+def test_an_empty_table_is_not_a_green_deploy() -> None:
+    """Цикл без единого прохода ничего не проверил, а выглядит как «всё на месте»."""
+    body = "schema_sentinels() { echo '# только комментарий'; }; check_schema_sentinels"
+
+    out = _run(body, _docker(None, "", "1"))
+
+    assert "FAIL=1" in out
+    assert "таблица часовых пуста" in out
+    assert "на месте" not in out
+
+
+@needs_bash
 def test_comments_and_blank_lines_in_the_table_are_not_probed() -> None:
     """Хвостовой комментарий однословной строки не должен стать её колонкой."""
     table = "\n".join(
