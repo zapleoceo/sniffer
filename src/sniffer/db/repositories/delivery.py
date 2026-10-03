@@ -12,11 +12,11 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from sqlalchemy import Table, func, or_, select, update
+from sqlalchemy import ColumnElement, Table, and_, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from sniffer.db import models
-from sniffer.db.mappers import to_stored_passport
+from sniffer.db.mappers import to_subscription_state
 from sniffer.db.repositories.base import Repository
 from sniffer.domain.records import OutboxMessage, Payment, SubscriptionState
 
@@ -25,39 +25,30 @@ OUTBOX_SENT = "sent"
 OUTBOX_FAILED = "failed"
 
 
+def entitled(now: datetime) -> ColumnElement[bool]:
+    """Подписка вправе получать карточки в момент `now`: включена и оплачена по этот момент.
+
+    ОДИН предикат права на всё, что делает монитор: выбор подписок на проход
+    (`MonitorRepository.claim_due`) и постановка в очередь (`enqueue`) спрашивают его, а не
+    свои копии условия. Условие с копиями разъезжается тихо: выбор отсёк просроченную, а
+    постановка, не знавшая про срок, всё равно поставила бы карточку.
+
+    Срок проверяется прямо в запросе, а не отдельным сторожем, который «должен» вовремя
+    выключить подписку: пропущенный проход сторожа означал бы бесплатную рассылку, а
+    пропущенное условие в запросе — ничего не означает, его просто нет.
+
+    `expires_at IS NULL` читается как «бессрочно»: так заведены подписки без платежа
+    (владелец, ручная выдача). Платёж срок ставит всегда. Заменит этот предикат право,
+    считаемое от числа живых подписок Stars (пакет биллинга), — менять его надо здесь,
+    в одном месте.
+    """
+    return and_(
+        models.Subscription.is_active.is_(True),
+        or_(models.Subscription.expires_at.is_(None), models.Subscription.expires_at > now),
+    )
+
+
 class DeliveryRepository(Repository):
-    async def active_subscriptions(
-        self, *, limit: int = 200, now: datetime | None = None
-    ) -> list[SubscriptionState]:
-        """Живые подписки вместе с ТЕКУЩЕЙ версией паспорта.
-
-        Подписка хранит корень цепочки, а не версию: клиент правит запрос, и
-        подписка обязана следовать за правкой, а не застывать на той версии,
-        при которой её создали. Отсюда join по `COALESCE(root_id, id)`.
-        """
-        chain = func.coalesce(models.Passport.root_id, models.Passport.id)
-        rows = await self._session.execute(
-            select(models.Subscription, models.Passport)
-            .join(models.Passport, chain == models.Subscription.passport_root)
-            .where(
-                models.Subscription.is_active.is_(True),
-                models.Passport.is_current.is_(True),
-                # Оплачена по сегодня. Проверка здесь, а не отдельным сторожем,
-                # который «должен» вовремя выключить подписку: пропущенный
-                # проход такого сторожа означал бы бесплатную рассылку, а
-                # пропущенное условие в запросе — ничего не означает, его
-                # просто нет.
-                or_(
-                    models.Subscription.expires_at.is_(None),
-                    models.Subscription.expires_at > (now or datetime.now(UTC)),
-                ),
-            )
-            .order_by(models.Subscription.id)
-            .with_for_update(of=models.Subscription, skip_locked=True)
-            .limit(limit)
-        )
-        return [_subscription(row, passport) for row, passport in rows]
-
     async def advance_scan(self, subscription_id: int, listing_id: int) -> None:
         """Монотонно запомнить последнюю рассмотренную карточку."""
         await self._session.execute(
@@ -306,7 +297,7 @@ class DeliveryRepository(Repository):
             .limit(1)
         )
         row = found.first()
-        return _subscription(row[0], row[1]) if row is not None else None
+        return to_subscription_state(row[0], row[1]) if row is not None else None
 
     async def set_active(
         self, *, user_id: int, passport_root: int, active: bool, now: datetime | None = None
@@ -323,22 +314,6 @@ class DeliveryRepository(Repository):
             .returning(models.Subscription.id)
         )
         return changed.scalar_one_or_none() is not None
-
-
-def _subscription(row: models.Subscription, passport: models.Passport) -> SubscriptionState:
-    return SubscriptionState(
-        id=row.id,
-        user_id=row.user_id,
-        passport_root=row.passport_root,
-        mode=row.mode,
-        max_per_day=row.max_per_day,
-        quiet_from=row.quiet_from,
-        quiet_to=row.quiet_to,
-        since_listing_id=row.since_listing_id,
-        scan_listing_id=row.scan_listing_id,
-        expires_at=row.expires_at,
-        passport=to_stored_passport(passport),
-    )
 
 
 def _outbox(row: models.Outbox, recipient_id: int) -> OutboxMessage:

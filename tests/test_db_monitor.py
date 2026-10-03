@@ -12,6 +12,7 @@ Postgres — `FOR UPDATE SKIP LOCKED`, SAVEPOINT, `ON CONFLICT`, `RETURNING`, п
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -19,8 +20,8 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import func, select, update
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from sniffer.db import models
 from sniffer.db.repositories import (
@@ -30,8 +31,10 @@ from sniffer.db.repositories import (
     UserRepository,
 )
 from sniffer.db.repositories.delivery import DeliveryRepository
+from sniffer.db.repositories.monitors import MonitorRepository
 from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
 from sniffer.domain.records import Listing, RawMessage
+from sniffer.worker.quarantine import quarantine_delay
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("TEST_DATABASE_URL"),
@@ -246,3 +249,214 @@ async def test_a_dollar_slot_without_a_rate_keeps_its_cursor_and_catches_up_late
     assert cursor == 0, "курсор не двигался: карточка не просмотрена"
 
     assert await module.Matcher(rate=up).tick(now=now + timedelta(minutes=2)) == 1
+
+
+# ── обход по кругу (D4) ─────────────────────────────────────────────────────
+
+
+async def _scanned(session: AsyncSession) -> set[int]:
+    rows = await session.scalars(
+        select(models.Subscription.id).where(models.Subscription.last_scanned_at.is_not(None))
+    )
+    return set(rows)
+
+
+async def test_every_subscription_gets_a_turn_when_there_are_more_than_one_batch(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Порция в две подписки на пять: за три прохода каждая побывала в обходе.
+
+    Прежний `ORDER BY id LIMIT 50` отдавал каждый проход одни и те же первые строки.
+    """
+    from sniffer.worker import matcher as module
+
+    now = _now()
+    ids = {(await _slot(db_session, 9100 + number, expires_at=None))[1] for number in range(5)}
+    await db_session.commit()
+    monkeypatch.setattr(module, "session_scope", lambda: _borrowed(db_session))
+    matcher = module.Matcher(batch=2)
+
+    seen = []
+    for step in range(3):
+        await matcher.tick(now=now + timedelta(seconds=step))
+        seen.append(await _scanned(db_session))
+
+    assert [len(turn) for turn in seen] == [2, 4, 5], "каждый проход берёт ещё не смотренных"
+    assert seen[-1] == ids
+
+
+async def test_more_than_fifty_subscriptions_are_all_served(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """51-я и дальше подписки не прятались бы вечно: порция по умолчанию — 50 (D4)."""
+    from sniffer.worker import matcher as module
+
+    now = _now()
+    ids = {(await _slot(db_session, 9400 + number, expires_at=None))[1] for number in range(60)}
+    await db_session.commit()
+    monkeypatch.setattr(module, "session_scope", lambda: _borrowed(db_session))
+    matcher = module.Matcher()
+
+    await matcher.tick(now=now)
+    assert len(await _scanned(db_session)) == 50
+    await matcher.tick(now=now + timedelta(seconds=5))
+
+    assert await _scanned(db_session) == ids
+
+
+async def test_the_claim_serves_the_least_recently_scanned_first(db_session: AsyncSession) -> None:
+    now = _now()
+    _a, long_ago = await _slot(db_session, 9500, expires_at=None)
+    _b, never = await _slot(db_session, 9501, expires_at=None)
+    _c, recently = await _slot(db_session, 9502, expires_at=None)
+    scans = {long_ago: now - timedelta(hours=2), recently: now - timedelta(hours=1)}
+    for sub_id, scanned in scans.items():
+        await db_session.execute(
+            update(models.Subscription)
+            .where(models.Subscription.id == sub_id)
+            .values(last_scanned_at=scanned)
+        )
+    await db_session.commit()
+
+    due = await MonitorRepository(db_session).claim_due(limit=10, now=now)
+
+    assert [state.id for state in due.ready] == [never, long_ago, recently]
+
+
+async def test_a_slot_held_by_another_pass_is_skipped_not_waited_for(
+    db_engine: AsyncEngine,
+) -> None:
+    """Две копии воркера не берут одну подписку и не ждут друг друга (`SKIP LOCKED`)."""
+    sessions = async_sessionmaker(db_engine, expire_on_commit=False)
+    now = _now()
+    async with sessions() as setup:
+        _u1, first = await _slot(setup, 9301, expires_at=None)
+        _u2, second = await _slot(setup, 9302, expires_at=None)
+        await setup.commit()
+
+    async with sessions() as holder, sessions() as other:
+        held = await MonitorRepository(holder).claim_due(limit=1, now=now)
+        assert [state.id for state in held.ready] == [first]
+
+        free = await asyncio.wait_for(
+            MonitorRepository(other).claim_due(limit=10, now=now), timeout=10
+        )
+
+        assert [state.id for state in free.ready] == [second], "занятая строка пропущена"
+        await holder.rollback()
+        await other.rollback()
+
+
+# ── больная подписка и карантин (D5) ────────────────────────────────────────
+
+
+async def _poison(session: AsyncSession, sub_id: int, category: str = "spaceship") -> None:
+    """Незнакомое значение в паспорте — то, что остаётся в базе после отката кода."""
+    root = await session.scalar(
+        select(models.Subscription.passport_root).where(models.Subscription.id == sub_id)
+    )
+    await session.execute(
+        update(models.Passport).where(models.Passport.id == root).values(category=category)
+    )
+
+
+async def _failures(session: AsyncSession, sub_id: int) -> tuple[int, str | None, datetime | None]:
+    row = (
+        await session.execute(
+            select(
+                models.Subscription.failed_streak,
+                models.Subscription.last_error,
+                models.Subscription.quarantined_until,
+            ).where(models.Subscription.id == sub_id)
+        )
+    ).one()
+    return row.failed_streak, row.last_error, row.quarantined_until
+
+
+async def test_a_poisoned_passport_quarantines_only_its_own_slot(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Прежде такая строка валила разбор всей пачки и воркер вместе с ней (D5)."""
+    from sniffer.worker import matcher as module
+
+    now = _now()
+    _h, healthy = await _slot(db_session, 9201, expires_at=None)
+    _s, sick = await _slot(db_session, 9202, expires_at=None)
+    await _poison(db_session, sick)
+    await _card(db_session, 20, posted_at=now - timedelta(hours=1))
+    await db_session.commit()
+    monkeypatch.setattr(module, "session_scope", lambda: _borrowed(db_session))
+
+    assert await module.Matcher().tick(now=now) == 1, "здоровая получила карточку, проход жив"
+
+    streak, error, until = await _failures(db_session, sick)
+    assert streak == 1 and until == now + quarantine_delay(1)
+    assert error is not None and "spaceship" in error
+    assert await _failures(db_session, healthy) == (0, None, None)
+
+
+async def test_a_quarantined_slot_comes_back_by_itself_when_its_time_has_come(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sniffer.worker import matcher as module
+
+    start = _now()
+    _s, sick = await _slot(db_session, 9210, expires_at=None)
+    await _poison(db_session, sick)
+    await db_session.commit()
+    monkeypatch.setattr(module, "session_scope", lambda: _borrowed(db_session))
+
+    await module.Matcher().tick(now=start)
+    assert (await _failures(db_session, sick))[0] == 1
+
+    await module.Matcher().tick(now=start + timedelta(minutes=4))
+    assert (await _failures(db_session, sick))[0] == 1, "пауза не вышла: подписку не трогали"
+
+    second = start + quarantine_delay(1)
+    await module.Matcher().tick(now=second)
+    streak, _error, until = await _failures(db_session, sick)
+    assert streak == 2, "ровно в срок подписка снова в обходе, и снова падает"
+    assert until == second + quarantine_delay(2)
+
+    await _poison(db_session, sick, category="motorbike")
+    await db_session.commit()
+    await module.Matcher().tick(now=until)
+    assert await _failures(db_session, sick) == (0, None, None), "починили — карантин снят"
+
+
+async def test_a_failure_after_the_enqueue_rolls_back_only_that_slots_rows(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SAVEPOINT откатывает уже поставленную карточку больной подписки, но не соседней."""
+    from sniffer.worker import matcher as module
+
+    now = _now()
+    _h, healthy = await _slot(db_session, 9220, expires_at=None)
+    _s, sick = await _slot(db_session, 9221, expires_at=None)
+    await _card(db_session, 21, posted_at=now - timedelta(hours=1))
+    await db_session.commit()
+    monkeypatch.setattr(module, "session_scope", lambda: _borrowed(db_session))
+    real = DeliveryRepository.advance_scan
+
+    async def flaky(self: DeliveryRepository, subscription_id: int, listing_id: int) -> None:
+        if subscription_id == sick:
+            raise RuntimeError("упали уже после постановки в очередь")
+        await real(self, subscription_id, listing_id)
+
+    monkeypatch.setattr(DeliveryRepository, "advance_scan", flaky)
+
+    assert await module.Matcher().tick(now=now) == 1
+
+    async def queued_for(sub_id: int) -> tuple[int, int]:
+        notes = await db_session.scalar(
+            select(func.count()).where(models.Notification.subscription_id == sub_id)
+        )
+        mail = await db_session.scalar(
+            select(func.count()).where(models.Outbox.subscription_id == sub_id)
+        )
+        return int(notes or 0), int(mail or 0)
+
+    assert await queued_for(healthy) == (1, 1)
+    assert await queued_for(sick) == (0, 0), "записи больной подписки откатились целиком"
+    streak, error, _until = await _failures(db_session, sick)
+    assert streak == 1 and error is not None and "RuntimeError" in error

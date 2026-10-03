@@ -46,6 +46,9 @@ listings → matcher → notifications + outbox → notifier → Telegram Bot AP
 - live-карточка вставляется через `ON CONFLICT (source, external_id) DO NOTHING`;
 - подписки блокируются `FOR UPDATE SKIP LOCKED`, поэтому два matcher не могут
   одновременно занять один дневной лимит;
+- каждая подписка обслуживается в своём SAVEPOINT: сбой откатывает только её
+  записи, а сама она уходит в карантин (`failed_streak`, `quarantined_until`) —
+  architecture.md, 7.1;
 - `notifications(subscription_id, listing_id)` остаётся дедупом;
 - outbox берётся notifier через `FOR UPDATE SKIP LOCKED`.
 

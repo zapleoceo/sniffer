@@ -44,6 +44,12 @@ class Subscription(BigIdMixin, Base):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Ключ платежа Telegram: он же ключ отмены через `editUserStarSubscription`.
     charge_id: Mapped[str | None] = mapped_column(Text)
+    # Состояние монитора. `last_scanned_at` — ключ ротации обхода («кого не смотрели
+    # дольше всех»); остальное — карантин сбойной подписки (docs/architecture.md 7.1).
+    last_scanned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failed_streak: Mapped[int] = mapped_column(Integer, nullable=False, server_default=ZERO)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    quarantined_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     day_bucket: Mapped[date | None] = mapped_column(Date)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=NOW

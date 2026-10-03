@@ -13,9 +13,18 @@ from decimal import Decimal
 import pytest
 from structlog.testing import capture_logs
 
+from sniffer.db.repositories.monitors import BrokenSubscription
 from sniffer.worker import __main__ as worker_main
 from sniffer.worker.matcher import Matcher
-from tests.monitor_support import NOW, install, listing, subscription, usd_subscription
+from sniffer.worker.quarantine import QUARANTINE_FIRST, QUARANTINE_MAX, quarantine_delay
+from tests.monitor_support import (
+    NOW,
+    install,
+    listing,
+    subscription,
+    subscription_in,
+    usd_subscription,
+)
 
 LATER = NOW + timedelta(days=3)
 
@@ -34,7 +43,7 @@ async def test_the_pass_hands_one_moment_to_every_query(monkeypatch: pytest.Monk
 
     assert await Matcher().tick(now=LATER) == 1
 
-    assert [claim["now"] for claim in world.delivery.claims] == [LATER]
+    assert [claim["now"] for claim in world.monitors.claims] == [LATER]
     assert [item["now"] for item in world.delivery.queued] == [LATER]
 
 
@@ -46,7 +55,7 @@ async def test_without_an_argument_the_pass_asks_its_injected_clock(
 
     assert await Matcher(clock=lambda: LATER).tick() == 1
 
-    assert [claim["now"] for claim in world.delivery.claims] == [LATER]
+    assert [claim["now"] for claim in world.monitors.claims] == [LATER]
     assert [item["now"] for item in world.delivery.queued] == [LATER]
 
 
@@ -55,7 +64,7 @@ async def test_an_explicit_moment_beats_the_clock(monkeypatch: pytest.MonkeyPatc
 
     await Matcher(clock=lambda: LATER).tick(now=NOW)
 
-    assert [claim["now"] for claim in world.delivery.claims] == [NOW]
+    assert [claim["now"] for claim in world.monitors.claims] == [NOW]
 
 
 async def test_the_default_clock_is_the_real_utc_time(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -65,7 +74,7 @@ async def test_the_default_clock_is_the_real_utc_time(monkeypatch: pytest.Monkey
 
     await Matcher().tick()
 
-    (claim,) = world.delivery.claims
+    (claim,) = world.monitors.claims
     assert claim["now"].tzinfo is not None
     assert before <= claim["now"] <= datetime.now(UTC)
 
@@ -244,3 +253,214 @@ async def test_the_worker_gives_the_matcher_the_live_dollar_rate(
     assert answers.calls == 1
     ((spec, _after, _limit),) = world.listings.asked
     assert spec.max_price_vnd == Decimal("7800000")
+
+
+# ── обход по кругу, изоляция подписок и карантин (D4, D5) ───────────────────
+
+BOOM = "boom"
+
+
+async def test_a_failing_slot_is_quarantined_and_the_others_are_served(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Одна больная подписка не роняет проход: остальные получают свои карточки.
+
+    Прежний проход шёл одной транзакцией без охраны на подписку, и любое исключение
+    уносило воркер: Docker перезапускал процесс, цикл повторялся, стояла вся воронка (D5).
+    """
+    world = install(
+        monkeypatch,
+        subscriptions=[
+            subscription(1),
+            subscription_in(2, BOOM),
+            subscription(3),
+        ],
+        page=[listing()],
+        explode={BOOM: ValueError("незнакомое значение")},
+    )
+    matcher = Matcher()
+
+    assert await matcher.tick(now=NOW) == 2
+
+    assert [item["subscription_id"] for item in world.delivery.queued] == [1, 3]
+    (isolated,) = world.monitors.quarantined
+    assert isolated["id"] == 2 and isolated["streak"] == 1
+    assert isolated["until"] == NOW + quarantine_delay(1)
+    assert "ValueError" in isolated["error"] and "незнакомое значение" in isolated["error"]
+    assert world.monitors.scanned == [1, 3], "обойдёнными отмечены только удачные"
+    assert matcher.counters.quarantined == 1
+
+
+async def test_every_slot_works_in_its_own_savepoint_and_only_the_failing_one_rolls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = install(
+        monkeypatch,
+        subscriptions=[subscription(1), subscription_in(2, BOOM), subscription(3)],
+        page=[listing()],
+        explode={BOOM: RuntimeError("упала")},
+    )
+
+    await Matcher().tick(now=NOW)
+
+    assert world.session.savepoints == 3, "по SAVEPOINT на подписку"
+    assert world.session.rolled_back == 1, "откат — только у больной"
+    assert world.session.commits == 1, "коммит прохода один, в конце"
+
+
+async def test_the_streak_grows_and_the_pause_backs_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    world = install(
+        monkeypatch,
+        subscriptions=[subscription_in(1, BOOM, failed_streak=2)],
+        explode={BOOM: RuntimeError("снова")},
+    )
+
+    await Matcher().tick(now=NOW)
+
+    (isolated,) = world.monitors.quarantined
+    assert isolated["streak"] == 3
+    assert isolated["until"] == NOW + quarantine_delay(3) == NOW + timedelta(minutes=20)
+
+
+async def test_a_slot_that_cannot_be_read_goes_to_quarantine_with_the_reason_it_came_with(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Паспорт с незнакомым значением падает ещё при разборе строки, до всякой подписки."""
+    sick = BrokenSubscription(
+        id=7, user_id=70, failed_streak=1, error="ValueError: 'spaceship' is not a valid Category"
+    )
+    world = install(monkeypatch, subscriptions=[subscription(1)], broken=[sick], page=[listing()])
+    matcher = Matcher()
+
+    assert await matcher.tick(now=NOW) == 1
+
+    (isolated,) = world.monitors.quarantined
+    assert isolated["id"] == 7 and isolated["streak"] == 2
+    assert isolated["error"] == sick.error
+    assert isolated["until"] == NOW + quarantine_delay(2)
+    assert matcher.counters.quarantined == 1
+
+
+@pytest.mark.parametrize("stop", [KeyboardInterrupt(), asyncio.CancelledError()])
+async def test_a_stop_signal_in_a_slot_is_not_a_slot_failure(
+    monkeypatch: pytest.MonkeyPatch, stop: BaseException
+) -> None:
+    """SIGTERM — просьба остановиться, а не поломка подписки: в карантин за неё не отправляют."""
+    world = install(
+        monkeypatch,
+        subscriptions=[subscription_in(1, BOOM)],
+        explode={BOOM: stop},
+    )
+
+    with pytest.raises(type(stop)):
+        await Matcher().tick(now=NOW)
+
+    assert world.monitors.quarantined == []
+    assert world.session.commits == 0
+
+
+async def test_a_failure_of_the_claim_itself_is_not_hidden(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Упала база, а не подписка: изолировать нечего, и молчать об этом нельзя."""
+    world = install(monkeypatch)
+    world.monitors.claim_error = ConnectionError("база недоступна")
+
+    with pytest.raises(ConnectionError):
+        await Matcher().tick(now=NOW)
+
+
+async def test_the_quarantine_is_logged_as_an_error_with_its_cause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cause = RuntimeError("упала")
+    install(monkeypatch, subscriptions=[subscription_in(4, BOOM)], explode={BOOM: cause})
+
+    with capture_logs() as logs:
+        await Matcher().tick(now=NOW)
+
+    (entry,) = [item for item in logs if item["event"] == "matcher.quarantined"]
+    assert entry["log_level"] == "error"
+    assert entry["subscription"] == 4 and entry["user"] == 104 and entry["streak"] == 1
+    assert entry["exc_info"] is cause, "в журнале видна причина, а не только её текст"
+
+
+async def test_every_outcome_marks_the_slot_as_visited_for_the_rotation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Обойдёнными считаются и подписки, которым нечего отдать: иначе они стояли бы первыми
+    и занимали порцию вечно (D4)."""
+    world = install(
+        monkeypatch,
+        subscriptions=[subscription(1), subscription_in(2, None)],
+        page=[listing()],
+    )
+
+    await Matcher().tick(now=NOW)
+
+    assert world.monitors.scanned == [1, 2]
+
+
+async def test_a_slot_that_reached_its_daily_cap_is_still_visited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = install(monkeypatch, subscriptions=[subscription(1)], page=[listing()])
+    world.delivery.used = 5
+
+    assert await Matcher().tick(now=NOW) == 0
+
+    assert world.monitors.scanned == [1]
+
+
+async def test_a_waiting_slot_is_visited_but_not_scanned(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ждущая курса подписка уходит в конец очереди обхода, а курсор и сбои не трогает."""
+    world = install(monkeypatch, subscriptions=[usd_subscription(1)], page=[listing()])
+
+    await Matcher(rate=Rates(None)).tick(now=NOW)
+
+    assert world.monitors.touched == [1]
+    assert world.monitors.scanned == [], "`record_scan` снял бы следы сбоев, а подписку не смотрели"
+
+
+async def test_the_pass_takes_the_batch_it_was_given(monkeypatch: pytest.MonkeyPatch) -> None:
+    world = install(monkeypatch)
+
+    await Matcher(batch=7).tick(now=NOW)
+
+    assert [claim["limit"] for claim in world.monitors.claims] == [7]
+
+
+async def test_the_default_batch_comes_from_the_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Размер порции — константа в конфиге (D4), а не число, зашитое в проход."""
+    from sniffer.config import reload_settings
+
+    world = install(monkeypatch)
+    try:
+        await Matcher().tick(now=NOW)
+        monkeypatch.setenv("MONITOR_BATCH", "9")
+        reload_settings()
+        await Matcher().tick(now=NOW)
+    finally:
+        monkeypatch.delenv("MONITOR_BATCH")
+        reload_settings()
+
+    assert [claim["limit"] for claim in world.monitors.claims] == [50, 9]
+
+
+# ── пауза карантина: чистая функция ─────────────────────────────────────────
+
+
+def test_the_pause_doubles_with_every_failure_and_hits_a_ceiling() -> None:
+    minutes = [quarantine_delay(streak) / timedelta(minutes=1) for streak in range(1, 10)]
+
+    assert minutes == [5, 10, 20, 40, 80, 160, 320, 360, 360]
+    assert quarantine_delay(1) == QUARANTINE_FIRST
+    assert quarantine_delay(99) == QUARANTINE_MAX
+
+
+@pytest.mark.parametrize("streak", [0, -3])
+def test_a_nonsense_streak_gets_the_first_pause(streak: int) -> None:
+    assert quarantine_delay(streak) == QUARANTINE_FIRST
+
+
+def test_a_huge_streak_does_not_overflow() -> None:
+    """`timedelta * 2**1000` — OverflowError: счёт сбоев не вправе ронять карантин."""
+    assert quarantine_delay(10**6) == QUARANTINE_MAX

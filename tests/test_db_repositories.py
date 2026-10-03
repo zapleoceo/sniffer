@@ -34,8 +34,16 @@ from sniffer.db.repositories import (
 )
 from sniffer.db.repositories.collection_sources import CollectionSourceRepository
 from sniffer.db.repositories.delivery import DeliveryRepository
+from sniffer.db.repositories.monitors import MonitorRepository
 from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
-from sniffer.domain.records import Chat, DiscoveryCandidate, Listing, Payment, RawMessage
+from sniffer.domain.records import (
+    Chat,
+    DiscoveryCandidate,
+    Listing,
+    Payment,
+    RawMessage,
+    SubscriptionState,
+)
 from sniffer.domain.threads import MAX_LIVE_THREADS
 from sniffer.pipeline.gate import GateResult
 
@@ -1009,6 +1017,12 @@ async def test_archive_source_recovers_rental_hidden_behind_a_sale_card(
 # ── подписки и доставка ─────────────────────────────────────────────────────
 
 
+async def _live(session: AsyncSession, *, now: datetime | None = None) -> list[SubscriptionState]:
+    """Живые подписки на момент `now` — так, как их выбирает монитор."""
+    claimed = await MonitorRepository(session).claim_due(limit=200, now=now or datetime.now(UTC))
+    return claimed.ready
+
+
 async def _subscriber(session: AsyncSession, passport: Passport) -> tuple[int, int]:
     """Клиент с подпиской на текущую версию паспорта. Возврат: (user_id, sub_id)."""
     user = await UserRepository(session).get_or_create(555, username="подписчик")
@@ -1044,7 +1058,7 @@ async def test_a_subscription_follows_the_passport_it_was_made_for(
     await repo.save_revision(current, revised)
     await db_session.commit()
 
-    live = await DeliveryRepository(db_session).active_subscriptions()
+    live = await _live(db_session)
 
     assert [item.id for item in live] == [sub_id]
     assert live[0].passport.passport.budget.max == 400, "подписка застыла на старой версии"
@@ -1220,7 +1234,7 @@ async def test_matcher_advances_past_a_rejected_page(
     monkeypatch.setattr(module, "LISTINGS_PER_SUBSCRIPTION", 1)
 
     assert await module.Matcher().tick(now=NOW) == 0
-    state = (await DeliveryRepository(db_session).active_subscriptions(now=NOW))[0]
+    state = (await _live(db_session, now=NOW))[0]
     assert state.scan_listing_id > state.since_listing_id
     await db_session.commit()
     assert await module.Matcher().tick(now=NOW) == 1
@@ -1417,8 +1431,8 @@ async def test_an_expired_subscription_stops_receiving_cards(db_session: AsyncSe
     )
     await db_session.commit()
 
-    assert await repo.active_subscriptions(now=NOW - timedelta(days=1)) != []
-    assert await repo.active_subscriptions(now=NOW + timedelta(seconds=1)) == []
+    assert await _live(db_session, now=NOW - timedelta(days=1)) != []
+    assert await _live(db_session, now=NOW + timedelta(seconds=1)) == []
 
 
 async def test_paid_monitor_can_be_paused_and_resumed(db_session: AsyncSession) -> None:
@@ -1434,9 +1448,9 @@ async def test_paid_monitor_can_be_paused_and_resumed(db_session: AsyncSession) 
     )
 
     assert await repo.set_active(user_id=user.id, passport_root=stored.root, active=False)
-    assert await repo.active_subscriptions() == []
+    assert await _live(db_session) == []
     assert await repo.set_active(user_id=user.id, passport_root=stored.root, active=True)
-    assert len(await repo.active_subscriptions()) == 1
+    assert len(await _live(db_session)) == 1
 
 
 async def test_a_forged_payload_cannot_subscribe_to_someone_elses_request(

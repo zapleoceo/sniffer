@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+from sniffer.db.repositories.monitors import BrokenSubscription, DueSubscriptions
 from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
 from sniffer.domain.records import Listing, MatchFilter, StoredPassport, SubscriptionState
 
@@ -63,6 +64,14 @@ def usd_subscription(number: int = 1, amount: float = 300) -> SubscriptionState:
         passport=passport(budget=dollars(amount)),
     )
     return subscription(number, passport=stored)
+
+
+def subscription_in(number: int, city: str | None, **overrides: object) -> SubscriptionState:
+    """Подписка на запрос в заданном городе: по городу подменный каталог узнаёт «больную»."""
+    stored = StoredPassport(
+        id=200 + number, user_id=100 + number, version=1, passport=passport(city=city)
+    )
+    return subscription(number, passport=stored, **overrides)
 
 
 def listing(number: int = 1, *, moment: datetime = NOW, **overrides: object) -> Listing:
@@ -128,22 +137,47 @@ class Scope:
 
 
 @dataclass
+class FakeMonitors:
+    """Монитор подписок без базы: отдаёт заданную порцию и записывает отметки обхода."""
+
+    ready: list[SubscriptionState] = field(default_factory=list)
+    broken: list[BrokenSubscription] = field(default_factory=list)
+    claims: list[dict[str, Any]] = field(default_factory=list)
+    claim_error: BaseException | None = None
+    touched: list[int] = field(default_factory=list)
+    scanned: list[int] = field(default_factory=list)
+    quarantined: list[dict[str, Any]] = field(default_factory=list)
+
+    async def claim_due(self, *, limit: int, now: datetime) -> DueSubscriptions:
+        self.claims.append({"limit": limit, "now": now})
+        if self.claim_error is not None:
+            raise self.claim_error
+        return DueSubscriptions(ready=list(self.ready), broken=list(self.broken))
+
+    async def touch(self, subscription_id: int, *, now: datetime) -> None:
+        self.touched.append(subscription_id)
+
+    async def record_scan(self, subscription_id: int, *, now: datetime) -> None:
+        self.scanned.append(subscription_id)
+
+    async def quarantine(
+        self, subscription_id: int, *, now: datetime, streak: int, until: datetime, error: str
+    ) -> None:
+        self.quarantined.append(
+            {"id": subscription_id, "now": now, "streak": streak, "until": until, "error": error}
+        )
+
+
+@dataclass
 class FakeDelivery:
     """Очередь доставки без базы: записывает, что и с каким временем ей поставили."""
 
     queued: list[dict[str, Any]] = field(default_factory=list)
-    claims: list[dict[str, Any]] = field(default_factory=list)
     advanced: list[tuple[int, int]] = field(default_factory=list)
-    subscriptions: list[SubscriptionState] = field(default_factory=list)
-
-    async def active_subscriptions(
-        self, *, limit: int = 200, now: datetime | None = None
-    ) -> list[SubscriptionState]:
-        self.claims.append({"limit": limit, "now": now})
-        return list(self.subscriptions)
+    used: int = 0
 
     async def used_since(self, subscription_id: int, *, since: datetime) -> int:
-        return 0
+        return self.used
 
     async def enqueue(self, **kwargs: Any) -> bool:
         self.queued.append(kwargs)
@@ -155,21 +189,29 @@ class FakeDelivery:
 
 @dataclass
 class FakeListings:
-    """Каталог без базы: отдаёт заранее заданную страницу и запоминает вопросы к ней."""
+    """Каталог без базы: отдаёт заданную страницу и запоминает вопросы к ней.
+
+    `explode` — «больная» карточка или паспорт: вопрос по такому городу падает заданным
+    исключением, как падает настоящий запрос на неразобранных данных.
+    """
 
     page: list[Listing] = field(default_factory=list)
     asked: list[tuple[MatchFilter, int, int]] = field(default_factory=list)
+    explode: dict[str, BaseException] = field(default_factory=dict)
 
     async def match(
         self, spec: MatchFilter, *, after_id: int = 0, limit: int = 50
     ) -> list[Listing]:
         self.asked.append((spec, after_id, limit))
+        if spec.city in self.explode:
+            raise self.explode[spec.city]
         return list(self.page)
 
 
 @dataclass
 class World:
     session: FakeSession
+    monitors: FakeMonitors
     delivery: FakeDelivery
     listings: FakeListings
 
@@ -178,17 +220,21 @@ def install(
     monkeypatch: pytest.MonkeyPatch,
     *,
     subscriptions: list[SubscriptionState] | None = None,
+    broken: list[BrokenSubscription] | None = None,
     page: list[Listing] | None = None,
+    explode: dict[str, BaseException] | None = None,
 ) -> World:
     """Подменить сессию и репозитории матчера; вернуть то, на что можно смотреть."""
     from sniffer.worker import matcher as module
 
     world = World(
         session=FakeSession(),
-        delivery=FakeDelivery(subscriptions=list(subscriptions or [])),
-        listings=FakeListings(page=list(page or [])),
+        monitors=FakeMonitors(ready=list(subscriptions or []), broken=list(broken or [])),
+        delivery=FakeDelivery(),
+        listings=FakeListings(page=list(page or []), explode=dict(explode or {})),
     )
     monkeypatch.setattr(module, "session_scope", lambda: Scope(world.session))
+    monkeypatch.setattr(module, "MonitorRepository", lambda _session: world.monitors)
     monkeypatch.setattr(module, "DeliveryRepository", lambda _session: world.delivery)
     monkeypatch.setattr(module, "ListingRepository", lambda _session: world.listings)
     return world

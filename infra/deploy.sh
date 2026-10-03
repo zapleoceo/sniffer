@@ -408,6 +408,12 @@ if [ -n "${PG_CID:-}" ]; then
   require_column listings source               # миграция единого каталога, 02.09.2026
   require_column users awaiting_new_request    # `/new`: следующее сообщение открывает поиск
   require_column passports last_used_at        # порядок списка поисков: выбор возвращает поиск
+  # Монитор подписок (worker/matcher.py): без этих колонок выбор подписок падает на
+  # `column does not exist` на КАЖДОМ проходе, то есть стоит весь конвейер воркера.
+  require_column subscriptions last_scanned_at    # ротация обхода: кого не смотрели дольше всех
+  require_column subscriptions failed_streak      # карантин: сколько проходов подряд падала
+  require_column subscriptions last_error         # карантин: чем
+  require_column subscriptions quarantined_until  # карантин: до какого времени не трогать
   # Часовой ПОСЛЕДНЕЙ миграции в цепочке. Цикл выше применяет их по порядку и
   # падает на ошибке, но это доказывает только то, что psql не вернул ошибку на
   # ЗАПУЩЕННОМ файле: новый файл, не попавший в `git pull`, не запустится вовсе
