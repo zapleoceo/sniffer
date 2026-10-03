@@ -105,6 +105,14 @@ class Settings(BaseSettings):
     monitor_lapse_grace_hours: int = Field(default=6, ge=0, le=168)
     prefilter_batch: int = 20
     extract_batch: int = 10
+    # Срок годности строки очереди доставки (notifier), в часах от времени, на
+    # которое она назначена. После простоя нотифаера «мгновенное» уведомление
+    # двухдневной давности — это не новость, а шум: оно отменяется, а не уходит.
+    # 24 часа для всех; 6 — когда у подписки уже нет права на слежение (срок
+    # вышел или она на паузе): найденное, пока право было, ещё можно доставить, но
+    # недолго. Значения повторены в `notifier.policy.Policy`, их равенство сторожит тест.
+    outbox_ttl_h: int = Field(default=24, ge=1)
+    outbox_lost_right_ttl_h: int = Field(default=6, ge=1)
     default_city: str = "nha_trang"
     log_level: str = "INFO"
 

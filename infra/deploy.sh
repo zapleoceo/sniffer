@@ -166,6 +166,8 @@ subscriptions     last_scanned_at        # монитор: ротация обх
 subscriptions     failed_streak          # монитор, карантин: сколько проходов подряд падала
 subscriptions     last_error             # монитор, карантин: чем
 subscriptions     quarantined_until      # монитор, карантин: до какого времени не трогать
+users             bot_blocked_at         # клиент заблокировал бота: нотифаер не шлёт, матчер не ставит в очередь
+outbox            last_error             # причина отмены или отказа строки очереди
 schema_proposals                         # хвост цепочки на момент введения таблицы (004)
 SENTINELS
 }

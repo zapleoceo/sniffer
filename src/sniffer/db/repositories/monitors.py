@@ -68,9 +68,14 @@ def _due_statement(
     return (
         select(models.Subscription, models.Passport)
         .join(models.Passport, chain == models.Subscription.passport_root)
+        .join(models.User, models.User.id == models.Subscription.user_id)
         .where(
             models.Passport.is_current.is_(True),
             entitled(now),
+            # Клиент заблокировал бота: слать нечем, ставить в очередь незачем. Пауза выведена
+            # запросом, а не записана в подписку: разблокировал — слежение возобновилось само,
+            # ручная пауза (`is_active`), срок и курсор не тронуты.
+            models.User.bot_blocked_at.is_(None),
             # Карантин кончается сам: строка с истёкшим сроком снова в обходе.
             or_(
                 models.Subscription.quarantined_until.is_(None),

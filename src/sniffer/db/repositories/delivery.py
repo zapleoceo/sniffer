@@ -9,7 +9,8 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from sqlalchemy import (
@@ -38,6 +39,9 @@ OUTBOX_SENT = "sent"
 OUTBOX_FAILED = "failed"
 # Сообщение отменено, а не потеряно: право на него кончилось раньше, чем оно ушло.
 OUTBOX_CANCELLED = "cancelled"
+# Почему строка отменена: пишется в `outbox.last_error` и читается человеком.
+REASON_EXPIRED = "expired"
+REASON_RIGHT_LOST = "right_lost"
 
 
 def entitled(now: datetime) -> ColumnElement[bool]:
@@ -142,7 +146,13 @@ class DeliveryRepository(Repository):
     async def take_pending(
         self, *, limit: int = 20, now: datetime | None = None
     ) -> list[OutboxMessage]:
-        """Что пора доставить. `SKIP LOCKED` — чтобы две копии не слали дважды."""
+        """Что пора доставить — только прочитать, без блокировки.
+
+        Блокировка здесь жила, пока вся пачка шла одной транзакцией: строки
+        были заперты на всё время прохода, а проход с паузой в секунду между
+        сообщениями — это десятки секунд. Теперь отправка идёт по одному
+        сообщению, и запирает строки `lock_pending` — ровно на время одной отправки.
+        """
         rows = await self._session.execute(
             select(models.Outbox, models.User.tg_user_id)
             .join(models.User, models.User.id == models.Outbox.user_id)
@@ -151,8 +161,30 @@ class DeliveryRepository(Repository):
                 models.Outbox.scheduled_at <= (now or datetime.now(UTC)),
             )
             .order_by(models.Outbox.scheduled_at, models.Outbox.id)
-            .with_for_update(of=models.Outbox, skip_locked=True)
             .limit(limit)
+        )
+        return [_outbox(row, tg_user_id) for row, tg_user_id in rows]
+
+    async def lock_pending(self, ids: Sequence[int], *, now: datetime) -> list[OutboxMessage]:
+        """Запереть строки одной отправки. `SKIP LOCKED` — чтобы две копии не слали дважды.
+
+        Перечитываем по `id`, а не доверяем тому, что вернул `take_pending`: пока
+        проход дошёл до этой строки, другая копия могла её отправить или отложить.
+        Поэтому условия повторены: ушедшая и отложенная строки сюда не попадают, а
+        занятая чужой транзакцией пропускается, а не ожидается.
+        """
+        if not ids:
+            return []
+        rows = await self._session.execute(
+            select(models.Outbox, models.User.tg_user_id)
+            .join(models.User, models.User.id == models.Outbox.user_id)
+            .where(
+                models.Outbox.id.in_(list(ids)),
+                models.Outbox.status == OUTBOX_PENDING,
+                models.Outbox.scheduled_at <= now,
+            )
+            .order_by(models.Outbox.scheduled_at, models.Outbox.id)
+            .with_for_update(of=models.Outbox, skip_locked=True)
         )
         return [_outbox(row, tg_user_id) for row, tg_user_id in rows]
 
@@ -164,7 +196,7 @@ class DeliveryRepository(Repository):
         await self._session.execute(
             update(models.Outbox)
             .where(models.Outbox.id == message_id)
-            .values(status=OUTBOX_SENT, sent_at=moment)
+            .values(status=OUTBOX_SENT, sent_at=moment, last_error=None)
         )
         if notification_id is not None:
             await self._session.execute(
@@ -173,7 +205,9 @@ class DeliveryRepository(Repository):
                 .values(sent_at=moment)
             )
 
-    async def mark_failed(self, message_id: int, *, retry_at: datetime) -> None:
+    async def mark_failed(
+        self, message_id: int, *, retry_at: datetime, error: str | None = None
+    ) -> None:
         """Не ушло — вернуть в очередь позже, счётчик попыток вверх.
 
         Статус остаётся `pending`: `failed` означал бы «больше не пробуем», а
@@ -182,14 +216,92 @@ class DeliveryRepository(Repository):
         await self._session.execute(
             update(models.Outbox)
             .where(models.Outbox.id == message_id)
-            .values(attempts=models.Outbox.attempts + 1, scheduled_at=retry_at)
+            .values(
+                attempts=models.Outbox.attempts + 1,
+                scheduled_at=retry_at,
+                last_error=error,
+            )
         )
 
-    async def give_up(self, message_id: int) -> None:
-        """Попытки исчерпаны. Единственное место, где ставится `failed`."""
+    async def give_up(self, message_id: int, *, error: str | None = None) -> None:
+        """Больше не пробуем: Telegram отказал сообщению или попытки кончились.
+
+        Попытка засчитана и здесь: по `attempts` потом видно, сколько раз мы
+        стучались, а не «на одну меньше». Статус `failed` — это отказ, а решение
+        не слать (просрочено, клиент заблокировал бота) называется `cancelled`.
+        """
         await self._session.execute(
-            update(models.Outbox).where(models.Outbox.id == message_id).values(status=OUTBOX_FAILED)
+            update(models.Outbox)
+            .where(models.Outbox.id == message_id)
+            .values(
+                status=OUTBOX_FAILED,
+                attempts=models.Outbox.attempts + 1,
+                last_error=error,
+            )
         )
+
+    async def cancel_pending_of(self, user_id: int, *, reason: str) -> int:
+        """Отменить всё, что ждёт отправки этому клиенту. Возврат — сколько строк.
+
+        Вызывается, когда Telegram сказал, что писать клиенту нельзя: остальные
+        его строки отправятся с тем же отказом, и каждая такая попытка — лишний
+        запрос к Bot API. Отменяем, а не `failed`: это наше решение не слать.
+        """
+        return await self._cancel(models.Outbox.user_id == user_id, reason=reason)
+
+    async def cancel_for_blocked_users(self, *, reason: str) -> int:
+        """Отменить очередь тех, кто заблокировал бота, — в том числе строки, поставленные позже.
+
+        Метку ставит и нотифаер (по 403), и бот (по `my_chat_member`), а очередь
+        наполняют и матчер, и сборщик отложенных ответов: ни один из них не
+        обязан помнить про блокировку. Проход нотифаера подчищает за всеми.
+        """
+        blocked = select(models.User.id).where(models.User.bot_blocked_at.is_not(None))
+        return await self._cancel(models.Outbox.user_id.in_(blocked), reason=reason)
+
+    async def cancel_expired(
+        self, *, now: datetime, ttl: timedelta, lost_right_ttl: timedelta
+    ) -> int:
+        """Отменить строки, которые слать уже поздно. Возврат — сколько строк отменено.
+
+        Возраст строки — от времени, на которое она назначена (`scheduled_at`), а
+        не от постановки: подборка на вечерние 18:00 созревает вечером, и вчерашней
+        она становится от этого часа, а не от утра, когда её поставили. Повтор после
+        сбоя сдвигает `scheduled_at` вперёд, но попыток конечное число, так что
+        застрявшая строка всё равно упрётся в потолок попыток.
+
+        Две причины, и они различаются в `last_error`. Если у подписки уже нет
+        права на слежение (срок вышел или она на паузе), строка живёт `lost_right_ttl`
+        — найденное, пока право было, ещё можно доставить, но недолго. Остальные —
+        `ttl`: у строки без подписки (отложенный ответ после сбора) права нет по
+        определению, и ждёт она так же, как все.
+        """
+        lost = select(models.Subscription.id).where(
+            or_(
+                models.Subscription.is_active.is_(False),
+                and_(
+                    models.Subscription.expires_at.is_not(None),
+                    models.Subscription.expires_at <= now,
+                ),
+            )
+        )
+        cancelled = await self._cancel(
+            models.Outbox.subscription_id.in_(lost),
+            models.Outbox.scheduled_at < now - lost_right_ttl,
+            reason=REASON_RIGHT_LOST,
+        )
+        return cancelled + await self._cancel(
+            models.Outbox.scheduled_at < now - ttl, reason=REASON_EXPIRED
+        )
+
+    async def _cancel(self, *conditions: Any, reason: str) -> int:
+        done = await self._session.execute(
+            update(models.Outbox)
+            .where(models.Outbox.status == OUTBOX_PENDING, *conditions)
+            .values(status=OUTBOX_CANCELLED, last_error=reason)
+            .returning(models.Outbox.id)
+        )
+        return len(done.all())
 
     async def sent_since(self, subscription_id: int, *, since: datetime) -> int:
         """Сколько ушло по подписке с этого момента — суточный лимит.
