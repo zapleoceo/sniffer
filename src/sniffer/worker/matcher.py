@@ -45,6 +45,7 @@ from sniffer.db.repositories.monitors import (
     MonitorRepository,
     describe_error,
 )
+from sniffer.domain.card_facts import facts_line
 from sniffer.domain.records import Listing, SubscriptionState
 from sniffer.matching import filter_for, needs_usd_rate, score, worth_sending
 from sniffer.worker.quarantine import quarantine
@@ -272,6 +273,7 @@ def _payload(listing: Listing, *, delivery_mode: str = "instant") -> dict[str, o
         "listing_id": listing.id,
         "title": listing.title,
         "summary": listing.summary,
+        "facts": facts_line(listing.attributes, title=listing.title),
         "url": listing.tg_link,
         "price_amount": str(listing.price_amount) if listing.price_amount is not None else "",
         "price_currency": listing.price_currency or "",

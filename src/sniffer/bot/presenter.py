@@ -28,7 +28,8 @@ from typing import Protocol
 
 from sniffer.bot import wording, wording_plan
 from sniffer.bot.billing_wording import OFFER
-from sniffer.bot.cards import render_cards
+from sniffer.bot.cards import chunk, render_card, render_cards
+from sniffer.bot.paging import MoreOffer
 from sniffer.config import get_settings
 from sniffer.domain.dialogue import Option, Question, feedback_buttons
 from sniffer.domain.passport import Passport
@@ -51,6 +52,9 @@ class Reply:
     # Предложить платный план («Подписка — 10 ⭐/мес»). Отдельно от `offer_subscription`:
     # то про слежение за темой, это про лимит карточек, и кнопки у них разные.
     offer_plan: bool = False
+    # «Ещё N» / «Показать все N» под страницей. Признак со ссылкой на снимок, а не
+    # готовые кнопки: разметку рисует `keyboards`, как и у остального.
+    more: MoreOffer | None = None
 
 
 class Results(Protocol):
@@ -70,6 +74,9 @@ class Results(Protocol):
     @property
     def deferred(self) -> bool: ...
 
+    @property
+    def capped(self) -> bool: ...
+
 
 @dataclass(frozen=True, slots=True)
 class Gate:
@@ -84,6 +91,7 @@ class Gate:
     admission: Admission
     shown: tuple[RawItem, ...]
     offer: bool = False
+    more: MoreOffer | None = None
 
 
 def present(
@@ -112,7 +120,7 @@ def _results(passport: Passport, found: Results, root: int | None) -> Reply:
     # Число считается здесь один раз и идёт и в заголовок, и в карточки: разное
     # число в двух местах дало бы «показываю 5» над четырьмя карточками.
     shown = min(len(found.items), get_settings().max_cards)
-    header = wording.result_header(passport, len(found.items), shown)
+    header = wording.result_header(passport, len(found.items), shown, capped=found.capped)
     if found.status:
         header = f"{found.status}\n\n{header}"
     return Reply(
@@ -126,27 +134,34 @@ def _results(passport: Passport, found: Results, root: int | None) -> Reply:
 def _gated(passport: Passport, found: Results, root: int | None, gate: Gate) -> Reply:
     """Выдача через квоту: остаток, допущенные карточки и честная строка про остальное."""
     if not gate.shown:
-        return _exhausted(found, root, gate)
+        return _exhausted(len(found.items), root, gate)
     admission = gate.admission
     shown = len(gate.shown)
     parts = [found.status] if found.status else []
     balance = wording_plan.balance_line(admission.limit, admission.remaining, admission.period_end)
     if balance:
         parts.append(balance)
-    parts.append(wording.result_header(passport, len(found.items), shown))
+    parts.append(wording.result_header(passport, len(found.items), shown, capped=found.capped))
     text = "\n\n".join(parts) + "\n\n" + render_cards(gate.shown, limit=shown)
-    if admission.withheld:
+    rest = len(found.items) - shown
+    if rest > 0 and gate.more is None:
+        # Остаток есть, а кнопки «Ещё» нет: лимит отрезал его или исчерпан на этой странице.
+        # Честное число вместо молча отброшенного хвоста (раньше он пропадал без слова).
         text += "\n\n" + wording_plan.more_line(
-            len(found.items) - shown, limit=admission.limit, renews=admission.period_end
+            rest, limit=admission.limit, renews=admission.period_end
         )
     return Reply(
-        text, feedback=feedback_buttons(passport), offer_subscription=True, passport_root=root
+        text,
+        feedback=feedback_buttons(passport),
+        offer_subscription=True,
+        passport_root=root,
+        more=gate.more,
     )
 
 
-def _exhausted(found: Results, root: int | None, gate: Gate) -> Reply:
+def _exhausted(total: int, root: int | None, gate: Gate) -> Reply:
     """Ни одной карточки показать нельзя: само сообщение — предложение или короткий ответ."""
-    admission, total = gate.admission, len(found.items)
+    admission = gate.admission
     if admission.limit != FREE_CARDS_PER_PERIOD:
         # Потолок подписчика: подписка ничего не добавит, поэтому ни кнопки, ни продажи.
         return Reply(
@@ -180,3 +195,29 @@ def present_offer(gate: Gate, *, root: int | None) -> Reply | None:
         offer_plan=True,
         passport_root=root,
     )
+
+
+def present_page(total: int, offset: int, gate: Gate, *, root: int | None) -> list[Reply]:
+    """Продолжение выдачи («Ещё», «Показать все»): карточки, остаток квоты, кнопки.
+
+    Сообщений может быть несколько: «показать все» не помещается в 4096 знаков, и режет
+    его `cards.chunk` по границе карточки. Кнопки и честная строка про остаток — у последнего.
+    """
+    admission = gate.admission
+    if not gate.shown:
+        return [_exhausted(total, root, gate)]
+    first = offset + 1
+    parts = [wording_plan.balance_line(admission.limit, admission.remaining, admission.period_end)]
+    parts.append(f"Карточки {first}–{offset + len(gate.shown)} из {total}:")
+    blocks = [render_card(item) for item in gate.shown]
+    rest = total - offset - len(gate.shown)
+    if rest > 0 and gate.more is None:
+        blocks.append(
+            wording_plan.more_line(rest, limit=admission.limit, renews=admission.period_end)
+        )
+    head = chr(10).join(part for part in parts if part)
+    messages = chunk(blocks, head=head)
+    replies = [Reply(text, passport_root=root) for text in messages]
+    last = replies[-1]
+    replies[-1] = Reply(last.text, passport_root=root, more=gate.more)
+    return replies

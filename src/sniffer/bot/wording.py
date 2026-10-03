@@ -82,7 +82,7 @@ def _is_broad(passport: Passport) -> bool:
     return not (a.get("model") or a.get("brand") or a.get("engine_cc") or passport.budget.max)
 
 
-def result_header(passport: Passport, total: int, shown: int) -> str:
+def result_header(passport: Passport, total: int, shown: int, *, capped: bool = False) -> str:
     """Строка над карточками: что нашлось и, если запрос широкий, как сузить.
 
     Объяснение — не вежливость, а ответ на «не объясняя»: пять карточек без
@@ -91,16 +91,19 @@ def result_header(passport: Passport, total: int, shown: int) -> str:
     прежняя форма, которую владелец отверг), а приглашением поверх уже показанных
     результатов: search-first остаётся.
     """
+    # Источник отдал ровно потолок своей выборки: настоящее число больше, и «нашёл 100» было бы
+    # ложью с круглой цифрой. Говорим «не меньше» — честнее, чем недосчитанное точное число.
+    count = f"не меньше {total}" if capped else str(total)
     if total <= shown:
         return "Вот что нашлось:" if total > 1 else "Нашёлся один вариант:"
     if _is_broad(passport):
         noun = _CATEGORY_PLURAL.get(passport.category) if passport.category else None
         many = f"{noun} нашлось много" if noun else "нашлось много"
         return (
-            f"Запрос широкий — {many} ({total}). Показываю {shown} самых свежих.\n"
+            f"Запрос широкий — {many} ({count}). Показываю {shown} самых свежих.\n"
             f"{_narrowing_advice(passport)}"
         )
-    return f"Подходит {total}, показываю {shown} лучших:"
+    return f"Подходит {count}, показываю {shown} лучших:"
 
 
 def _narrowing_advice(passport: Passport) -> str:

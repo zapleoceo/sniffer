@@ -92,6 +92,8 @@ class Found:
     stages: dict[str, int] = field(default_factory=dict)
     status: str | None = None
     deferred: bool = False
+    # Источник отдал ровно потолок своей выборки: найдено не меньше, чем items, а не ровно столько.
+    capped: bool = False
 
 
 class Recorder(Protocol):

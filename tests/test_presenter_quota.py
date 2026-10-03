@@ -27,6 +27,7 @@ class Result:
     items: list[RawItem] = field(default_factory=list)
     status: str | None = None
     deferred: bool = False
+    capped: bool = False
 
 
 def items(count: int) -> list[RawItem]:

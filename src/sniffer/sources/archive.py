@@ -50,5 +50,6 @@ def _item(row: Listing) -> RawItem:
             "category": row.category,
             "attributes": row.attributes,
             "district": row.district,
+            "seller_id": row.seller_id,
         },
     )
