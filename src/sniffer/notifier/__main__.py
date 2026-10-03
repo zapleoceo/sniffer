@@ -19,7 +19,7 @@ from aiogram.types import LinkPreviewOptions
 
 from sniffer.bot.billing_ledger import DbLedger
 from sniffer.bot.billing_payments import PaymentDesk
-from sniffer.bot.billing_reconcile import INTERVAL, Every, StarsReconciler
+from sniffer.bot.billing_reconcile import INTERVAL, Every, ReconcileMode, StarsReconciler
 from sniffer.bot.billing_slots import DbSlots
 from sniffer.bot.billing_telegram import AiogramBotApi
 from sniffer.config import Settings, get_settings
@@ -75,7 +75,14 @@ def _reconciler(bot: Bot, settings: Settings) -> StarsReconciler:
         owner_id=owner,
         reply_hours=settings.paysupport_reply_hours,
     )
-    return StarsReconciler(ledger=ledger, api=api, slots=slots, desk=desk, owner_id=owner)
+    return StarsReconciler(
+        ledger=ledger,
+        api=api,
+        slots=slots,
+        desk=desk,
+        owner_id=owner,
+        mode=ReconcileMode(settings.reconcile_mode),
+    )
 
 
 def _sender(bot: Bot) -> Sender:

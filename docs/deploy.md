@@ -772,6 +772,7 @@ docker exec sniffer-postgres psql -U sniffer -d sniffer -c "\dt user_consents bi
 |---|---|---|
 | `OWNER_CHAT_ID` | кому уходят возвраты, ошибки записи платежа и обращения `/paysupport`; **пока не задан — подписка не продаётся** (некому отвечать за возвраты, а это требование Telegram) | заполнен |
 | `SALES_ENABLED` | продажа подписки Stars; **выкл по умолчанию**, `OWNER_CHAT_ID` её не включает. Включать только после сценария S13 из `docs/payments-live-check.md` (оплата → слот → слежение, возврат, сверка). Выданные ссылки при выключенном флаге принимаются | `false` |
+| `RECONCILE_MODE` | сверка платежей (`bot/billing_reconcile.py`): `off` — не ходит; `report` — только сообщает владельцу; `refund` — записывает недостающее и возвращает «не наши». Автовозвраты включать только после U6/U11 из `docs/payments-live-check.md` | `report` |
 | `PAYSUPPORT_REPLY_HOURS` | срок ответа на обращения по оплате в условиях и в ответе клиенту, 1–720 часов | `48` |
 | `TOPICS_ENABLED` | темы Telegram (поиск = тема, нотифаер шлёт в тему поиска); работает только вместе с Threaded mode в @BotFather — бот проверяет `getMe().has_topics_enabled` при старте | `false` |
 | `TELEGRAM_ENV` | `test` — тестовая среда Telegram (`/bot<token>/test/<метод>`) для бота, нотифаера и оповещений коллектора; в бою пусто | `prod` |

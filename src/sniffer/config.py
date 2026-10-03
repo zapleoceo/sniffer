@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     # (слот мониторинга, возвраты, сверка). Включает владелец явно: `SALES_ENABLED=true`.
     # Уже выданные ссылки при выключенном флаге продолжают приниматься: платёж не теряется.
     sales_enabled: bool = False
+    # Сверка платежей: off — не ходит; report — только сообщает владельцу; refund — ещё и
+    # записывает недостающее и возвращает «не наши» платежи. По умолчанию report: порядок
+    # истории звёзд и поля возвратов живьём не проверены (docs/payments-live-check.md).
+    reconcile_mode: Literal["off", "report", "refund"] = "report"
     # Срок ответа на обращения по оплате (`/paysupport`), часов. Пишется в условиях и в
     # ответе клиенту: Telegram требует отвечать на такие обращения вовремя.
     paysupport_reply_hours: Annotated[int, BeforeValidator(_blank_to(48))] = Field(

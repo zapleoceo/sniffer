@@ -79,9 +79,10 @@ class AiogramBotApi:
     async def star_transactions(self, *, offset: int, limit: int) -> list[StarTransaction]:
         """Страница истории звёзд: платёж клиента — входящая запись, наш возврат — исходящая.
 
-        Что именно Telegram кладёт в `source` и `receiver` у возврата и в каком порядке отдаёт
-        страницы, живьём не проверено (сценарий U6 в `docs/payments-live-check.md`): адаптер
-        читает только то, что описано в справочнике, а всё нераспознанное пропускает.
+        Справочник Bot API обещает «в хронологическом порядке» без направления: сверка листает
+        до конца и порядка не предполагает. Что именно Telegram кладёт в `source` и `receiver` у
+        возврата, живьём не проверено (U6, U11 в `docs/payments-live-check.md`): адаптер читает
+        только описанное в справочнике, нераспознанное пропускает.
         """
         try:
             page = await self._bot.get_star_transactions(offset=offset, limit=limit)

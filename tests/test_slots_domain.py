@@ -206,3 +206,25 @@ def test_an_impossible_move_is_refused(
     monitors: list[Monitor], to_root: int, from_root: int
 ) -> None:
     assert plan_move(monitors, to_root=to_root, from_root=from_root, now=NOW) is None
+
+
+def test_a_paused_or_archived_monitor_does_not_hold_a_slot_and_the_next_one_gets_it() -> None:
+    paused = monitor(1, priority=0, active=False)
+    waiting = monitor(2, priority=1, expires=NOW - DAY)
+    ends = [NOW + 20 * DAY]
+
+    changes = assign_expiry(ends, [paused, waiting], NOW)
+
+    assert changes[1] == NOW  # пауза слот отдала
+    assert changes[2] == NOW + 20 * DAY  # и он достался следующему по порядку
+
+
+def test_state_after_does_not_count_a_paused_monitor_as_holding() -> None:
+    paused = monitor(1, active=False)
+    state, _ = state_after([NOW + 20 * DAY], [paused], NOW)
+    assert (state.slots, state.holding) == (1, 0)
+
+
+def test_a_paused_monitor_that_was_never_paid_keeps_its_history() -> None:
+    past = NOW - 3 * DAY
+    assert assign_expiry([NOW + DAY], [monitor(1, expires=past, active=False)], NOW) == {}

@@ -11,7 +11,7 @@ import pytest
 
 from sniffer.bot import billing_owner_wording as owner_words
 from sniffer.bot.billing_payments import PaymentDesk
-from sniffer.bot.billing_reconcile import Every, StarsReconciler
+from sniffer.bot.billing_reconcile import Every, ReconcileMode, StarsReconciler
 from sniffer.domain import plans
 from sniffer.domain.billing import (
     FROM_RECONCILE,
@@ -27,7 +27,7 @@ LONG_AGO = NOW - timedelta(hours=3)
 
 
 def build(
-    *, pages: int = 5, page_size: int = 100
+    *, pages: int = 5, page_size: int = 100, mode: ReconcileMode = ReconcileMode.REFUND
 ) -> tuple[StarsReconciler, FakeLedger, RecordingApi, FakeSlots]:
     order: list[str] = []
     ledger, api, slots = FakeLedger(order), RecordingApi(order), FakeSlots(order)
@@ -41,6 +41,7 @@ def build(
         desk=desk,
         owner_id=OWNER,
         clock=lambda: NOW,
+        mode=mode,
         pages=pages,
         page_size=page_size,
     )
@@ -306,3 +307,121 @@ async def test_the_pass_runs_at_once_and_then_not_more_often_than_the_interval()
     results = [await every.run(work) for _ in range(4)]
 
     assert results == [1, 0, 0, 1] and len(calls) == 2
+
+
+# ── порядок истории, режимы, граничные случаи (правки по ревью) ──────────────
+
+
+def _dated(ident: str, ago: timedelta) -> StarTransaction:
+    return StarTransaction(
+        charge_id=ident,
+        amount=10,
+        date=NOW - ago,
+        incoming=True,
+        user_id=CLIENT,
+        invoice_payload=PAYLOAD.encode(),
+        subscription_period=plans.SUBSCRIPTION_PERIOD_S,
+    )
+
+
+@pytest.mark.parametrize("newest_first", [True, False], ids=["newest-first", "oldest-first"])
+async def test_the_history_is_read_to_the_end_in_either_page_order(newest_first: bool) -> None:
+    reconciler, ledger, api, _slots = build(pages=50, page_size=2)
+    rows = [_dated(f"c{n}", timedelta(hours=40 - 10 * n)) for n in range(7)]
+    api.history = list(reversed(rows)) if newest_first else rows
+    for row in rows:
+        await ledger.record_payment(stored(row.charge_id))
+        ledger.created[row.charge_id] = row.date
+
+    report = await reconciler.reconcile()
+
+    assert report.gaps == 0 and not report.history_failed
+    assert [t for chat, t in api.texts if chat == OWNER] == []
+
+
+async def test_a_page_cap_hit_before_the_end_is_not_proof_of_absence() -> None:
+    reconciler, ledger, api, _slots = build(pages=1, page_size=2)
+    rows = [_dated(f"c{n}", timedelta(hours=40 - 10 * n)) for n in range(3)]
+    api.history = rows  # oldest first: the newest row never fits on the one page read
+    for row in rows:
+        await ledger.record_payment(stored(row.charge_id))
+        ledger.created[row.charge_id] = row.date
+
+    report = await reconciler.reconcile()
+
+    assert report.gaps == 0
+
+
+async def test_report_mode_tells_the_owner_and_changes_nothing() -> None:
+    reconciler, ledger, api, _slots = build(mode=ReconcileMode.REPORT)
+    api.history = [charge("missing")]
+    await ledger.record_payment(stored("odd", kind=PaymentKind.UNKNOWN))
+    api.history.append(charge("odd", amount=1))
+
+    await reconciler.reconcile()
+    await reconciler.reconcile()
+
+    assert api.refunds == [] and "missing" not in ledger.payments
+    assert not any(chat == CLIENT for chat, _ in api.texts)
+    owner_texts = [t for chat, t in api.texts if chat == OWNER]
+    assert len(owner_texts) == 2 and all("report" in t for t in owner_texts)
+
+
+async def test_off_mode_does_not_even_read_the_history() -> None:
+    reconciler, _ledger, api, _slots = build(mode=ReconcileMode.OFF)
+    api.history = [charge("x")]
+
+    await reconciler.reconcile()
+
+    assert not any(step == "api:star_transactions" for step in api.order)
+
+
+async def test_a_legacy_invoice_payment_is_never_refunded_automatically() -> None:
+    reconciler, ledger, api, _slots = build()
+    await ledger.record_payment(stored("old", kind=PaymentKind.UNKNOWN, payload="sub:7"))
+    api.history = [charge("old", amount=1, payload="sub:7"), charge("lost", payload="sub:9")]
+
+    await reconciler.reconcile()
+
+    assert api.refunds == [] and "lost" not in ledger.payments
+    assert any(chat == OWNER and "sub:N" in t for chat, t in api.texts)
+
+
+async def test_a_payment_still_inside_the_settle_window_is_not_recovered() -> None:
+    reconciler, ledger, api, _slots = build()
+    api.history = [_dated("fresh", timedelta(minutes=1))]
+
+    report = await reconciler.reconcile()
+
+    assert report.recovered == 0 and "fresh" not in ledger.payments
+
+
+async def test_a_recovered_payment_that_was_refunded_gets_no_thanks() -> None:
+    reconciler, _ledger, api, _slots = build()
+    api.history = [charge("gone"), charge("gone", incoming=False)]
+
+    await reconciler.reconcile()
+
+    assert not any(chat == CLIENT for chat, _ in api.texts)
+
+
+async def test_finishing_a_refunding_payment_does_not_send_the_refund_notice_twice() -> None:
+    reconciler, ledger, api, _slots = build()
+    await ledger.record_payment(stored("half"))
+    await ledger.mark_refunding("half")
+    api.history = [charge("half")]
+
+    await reconciler.reconcile()
+
+    assert "half" in ledger.refunded
+    assert not any(chat == CLIENT for chat, _ in api.texts)
+
+
+async def test_report_mode_does_not_mark_refunds_in_the_ledger() -> None:
+    reconciler, ledger, api, _slots = build(mode=ReconcileMode.REPORT)
+    await ledger.record_payment(stored("back"))
+    api.history = [charge("back"), charge("back", incoming=False)]
+
+    await reconciler.reconcile()
+
+    assert "back" not in ledger.refunded

@@ -65,6 +65,8 @@ class EventKind(StrEnum):
     RECONCILE_GAP = "reconcile_gap"
     # Сверка не смогла довести возврат и сказала об этом: по платежу — один раз.
     REFUND_STUCK = "refund_stuck"
+    # Режим `report`: сверка нашла, что сделала бы в режиме `refund`, и только сообщила.
+    RECONCILE_REPORT = "reconcile_report"
 
 
 @dataclass(frozen=True, slots=True)

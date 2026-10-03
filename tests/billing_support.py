@@ -409,7 +409,7 @@ class RecordingApi:
         self.texts: list[tuple[int, str]] = []
         self.failures: dict[str, BaseException] = {}
         self.order = order if order is not None else []
-        # Что «лежит» в истории звёзд у Telegram: свежие первыми, отдаётся страницами.
+        # Что «лежит» в истории звёзд у Telegram: порядок задаёт тест, отдаётся страницами.
         self.history: list[StarTransaction] = []
 
     def _enter(self, name: str) -> None:
