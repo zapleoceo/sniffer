@@ -11,7 +11,13 @@ import httpx
 import pytest
 import structlog
 
-from sniffer.broker.client import BrokerClient, BrokerError, BrokerResult
+from sniffer.broker.client import (
+    BrokerCapError,
+    BrokerClient,
+    BrokerError,
+    BrokerOutputError,
+    BrokerResult,
+)
 from sniffer.broker.pins import ROLE_BY_SCHEMA, pinned_model
 from sniffer.config import Settings
 
@@ -39,7 +45,20 @@ def instant_poll(monkeypatch: pytest.MonkeyPatch) -> None:
 class FakeBroker:
     """Подделка брокера: ведёт журнал отправок, отказывает закреплённым вызовам."""
 
-    def __init__(self, *, pinned_error: str | None = None, submit_status: int = 202) -> None:
+    def __init__(
+        self,
+        *,
+        pinned_error: str | None = None,
+        submit_status: int = 202,
+        pinned_text: str = '{"a": "x"}',
+        pinned_extra: dict[str, Any] | None = None,
+        unpinned_text: str = '{"a": "x"}',
+        unpinned_error: str | None = None,
+    ) -> None:
+        self.pinned_text = pinned_text
+        self.pinned_extra = pinned_extra or {}
+        self.unpinned_text = unpinned_text
+        self.unpinned_error = unpinned_error
         self.submitted: list[dict[str, Any]] = []
         self.pinned_error = pinned_error
         self.submit_status = submit_status
@@ -54,16 +73,19 @@ class FakeBroker:
         pinned = "model" in self.submitted[-1]
         if pinned and self.pinned_error:
             return httpx.Response(200, json={"status": "error", "error": self.pinned_error})
+        if not pinned and self.unpinned_error:
+            return httpx.Response(200, json={"status": "error", "error": self.unpinned_error})
         served = "gemini-3.5-flash-lite" if pinned else "deepseek-flash"
         return httpx.Response(
             200,
             json={
                 "status": "done",
-                "text": '{"a": "x"}',
+                "text": self.pinned_text if pinned else self.unpinned_text,
                 "provider": "p",
                 "model": served,
                 "finish_reason": "stop",
                 "request_id": len(self.submitted),
+                **(self.pinned_extra if pinned else {}),
             },
         )
 
@@ -167,6 +189,67 @@ async def test_failure_of_the_unpinned_retry_is_raised(
     client = BrokerClient(httpx.AsyncClient(transport=httpx.MockTransport(handle)))
     with pytest.raises(BrokerError, match="boom"):
         await ask(client, "listing_guard")
+
+
+@pytest.mark.parametrize(
+    ("text", "extra", "reason"),
+    [
+        ("not json at all", {}, "invalid_json"),
+        ('{"b": 1}', {}, "schema_mismatch"),
+        ('{"a": "x"}', {"refusal": True}, "refusal"),
+        ('{"a": "x"}', {"finish_reason": "length"}, "incomplete"),
+    ],
+)
+async def test_invalid_pinned_answer_retries_once_without_pin(
+    monkeypatch: pytest.MonkeyPatch, text: str, extra: dict[str, Any], reason: str
+) -> None:
+    fake = FakeBroker(pinned_text=text, pinned_extra=extra)
+    client, accounted = make(fake, settings(), monkeypatch)
+    with structlog.testing.capture_logs() as logs:
+        assert await ask(client, "listing_guard") == {"a": "x"}
+    assert ["model" in s for s in fake.submitted] == [True, False]
+    invalid = [e for e in logs if e["event"] == "broker.pinned_model_invalid"]
+    assert len(invalid) == 1 and invalid[0]["model"] == "gemini/gemini-3.6-flash"
+    assert invalid[0]["served_model"] == "gemini-3.5-flash-lite"
+    assert invalid[0]["reason"] == reason
+    assert "not json" not in str(invalid[0])
+    # Оба платных ответа учтены под моделью, что ответила на самом деле.
+    assert [r.model for r in accounted] == ["gemini-3.5-flash-lite", "deepseek-flash"]
+
+
+async def test_invalid_answer_of_the_retry_is_raised_and_not_retried_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeBroker(pinned_text="junk", unpinned_text="junk")
+    client, accounted = make(fake, settings(), monkeypatch)
+    with pytest.raises(BrokerOutputError):
+        await ask(client, "listing_guard")
+    assert len(fake.submitted) == 2 and len(accounted) == 2
+
+
+async def test_cap_on_the_retry_is_raised_as_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeBroker(pinned_text="junk", unpinned_error="daily budget cap reached")
+    client, accounted = make(fake, settings(), monkeypatch)
+    with pytest.raises(BrokerCapError):
+        await ask(client, "listing_guard")
+    assert len(fake.submitted) == 2 and len(accounted) == 1
+
+
+async def test_valid_pinned_answer_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeBroker()
+    client, accounted = make(fake, settings(), monkeypatch)
+    with structlog.testing.capture_logs() as logs:
+        await ask(client, "listing_guard")
+    assert len(fake.submitted) == 1 and len(accounted) == 1
+    assert not [e for e in logs if e["event"] == "broker.pinned_model_invalid"]
+
+
+async def test_invalid_answer_without_pin_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeBroker(pinned_text="junk", unpinned_text="junk")
+    client, _ = make(fake, settings(broker_model_guard=""), monkeypatch)
+    with pytest.raises(BrokerOutputError):
+        await ask(client, "listing_guard")
+    assert len(fake.submitted) == 1
 
 
 def test_pinned_model_resolution() -> None:
