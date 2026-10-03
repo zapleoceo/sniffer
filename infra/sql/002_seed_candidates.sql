@@ -11,8 +11,12 @@
 -- неоткуда. Парсить сам docs/chats-nha-trang.md в рантайме нельзя: проза
 -- станет зависимостью кода и сломается на первой же правке таблицы.
 --
--- Идемпотентен: ON CONFLICT DO NOTHING. Повторный прогон на живой базе
--- ничего не сдвинет — ни уже разобранных кандидатов, ни отклонённых.
+-- Идемпотентен, и это не ON CONFLICT: он сверяет ключ только с ОЧЕРЕДЬЮ, а
+-- разобранного кандидата из неё удаляют (вступили — чат в `chats`, отказали —
+-- строка в `chat_rejects`). Деплой гонит этот файл на каждом запуске, и сид на
+-- голом ON CONFLICT возвращал бы вступивших и отклонённых в очередь заново,
+-- обнуляя им лимит попыток (CLAUDE.md, «Работа с Telegram»). Поэтому строка
+-- попадает в очередь, только если её нет ни среди чатов, ни среди отклонённых.
 --
 -- Порядок из документа сохранён приоритетом: волна 1 (байки и общая
 -- барахолка) 10..16, чат владельца 17, волна 2 (жильё) 20..28, волна 3 (общие
@@ -20,7 +24,9 @@
 -- Очередь разбирается по десять чатов в скользящие сутки, то есть полностью — за четыре
 -- дней, и порядок решает, что появится в выдаче на первой неделе.
 
-INSERT INTO chat_candidates (key, username, found_in, priority) VALUES
+INSERT INTO chat_candidates (key, username, found_in, priority)
+SELECT v.key, v.username, v.found_in, v.priority
+FROM (VALUES
     ('@auto_moto_vietnam', 'auto_moto_vietnam', 'seed:wave1', 10),
     ('@nyachang_uslugi', 'nyachang_uslugi', 'seed:wave1', 11),
     ('@nha_trang_kupi_proday', 'Nha_Trang_kupi_proday', 'seed:wave1', 12),
@@ -60,6 +66,9 @@ INSERT INTO chat_candidates (key, username, found_in, priority) VALUES
     ('@chat_nyachang2', 'chat_nyachang2', 'seed:wave3', 46),
     ('@ads_nhatrang', 'ads_nhatrang', 'seed:wave3', 47),
     ('@sales_vietnam', 'sales_vietnam', 'seed:wave3', 48)
+) AS v (key, username, found_in, priority)
+WHERE NOT EXISTS (SELECT 1 FROM chats c WHERE lower(c.username) = lower(v.username))
+  AND NOT EXISTS (SELECT 1 FROM chat_rejects r WHERE r.key = v.key)
 ON CONFLICT (key) DO NOTHING;
 
 -- Дананг и общевьетнамские чаты из того же документа. Пишем их сразу в
