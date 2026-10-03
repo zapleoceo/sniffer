@@ -205,3 +205,50 @@ async def test_an_interrupt_inside_a_thread_send_still_propagates(interrupt: typ
     delivery, _ = build([row(1, 10)], tabs, wire)
     with pytest.raises((KeyboardInterrupt, BaseExceptionGroup)):
         await delivery.tick()
+
+
+async def test_a_lost_link_survives_a_pause_that_comes_right_after_the_fallback() -> None:
+    """Тема исчезла, а повтор без темы упёрся во флуд-лимит: связь `lost` обязана лечь в базу.
+
+    Раньше ветка паузы возвращалась без коммита, сессия закрывалась откатом, и следующий проход
+    снова искал исчезнувшую тему.
+    """
+    from aiogram.exceptions import TelegramRetryAfter
+
+    gone = TelegramBadRequest(SendMessage(chat_id=1, text="x"), GONE)
+    wire = Wire(thread_error=gone)
+    tabs = FakeTabs({10: 555})
+    persisted: list[int] = []
+    pending: list[int] = []
+
+    async def mark_lost(subscription_id: int) -> bool:
+        pending.append(subscription_id)
+        return True
+
+    tabs.mark_lost = mark_lost  # type: ignore[method-assign]
+
+    async def plain(user_id: int, text: str) -> None:
+        raise TelegramRetryAfter(SendMessage(chat_id=1, text="x"), "Too Many Requests", 30)
+
+    store = Store([row(1, 10)])
+
+    @asynccontextmanager
+    async def scope() -> AsyncIterator[Work]:
+        unit = Txn(store)
+
+        async def commit() -> None:
+            persisted.extend(pending)
+            pending.clear()
+            await unit.commit()
+
+        try:
+            yield Work(queue=unit, users=unit, commit=commit, tabs=tabs)
+        finally:
+            unit.close()
+
+    delivery = Delivery(plain, send_in_thread=wire.in_thread, clock=Clock(), scope=scope, pause_s=0)
+
+    await delivery.tick()
+
+    assert persisted == [10]
+    assert store.row(1).status != "sent"

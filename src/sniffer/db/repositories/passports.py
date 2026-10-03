@@ -90,7 +90,9 @@ class PassportRepository(Repository):
         )
         return to_stored_passport(row) if row is not None else None
 
-    async def select(self, user_id: int, root: int, *, editing: bool = False) -> bool:
+    async def select(
+        self, user_id: int, root: int, *, editing: bool = False, move_pointer: bool = True
+    ) -> bool:
         """Выбрать свою цепочку; чужой root не меняет состояние.
 
         Выбор ветки снимает и взведённое `/new`: человек сказал, с какой веткой
@@ -99,6 +101,9 @@ class PassportRepository(Repository):
         веткой — выбор, создание (`save_new`) и правка (`save_revision`). Снимай
         флаг у вызывающих — один из них забудут, и `/new` остался бы взведённым
         навсегда. Здесь же ветка поднимается в списке (`last_used_at`).
+
+        `move_pointer=False` — действие в теме Telegram: тема ведёт свой поиск сама, и правка
+        поиска в ней не должна переключать «текущий» поиск общего чата.
         """
         chain = func.coalesce(models.Passport.root_id, models.Passport.id)
         owned = await self._session.scalar(
@@ -108,14 +113,14 @@ class PassportRepository(Repository):
         )
         if owned is None:
             return False
+        values: dict[str, int | bool | None] = {
+            "editing_passport_root": root if editing else None,
+            "awaiting_new_request": False,
+        }
+        if move_pointer:
+            values["active_passport_root"] = root
         await self._session.execute(
-            update(models.User)
-            .where(models.User.id == user_id)
-            .values(
-                active_passport_root=root,
-                editing_passport_root=root if editing else None,
-                awaiting_new_request=False,
-            )
+            update(models.User).where(models.User.id == user_id).values(**values)
         )
         # Использование поднимает поиск в списке — по этому и работает обещание
         # «выбор возвращает поиск в список». `clock_timestamp`, а не `now`: `now`
@@ -198,15 +203,19 @@ class PassportRepository(Repository):
         row = found.first()
         return None if row is None else _overview(*row)
 
-    async def save_new(self, user_id: int, passport: Passport) -> StoredPassport:
+    async def save_new(
+        self, user_id: int, passport: Passport, *, move_pointer: bool = True
+    ) -> StoredPassport:
         """Первая версия цепочки: `root_id` пустой, корнем служит свой же id."""
         row = models.Passport(user_id=user_id, version=1, root_id=None, **passport_values(passport))
         self._session.add(row)
         await self._session.flush()
-        await self.select(user_id, row.id)
+        await self.select(user_id, row.id, move_pointer=move_pointer)
         return to_stored_passport(row)
 
-    async def save_revision(self, previous: StoredPassport, passport: Passport) -> StoredPassport:
+    async def save_revision(
+        self, previous: StoredPassport, passport: Passport, *, move_pointer: bool = True
+    ) -> StoredPassport:
         """Следующая версия того же запроса.
 
         Прежние версии цепочки снимаются с `is_current` до вставки новой:
@@ -244,7 +253,7 @@ class PassportRepository(Repository):
         )
         self._session.add(row)
         await self._session.flush()
-        await self.select(previous.user_id, root)
+        await self.select(previous.user_id, root, move_pointer=move_pointer)
         return to_stored_passport(row)
 
     async def list_versions(self, root: int) -> list[StoredPassport]:

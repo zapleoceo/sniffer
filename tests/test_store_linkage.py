@@ -109,7 +109,9 @@ def _storage(
             trace.calls.append(f"consume:{user_id}")
             return consumable
 
-        async def save_new(self, user_id: int, passport: Passport) -> StoredPassport:
+        async def save_new(
+            self, user_id: int, passport: Passport, *, move_pointer: bool = True
+        ) -> StoredPassport:
             if broken_insert:
                 raise RuntimeError("база отвалилась на вставке")
             trace.calls.append(f"save_new:{user_id}")

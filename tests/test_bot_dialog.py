@@ -17,7 +17,7 @@ import pytest
 from aiogram.types import Message
 
 from sniffer.bot import app as bot_app
-from sniffer.bot import journal, query_menu, threads
+from sniffer.bot import journal, query_menu, threads, watch_flow
 from sniffer.bot.conversation import Conversation, Found, Reply
 from sniffer.bot.handlers import search as handler
 from sniffer.bot.keyboards import (
@@ -983,6 +983,11 @@ async def test_request_menu_handler_covers_the_whole_navigation(
     monkeypatch.setattr(query_menu, "select", select)
     monkeypatch.setattr(query_menu, "toggle", toggle)
     monkeypatch.setattr(handler, "conversation", lambda: Talker())
+
+    async def room(_client: Client) -> tuple[bool, None]:
+        return True, None
+
+    monkeypatch.setattr(watch_flow, "can_open_new", room)
     message = FakeMessage("", from_user=FakeUser())
     callback = cast(Any, FakeCallback(message))
 

@@ -20,7 +20,7 @@ from aiogram import Bot
 from aiogram.filters import Command
 from aiogram.types import Chat, Message, User
 
-from sniffer.bot import billing_wording, keyboards, query_menu, threads
+from sniffer.bot import billing_wording, keyboards, query_menu, threads, watch_flow
 from sniffer.bot.handlers import search as handler
 from sniffer.bot.keyboards import RequestsCallback, requests_markup
 from sniffer.bot.store import Client
@@ -77,6 +77,11 @@ async def _run_new(
 
     monkeypatch.setattr(Message, "answer", answer)
     monkeypatch.setattr(handler, "conversation", lambda: Talker())
+
+    async def room(_client: Client) -> tuple[bool, None]:
+        return True, None  # предел поисков здесь не предмет: он проверен в test_search_limit
+
+    monkeypatch.setattr(watch_flow, "can_open_new", room)
     message = _command_message(text=text, caption=caption)
     parsed = await Command("new")(message, bot=cast(Bot, None))
     assert isinstance(parsed, dict), "фильтр aiogram не принял команду"

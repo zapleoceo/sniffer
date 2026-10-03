@@ -171,8 +171,8 @@ async def test_a_real_bad_request_is_not_swallowed(
 async def test_a_new_search_over_the_limit_is_refused_with_the_numbers(
     wire: Wire, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    items = [QueryOverview(root=i, passport=PASSPORT) for i in range(5)]
-    full = panel.PanelView(items, paid_slots=0, bound_slots=0, used=5, cap=5)
+    items = [QueryOverview(root=1, passport=PASSPORT)]
+    full = panel.PanelView(items, paid_slots=0, bound_slots=0, used=1, cap=1)
 
     async def can_open_new(client: Any) -> tuple[bool, panel.PanelView]:
         return False, full
@@ -181,7 +181,7 @@ async def test_a_new_search_over_the_limit_is_refused_with_the_numbers(
     data = panel.WatchCallback(a=panel.NEW)
     await handlers.on_watch(callback(data.pack()), data)
 
-    assert "5 из 5" in wire.answered[-1]
+    assert wire.answered[-1].startswith("У вас уже 1 поиск — поставьте на паузу или удалите один")
     assert "до 10" in wire.answered[-1]  # бесплатному говорим, что платный предел выше
 
 
@@ -196,4 +196,5 @@ async def test_a_paid_account_over_the_limit_is_not_pitched_a_subscription(
     monkeypatch.setattr(watch_flow, "can_open_new", can_open_new)
     data = panel.WatchCallback(a=panel.NEW)
     await handlers.on_watch(callback(data.pack()), data)
-    assert "10 из 10" in wire.answered[-1] and "подписку" not in wire.answered[-1]
+    assert wire.answered[-1].startswith("У вас уже 10 поисков")
+    assert "подписку" not in wire.answered[-1]
