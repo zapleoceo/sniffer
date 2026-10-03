@@ -56,6 +56,24 @@ def test_the_senior_monitor_gets_the_longest_term() -> None:
     assert assign_expiry(ends, [second, first], NOW) == {1: ends[0], 2: ends[1]}
 
 
+def test_the_order_of_claims_is_priority_first_and_the_id_only_breaks_ties() -> None:
+    """Перенос слота — смена `priority`, а не `id`: у более нового мониторинга порядок выше."""
+    old_but_junior = monitor(1, priority=5, expires=NOW)
+    new_but_senior = monitor(2, priority=0, expires=NOW)
+    ends = [NOW + 30 * DAY, NOW + 5 * DAY]
+
+    changes = assign_expiry(ends, [old_but_junior, new_but_senior], NOW)
+
+    assert changes == {2: ends[0], 1: ends[1]}
+
+
+def test_equal_priorities_fall_back_to_the_older_monitor_first() -> None:
+    first, second = monitor(1, priority=0, expires=NOW), monitor(2, priority=0, expires=NOW)
+    ends = [NOW + 30 * DAY, NOW + 5 * DAY]
+
+    assert assign_expiry(ends, [second, first], NOW) == {1: ends[0], 2: ends[1]}
+
+
 def test_a_monitor_without_a_term_is_left_without_a_slot_and_nothing_is_deleted() -> None:
     held = monitor(1, expires=NOW + 5 * DAY)
     waiting = monitor(2, priority=1, expires=NOW + 5 * DAY)
