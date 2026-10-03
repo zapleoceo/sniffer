@@ -408,6 +408,10 @@ if [ -n "${PG_CID:-}" ]; then
   require_column listings source               # миграция единого каталога, 02.09.2026
   require_column users awaiting_new_request    # `/new`: следующее сообщение открывает поиск
   require_column passports last_used_at        # порядок списка поисков: выбор возвращает поиск
+  require_column users quota_anchor_at         # 010_quota_ledger: якорь периода, он же часовой того, что файл доехал
+  require_column users paywall_offered_at      # не чаще раза в сутки предлагаем подписку
+  require_column client_requests shown_count   # сколько карточек показано по запросу
+  require_column client_requests withheld_count # сколько удержано лимитом квоты
   # Часовой ПОСЛЕДНЕЙ миграции в цепочке. Цикл выше применяет их по порядку и
   # падает на ошибке, но это доказывает только то, что psql не вернул ошибку на
   # ЗАПУЩЕННОМ файле: новый файл, не попавший в `git pull`, не запустится вовсе

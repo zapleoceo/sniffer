@@ -52,6 +52,11 @@ class User(BigIdMixin, Base):
     awaiting_new_request: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=FALSE
     )
+    # Якорь квоты: момент первого списания. Ставится один раз (010_quota_ledger.sql);
+    # после появления периодов его держит составной внешний ключ.
+    quota_anchor_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Когда человеку в последний раз предложили подписку: не чаще раза в сутки.
+    paywall_offered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Passport(BigIdMixin, Base):

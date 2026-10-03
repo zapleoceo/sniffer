@@ -251,7 +251,10 @@ CREATE TABLE IF NOT EXISTS users (
     is_blocked  BOOLEAN     NOT NULL DEFAULT FALSE,
     active_passport_root  BIGINT,
     editing_passport_root BIGINT,
-    awaiting_new_request  BOOLEAN NOT NULL DEFAULT FALSE
+    awaiting_new_request  BOOLEAN NOT NULL DEFAULT FALSE,
+    -- Якорь квоты и метка последнего предложения подписки: 010_quota_ledger.sql.
+    quota_anchor_at       TIMESTAMPTZ,
+    paywall_offered_at    TIMESTAMPTZ
 );
 
 ALTER TABLE users ADD COLUMN IF NOT EXISTS active_passport_root BIGINT;
@@ -475,7 +478,10 @@ CREATE TABLE IF NOT EXISTS client_requests (
     error         TEXT,
     started_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     finished_at   TIMESTAMPTZ,
-    duration_ms   INT
+    duration_ms   INT,
+    -- Показано и удержано лимитом квоты: 010_quota_ledger.sql.
+    shown_count   INT         NOT NULL DEFAULT 0,
+    withheld_count INT        NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS client_requests_user_idx   ON client_requests (user_id, started_at DESC);

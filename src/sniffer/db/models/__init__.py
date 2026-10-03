@@ -30,6 +30,7 @@ from sniffer.db.models.observability import (
     TelegramSession,
 )
 from sniffer.db.models.proposals import proposals
+from sniffer.db.models.quota import OfferView, QuotaPeriod
 from sniffer.db.models.sources import Chat, RawMessage, Seller
 
 __all__ = [
@@ -47,10 +48,12 @@ __all__ = [
     "Listing",
     "ListingMedia",
     "Notification",
+    "OfferView",
     "Outbox",
     "Passport",
     "PassportEvent",
     "Payment",
+    "QuotaPeriod",
     "RawMessage",
     "Seller",
     "Subscription",
