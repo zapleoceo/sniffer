@@ -1132,7 +1132,7 @@ async def test_a_new_listing_reaches_the_subscriber_queue(
     ошибке. До этой ветки звена не существовало: `listings` копились, а
     `outbox` не наполнял никто.
     """
-    from sniffer.worker import matcher as module
+    from sniffer.worker import monitor as module
 
     passport = Passport(
         intent=Intent.BUY, category=Category.MOTORBIKE, city="nha_trang", raw_query="ищу скутер"
@@ -1154,7 +1154,7 @@ async def test_a_new_listing_reaches_the_subscriber_queue(
     await db_session.commit()
 
     monkeypatch.setattr(module, "session_scope", lambda: _borrowed(db_session))
-    queued = await module.Matcher().tick(now=NOW)
+    queued = await module.MonitorAgent().tick(now=NOW)
 
     assert queued == 1
     repo = DeliveryRepository(db_session)
@@ -1166,14 +1166,14 @@ async def test_a_new_listing_reaches_the_subscriber_queue(
     assert await repo.used_since(sub_id, since=NOW.replace(hour=0)) == 1
 
     # Второй проход не шлёт то же самое второй раз.
-    assert await module.Matcher().tick(now=NOW) == 0
+    assert await module.MonitorAgent().tick(now=NOW) == 0
 
 
 async def test_a_listing_from_another_city_is_not_sent(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Дананговская карточка нячангскому подписчику — это спам, а не находка."""
-    from sniffer.worker import matcher as module
+    from sniffer.worker import monitor as module
 
     passport = Passport(intent=Intent.BUY, category=Category.MOTORBIKE, city="nha_trang")
     await _subscriber(db_session, passport)
@@ -1194,14 +1194,14 @@ async def test_a_listing_from_another_city_is_not_sent(
 
     monkeypatch.setattr(module, "session_scope", lambda: _borrowed(db_session))
 
-    assert await module.Matcher().tick(now=NOW) == 0
+    assert await module.MonitorAgent().tick(now=NOW) == 0
 
 
 async def test_matcher_advances_past_a_rejected_page(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Неподходящая первая страница не должна навсегда закрывать следующую."""
-    from sniffer.worker import matcher as module
+    from sniffer.worker import monitor as module
 
     passport = Passport(
         intent=Intent.BUY,
@@ -1233,11 +1233,11 @@ async def test_matcher_advances_past_a_rejected_page(
     monkeypatch.setattr(module, "session_scope", lambda: _borrowed(db_session))
     monkeypatch.setattr(module, "LISTINGS_PER_SUBSCRIPTION", 1)
 
-    assert await module.Matcher().tick(now=NOW) == 0
+    assert await module.MonitorAgent().tick(now=NOW) == 0
     state = (await _live(db_session, now=NOW))[0]
     assert state.scan_listing_id > state.since_listing_id
     await db_session.commit()
-    assert await module.Matcher().tick(now=NOW) == 1
+    assert await module.MonitorAgent().tick(now=NOW) == 1
 
 
 async def test_live_listing_is_idempotent_and_searchable_from_the_catalog(
@@ -1480,7 +1480,7 @@ async def test_a_subscription_only_gets_listings_newer_than_itself(
     запас разом — включая ровно те объявления, за отсутствие интереса к которым
     он и заплатил.
     """
-    from sniffer.worker import matcher as module
+    from sniffer.worker import monitor as module
 
     passport = Passport(intent=Intent.BUY, category=Category.MOTORBIKE, city="nha_trang")
     user = await UserRepository(db_session).get_or_create(782)
@@ -1503,7 +1503,7 @@ async def test_a_subscription_only_gets_listings_newer_than_itself(
     assert fresh.id is not None
 
     monkeypatch.setattr(module, "session_scope", lambda: _borrowed(db_session))
-    assert await module.Matcher().tick(now=NOW) == 1
+    assert await module.MonitorAgent().tick(now=NOW) == 1
 
     (message,) = await DeliveryRepository(db_session).take_pending(now=NOW)
     assert message.payload["title"] == "Появилось после подписки"

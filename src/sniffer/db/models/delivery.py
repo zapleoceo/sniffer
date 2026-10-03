@@ -32,7 +32,7 @@ class Subscription(BigIdMixin, Base):
     passport_root: Mapped[int] = mapped_column(BigInteger, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=TRUE)
     mode: Mapped[str] = mapped_column(Text, nullable=False, server_default=sa_text("'instant'"))
-    max_per_day: Mapped[int] = mapped_column(Integer, nullable=False, server_default=sa_text("5"))
+    max_per_day: Mapped[int] = mapped_column(Integer, nullable=False, server_default=sa_text("10"))
     quiet_from: Mapped[time | None] = mapped_column(Time)
     quiet_to: Mapped[time | None] = mapped_column(Time)
     sent_today: Mapped[int] = mapped_column(Integer, nullable=False, server_default=ZERO)
@@ -50,6 +50,13 @@ class Subscription(BigIdMixin, Base):
     failed_streak: Mapped[int] = mapped_column(Integer, nullable=False, server_default=ZERO)
     last_error: Mapped[str | None] = mapped_column(Text)
     quarantined_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Монитор по слоту (015_monitor_agent.sql): сводка «ещё N» сверх суточного потолка и
+    # пауза без права. Состояние «ничего не было» — ноль, ложь и пусто.
+    suppressed_total: Mapped[int] = mapped_column(Integer, nullable=False, server_default=ZERO)
+    overflow_day: Mapped[date | None] = mapped_column(Date)
+    overflow_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=ZERO)
+    overflow_notified: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=FALSE)
+    no_slot_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     day_bucket: Mapped[date | None] = mapped_column(Date)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=NOW

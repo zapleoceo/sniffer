@@ -176,6 +176,10 @@ def to_subscription_state(row: models.Subscription, passport: models.Passport) -
         scan_listing_id=row.scan_listing_id,
         expires_at=row.expires_at,
         failed_streak=row.failed_streak,
+        overflow_day=row.overflow_day,
+        overflow_count=row.overflow_count,
+        overflow_notified=row.overflow_notified,
+        no_slot_since=row.no_slot_since,
         passport=to_stored_passport(passport),
     )
 

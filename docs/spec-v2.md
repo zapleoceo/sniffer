@@ -1316,6 +1316,7 @@ users            quota_anchor_at, paywall_offered_at       -- 010_quota_ledger.s
 quota_periods    user_id, period_no, period_start, period_end -- период квоты, границы по формуле
 offer_views      period_id, listing_id, channel, delivered_at  -- журнал показов
 payments         provider, amount, currency, status, external_id, created_at
+subscriptions    overflow_day, overflow_count, no_slot_since    -- 015_monitor_agent.sql (слот слежения)
 ```
 
 **Провайдер — Telegram Stars** (владелец, 31.08.2026). Не требует юрлица,

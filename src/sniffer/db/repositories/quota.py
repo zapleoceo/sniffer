@@ -284,6 +284,31 @@ class QuotaRepository(Repository):
         )
         return Usage(used=int(used or 0), period_end=period.end)
 
+    async def seen(self, user_id: int, listing_ids: Sequence[int], now: datetime) -> set[int]:
+        """Какие из карточек этому клиенту уже показаны в текущем периоде. Только чтение.
+
+        Нужен слежению ДО выбора под суточный потолок: карточка, которую клиент уже видел в
+        диалоге или получил от другого слота, не должна занимать место в потолке и приходить
+        второй раз. Анкера нет — периода нет, и «уже показано» пусто.
+        """
+        ids = unique(listing_ids)
+        anchor = await self._session.scalar(
+            select(models.User.quota_anchor_at).where(models.User.id == user_id)
+        )
+        if anchor is None or not ids:
+            return set()
+        number, _ = numbered_period(anchor, now)
+        rows = await self._session.scalars(
+            select(models.OfferView.listing_id)
+            .join(models.QuotaPeriod, models.QuotaPeriod.id == models.OfferView.period_id)
+            .where(
+                models.QuotaPeriod.user_id == user_id,
+                models.QuotaPeriod.period_no == number,
+                models.OfferView.listing_id.in_(ids),
+            )
+        )
+        return set(rows)
+
     async def identify(self, refs: Sequence[tuple[str, str]]) -> dict[tuple[str, str], int]:
         """Карточки по паре «источник, внешний id» — так лот называет сам источник.
 

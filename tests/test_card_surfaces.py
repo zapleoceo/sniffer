@@ -8,7 +8,7 @@ from sniffer.agent_app.followup import _item as deferred_item
 from sniffer.domain.records import Listing
 from sniffer.notifier.delivery import render
 from sniffer.sources.base import RawItem
-from sniffer.worker.matcher import _payload as monitor_payload
+from sniffer.worker.monitor_queue import payload as monitor_payload
 
 NOW = datetime(2026, 10, 4, 12, tzinfo=UTC)
 ATTRIBUTES = {"brand": "honda", "model": "lead", "engine_cc": 110, "year": 2008}

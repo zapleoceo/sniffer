@@ -593,7 +593,10 @@ push master
    заблокировал бота, миграция `014_notifier_safety.sql`) и `outbox.last_error`
    (причина отмены или отказа строки очереди), `users.quota_anchor_at` — файл
    журнала показов `010` — и три колонки рядом с ней, а также таблицы
-   `quota_periods` и `offer_views`, а оплату звёздами — семь колонок `payments`
+   `quota_periods` и `offer_views`, пять колонок монитора по слотам в `subscriptions`
+   (`015_monitor_agent.sql`: `suppressed_total`, `overflow_day`, `overflow_count`,
+   `overflow_notified`, `no_slot_since`; тот же файл меняет умолчание `max_per_day` на 10),
+   а оплату звёздами — семь колонок `payments`
    из `011_stars_billing.sql` (`tg_user_id`, `invoice_payload`, `kind`,
    `is_first_recurring`, `period_end`, `refunded_at`, `raw`): без них первый платёж не
    запишется, а звёзды уже сняты. Часовой нужен

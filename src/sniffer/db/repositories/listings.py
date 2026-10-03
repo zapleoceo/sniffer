@@ -106,40 +106,52 @@ class ListingRepository(Repository):
         return result.scalar_one_or_none() is not None
 
     async def match(
-        self, spec: MatchFilter, *, after_id: int = 0, limit: int = 50
+        self,
+        spec: MatchFilter,
+        *,
+        after_id: int = 0,
+        before_id: int | None = None,
+        limit: int = 50,
     ) -> list[Listing]:
-        """Карточки под условия подписки, начиная с `after_id`.
+        """Карточки под условия подписки, начиная с `after_id` и строго до `before_id`.
 
         Курсор по `id`, а не по времени: воркер идёт по подпискам и обязан
         двигаться вперёд ровно один раз по каждой карточке. По времени это не
         получается — две карточки одной секунды либо повторятся, либо
         потеряются, смотря какое сравнение выбрать.
 
-        Индекс `listings_match_idx` покрывает `city, category, deal_type,
-        is_active, posted_at DESC` — условия ниже подобраны под него.
+        Условия те же, что у `search_catalog` (`_filtered`): свойства паспорта отбираются
+        здесь же, как у диалога, — иначе слежение и поиск спорили бы о критериях (D3).
         """
-        statement = select(models.Listing).where(
-            models.Listing.id > after_id,
-            models.Listing.city == spec.city,
-            models.Listing.is_active.is_(True),
-        )
-        if spec.category is not None:
-            statement = statement.where(models.Listing.category == spec.category)
-        if spec.deal_type is not None:
-            statement = statement.where(models.Listing.deal_type == spec.deal_type)
-        if spec.since is not None:
-            statement = statement.where(models.Listing.posted_at >= spec.since)
-        if spec.max_price_vnd is not None:
-            # Карточку без цены не отбрасываем: минимальная карточка её ещё не
-            # извлекает, и «цены нет» не значит «дорого». Решает потом score.
-            statement = statement.where(
-                or_(
-                    models.Listing.price_amount.is_(None),
-                    models.Listing.price_amount <= spec.max_price_vnd,
-                )
-            )
+        statement = _filtered(spec).where(models.Listing.id > after_id)
+        if before_id is not None:
+            statement = statement.where(models.Listing.id < before_id)
         rows = await self._session.scalars(statement.order_by(models.Listing.id).limit(limit))
         return [to_listing(row) for row in rows]
+
+    async def first_unready_id(
+        self, spec: MatchFilter, *, after_id: int, verdict_before: datetime
+    ) -> int | None:
+        """Наименьший `id` подходящей по условиям карточки, которой ещё нельзя доверять.
+
+        Доверять можно карточке, о которой модель-проверяющая уже высказалась
+        (`screened_at`), которую она не читает вовсе (не из архива Telegram), либо которая
+        ждёт вердикта дольше срока: ИИ-проверка гасит ~16% новых карточек Telegram, и
+        слежение, не дожидаясь её, слало бы клиенту «обмен валют» (D9). Курсор встанет
+        перед такой карточкой и вернётся к ней, когда вердикт появится или срок выйдет.
+        """
+        listing = models.Listing
+        unready = and_(
+            listing.screened_at.is_(None),
+            listing.source == "telegram_archive",
+            listing.extracted_at > verdict_before,
+        )
+        found = await self._session.scalar(
+            _filtered(spec)
+            .with_only_columns(func.min(listing.id))
+            .where(listing.id > after_id, unready)
+        )
+        return int(found) if found is not None else None
 
     async def search_catalog(self, spec: MatchFilter, *, limit: int = 100) -> list[Listing]:
         """Свежая страница собственного каталога для разового поиска.
@@ -150,28 +162,10 @@ class ListingRepository(Repository):
         (`search/relevance.py`): известное свойство обязано совпасть,
         неизвестное — не мешает, модель требует положительного совпадения.
         """
-        statement = select(models.Listing).where(
-            models.Listing.city == spec.city,
-            models.Listing.is_active.is_(True),
-        )
-        if spec.category is not None:
-            statement = statement.where(models.Listing.category == spec.category)
-        if spec.deal_type is not None:
-            statement = statement.where(models.Listing.deal_type == spec.deal_type)
-        if spec.since is not None:
-            statement = statement.where(models.Listing.posted_at >= spec.since)
-        if spec.max_price_vnd is not None:
-            statement = statement.where(
-                or_(
-                    models.Listing.price_amount.is_(None),
-                    models.Listing.price_amount <= spec.max_price_vnd,
-                )
-            )
-        statement = _with_attributes(statement, spec)
         rows = await self._session.scalars(
-            statement.order_by(models.Listing.posted_at.desc(), models.Listing.id.desc()).limit(
-                limit
-            )
+            _filtered(spec)
+            .order_by(models.Listing.posted_at.desc(), models.Listing.id.desc())
+            .limit(limit)
         )
         return [to_listing(row) for row in rows]
 
@@ -356,6 +350,34 @@ class ListingRepository(Repository):
         await self._session.execute(
             update(models.Listing).where(models.Listing.id == listing_id).values(is_active=False)
         )
+
+
+def _filtered(spec: MatchFilter) -> Select[Any]:
+    """Условия отбора карточек по `MatchFilter` — одни для слежения и для разового поиска.
+
+    Индекс `listings_match_idx` покрывает `city, category, deal_type, is_active,
+    posted_at DESC` — условия подобраны под него.
+    """
+    statement = select(models.Listing).where(
+        models.Listing.city == spec.city,
+        models.Listing.is_active.is_(True),
+    )
+    if spec.category is not None:
+        statement = statement.where(models.Listing.category == spec.category)
+    if spec.deal_type is not None:
+        statement = statement.where(models.Listing.deal_type == spec.deal_type)
+    if spec.since is not None:
+        statement = statement.where(models.Listing.posted_at >= spec.since)
+    if spec.max_price_vnd is not None:
+        # Карточку без цены не отбрасываем: минимальная карточка её ещё не
+        # извлекает, и «цены нет» не значит «дорого». Решает потом score.
+        statement = statement.where(
+            or_(
+                models.Listing.price_amount.is_(None),
+                models.Listing.price_amount <= spec.max_price_vnd,
+            )
+        )
+    return _with_attributes(statement, spec)
 
 
 def _with_attributes(statement: Select[Any], spec: MatchFilter) -> Select[Any]:

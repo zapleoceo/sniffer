@@ -166,6 +166,11 @@ subscriptions     last_scanned_at        # монитор: ротация обх
 subscriptions     failed_streak          # монитор, карантин: сколько проходов подряд падала
 subscriptions     last_error             # монитор, карантин: чем
 subscriptions     quarantined_until      # монитор, карантин: до какого времени не трогать
+subscriptions     suppressed_total       # 015: сколько карточек отбросил суточный потолок слота
+subscriptions     overflow_day           # 015: сутки, к которым относится счёт «ещё N»
+subscriptions     overflow_count         # 015: сколько подошло сверх потолка в эти сутки
+subscriptions     overflow_notified      # 015: сводку «ещё N» за эти сутки уже поставили
+subscriptions     no_slot_since          # 015: с какого момента слот без права (пауза no_slot)
 users             bot_blocked_at         # клиент заблокировал бота: нотифаер не шлёт, матчер не ставит в очередь
 outbox            last_error             # причина отмены или отказа строки очереди
 users             quota_anchor_at        # 010_quota_ledger: якорь периода, он же часовой того, что файл доехал

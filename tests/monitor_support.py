@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from sniffer.db.repositories.monitors import BrokenSubscription, DueSubscriptions
+from sniffer.domain.monitoring import Overflow
 from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
 from sniffer.domain.records import Listing, MatchFilter, StoredPassport, SubscriptionState
 
@@ -150,6 +151,26 @@ class FakeMonitors:
     touched: list[int] = field(default_factory=list)
     scanned: list[int] = field(default_factory=list)
     quarantined: list[dict[str, Any]] = field(default_factory=list)
+    # Слоты клиентов в порядке приоритета; не заданы — все подписки порции в порядке id.
+    ranks: dict[int, list[int]] | None = None
+    no_slot: dict[int, datetime | None] = field(default_factory=dict)
+    overflow: list[tuple[int, Overflow, int]] = field(default_factory=list)
+
+    async def ranked_slots(self, user_ids: Any, *, now: datetime) -> dict[int, list[int]]:
+        if self.ranks is not None:
+            return {user: list(self.ranks.get(user, [])) for user in user_ids}
+        ranked: dict[int, list[int]] = {}
+        for subscription in sorted(self.ready, key=lambda item: item.id):
+            ranked.setdefault(subscription.user_id, []).append(subscription.id)
+        return ranked
+
+    async def set_no_slot_since(self, subscription_id: int, since: datetime | None) -> None:
+        self.no_slot[subscription_id] = since
+
+    async def record_overflow(
+        self, subscription_id: int, overflow: Overflow, *, extra: int
+    ) -> None:
+        self.overflow.append((subscription_id, overflow, extra))
 
     async def cancel_lapsed(self, *, now: datetime, grace: timedelta) -> int:
         self.order.append("cancel")
@@ -184,8 +205,19 @@ class FakeDelivery:
     queued: list[dict[str, Any]] = field(default_factory=list)
     advanced: list[tuple[int, int]] = field(default_factory=list)
     used: int = 0
+    used_since_args: list[datetime] = field(default_factory=list)
+    notices: list[dict[str, Any]] = field(default_factory=list)
+    bumped: list[int] = field(default_factory=list)
+
+    async def enqueue_notice(self, **kwargs: Any) -> None:
+        self.notices.append(kwargs)
+
+    async def bump_overflow_notice(self, subscription_id: int, *, count: int) -> int:
+        self.bumped.append(count)
+        return 1
 
     async def used_since(self, subscription_id: int, *, since: datetime) -> int:
+        self.used_since_args.append(since)
         return self.used
 
     async def enqueue(self, **kwargs: Any) -> bool:
@@ -207,14 +239,50 @@ class FakeListings:
     page: list[Listing] = field(default_factory=list)
     asked: list[tuple[MatchFilter, int, int]] = field(default_factory=list)
     explode: dict[str, BaseException] = field(default_factory=dict)
+    # Верхняя граница id в базе (водяной знак) и первая карточка без вердикта ИИ-проверки.
+    head: int = 10**9
+    unready: int | None = None
+    before_ids: list[int | None] = field(default_factory=list)
+
+    async def max_id(self) -> int:
+        return self.head
+
+    async def first_unready_id(
+        self, spec: MatchFilter, *, after_id: int, verdict_before: datetime
+    ) -> int | None:
+        return self.unready
 
     async def match(
-        self, spec: MatchFilter, *, after_id: int = 0, limit: int = 50
+        self,
+        spec: MatchFilter,
+        *,
+        after_id: int = 0,
+        before_id: int | None = None,
+        limit: int = 50,
     ) -> list[Listing]:
         self.asked.append((spec, after_id, limit))
+        self.before_ids.append(before_id)
         if spec.city in self.explode:
             raise self.explode[spec.city]
-        return list(self.page)
+        return [
+            item
+            for item in self.page
+            if (item.id or 0) > after_id and (before_id is None or (item.id or 0) < before_id)
+        ]
+
+
+@dataclass
+class FakeLedger:
+    """Журнал показов без базы: что уже видел клиент и что слежение записало."""
+
+    already: set[int] = field(default_factory=set)
+    claims: list[Any] = field(default_factory=list)
+
+    async def seen(self, user_id: int, listing_ids: Any, now: datetime) -> set[int]:
+        return {i for i in listing_ids if i in self.already}
+
+    async def reserve(self, claim: Any) -> None:
+        self.claims.append(claim)
 
 
 @dataclass
@@ -223,6 +291,7 @@ class World:
     monitors: FakeMonitors
     delivery: FakeDelivery
     listings: FakeListings
+    ledger: FakeLedger
 
 
 def install(
@@ -234,18 +303,20 @@ def install(
     explode: dict[str, BaseException] | None = None,
 ) -> World:
     """Подменить сессию и репозитории матчера; вернуть то, на что можно смотреть."""
-    from sniffer.worker import matcher as module
+    from sniffer.worker import monitor as module
 
     world = World(
         session=FakeSession(),
         monitors=FakeMonitors(ready=list(subscriptions or []), broken=list(broken or [])),
         delivery=FakeDelivery(),
         listings=FakeListings(page=list(page or []), explode=dict(explode or {})),
+        ledger=FakeLedger(),
     )
     monkeypatch.setattr(module, "session_scope", lambda: Scope(world.session))
     monkeypatch.setattr(module, "MonitorRepository", lambda _session: world.monitors)
     monkeypatch.setattr(module, "DeliveryRepository", lambda _session: world.delivery)
     monkeypatch.setattr(module, "ListingRepository", lambda _session: world.listings)
+    monkeypatch.setattr(module, "QuotaRepository", lambda _session: world.ledger)
     return world
 
 

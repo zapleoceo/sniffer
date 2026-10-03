@@ -156,7 +156,7 @@ async def test_the_matcher_judges_the_term_by_the_moment_it_was_given(
     видеть, даже если настоящее время ещё не дошло. Прежний выбор подписок брал часы
     процесса и обслуживал её.
     """
-    from sniffer.worker import matcher as module
+    from sniffer.worker import monitor as module
 
     now = _now()
     moment = now + timedelta(days=3)
@@ -165,11 +165,11 @@ async def test_the_matcher_judges_the_term_by_the_moment_it_was_given(
     await db_session.commit()
     monkeypatch.setattr(module, "session_scope", lambda: _borrowed(db_session))
 
-    assert await module.Matcher().tick(now=moment) == 0, "срок вышел, карточка не уходит"
+    assert await module.MonitorAgent().tick(now=moment) == 0, "срок вышел, карточка не уходит"
 
     # Контроль: данные не виноваты. В момент, когда подписка жива, та же карточка уходит,
     # и время постановки — ровно момент прохода.
-    assert await module.Matcher().tick(now=now) == 1
+    assert await module.MonitorAgent().tick(now=now) == 1
     stamped = await db_session.scalar(select(models.Notification.created_at))
     assert stamped == now
 
@@ -205,7 +205,7 @@ async def test_a_dollar_budget_narrows_the_real_query(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """300 $ при 26 000 ₫/$ — потолок 7,8 млн: дорогая карточка не уходит, дешёвая уходит."""
-    from sniffer.worker import matcher as module
+    from sniffer.worker import monitor as module
 
     now = _now()
     await _slot(db_session, 9010, expires_at=None, passport=_dollars(300))
@@ -218,7 +218,7 @@ async def test_a_dollar_budget_narrows_the_real_query(
     async def rate() -> float | None:
         return 26_000.0
 
-    assert await module.Matcher(rate=rate).tick(now=now) == 1
+    assert await module.MonitorAgent(rate=rate).tick(now=now) == 1
 
     (message,) = await DeliveryRepository(db_session).take_pending(now=now)
     assert message.payload["listing_id"] == cheap.id
@@ -228,7 +228,7 @@ async def test_a_dollar_slot_without_a_rate_keeps_its_cursor_and_catches_up_late
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Без курса подписка ждёт и ничего не теряет: курсор стоит, потом карточка уходит."""
-    from sniffer.worker import matcher as module
+    from sniffer.worker import monitor as module
 
     now = _now()
     _user_id, sub_id = await _slot(db_session, 9011, expires_at=None, passport=_dollars(300))
@@ -242,13 +242,13 @@ async def test_a_dollar_slot_without_a_rate_keeps_its_cursor_and_catches_up_late
     async def up() -> float | None:
         return 26_000.0
 
-    assert await module.Matcher(rate=down).tick(now=now) == 0
+    assert await module.MonitorAgent(rate=down).tick(now=now) == 0
     cursor = await db_session.scalar(
         select(models.Subscription.scan_listing_id).where(models.Subscription.id == sub_id)
     )
     assert cursor == 0, "курсор не двигался: карточка не просмотрена"
 
-    assert await module.Matcher(rate=up).tick(now=now + timedelta(minutes=2)) == 1
+    assert await module.MonitorAgent(rate=up).tick(now=now + timedelta(minutes=2)) == 1
 
 
 # ── обход по кругу (D4) ─────────────────────────────────────────────────────
@@ -268,13 +268,13 @@ async def test_every_subscription_gets_a_turn_when_there_are_more_than_one_batch
 
     Прежний `ORDER BY id LIMIT 50` отдавал каждый проход одни и те же первые строки.
     """
-    from sniffer.worker import matcher as module
+    from sniffer.worker import monitor as module
 
     now = _now()
     ids = {(await _slot(db_session, 9100 + number, expires_at=None))[1] for number in range(5)}
     await db_session.commit()
     monkeypatch.setattr(module, "session_scope", lambda: _borrowed(db_session))
-    matcher = module.Matcher(batch=2)
+    matcher = module.MonitorAgent(batch=2)
 
     seen = []
     for step in range(3):
@@ -289,13 +289,13 @@ async def test_more_than_fifty_subscriptions_are_all_served(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """51-я и дальше подписки не прятались бы вечно: порция по умолчанию — 50 (D4)."""
-    from sniffer.worker import matcher as module
+    from sniffer.worker import monitor as module
 
     now = _now()
     ids = {(await _slot(db_session, 9400 + number, expires_at=None))[1] for number in range(60)}
     await db_session.commit()
     monkeypatch.setattr(module, "session_scope", lambda: _borrowed(db_session))
-    matcher = module.Matcher()
+    matcher = module.MonitorAgent()
 
     await matcher.tick(now=now)
     assert len(await _scanned(db_session)) == 50
@@ -377,7 +377,7 @@ async def test_a_poisoned_passport_quarantines_only_its_own_slot(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Прежде такая строка валила разбор всей пачки и воркер вместе с ней (D5)."""
-    from sniffer.worker import matcher as module
+    from sniffer.worker import monitor as module
 
     now = _now()
     _h, healthy = await _slot(db_session, 9201, expires_at=None)
@@ -387,7 +387,7 @@ async def test_a_poisoned_passport_quarantines_only_its_own_slot(
     await db_session.commit()
     monkeypatch.setattr(module, "session_scope", lambda: _borrowed(db_session))
 
-    assert await module.Matcher().tick(now=now) == 1, "здоровая получила карточку, проход жив"
+    assert await module.MonitorAgent().tick(now=now) == 1, "здоровая получила карточку, проход жив"
 
     streak, error, until = await _failures(db_session, sick)
     assert streak == 1 and until == now + quarantine_delay(1)
@@ -398,7 +398,7 @@ async def test_a_poisoned_passport_quarantines_only_its_own_slot(
 async def test_a_quarantined_slot_comes_back_by_itself_when_its_time_has_come(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from sniffer.worker import matcher as module
+    from sniffer.worker import monitor as module
 
     start = _now()
     _s, sick = await _slot(db_session, 9210, expires_at=None)
@@ -406,21 +406,21 @@ async def test_a_quarantined_slot_comes_back_by_itself_when_its_time_has_come(
     await db_session.commit()
     monkeypatch.setattr(module, "session_scope", lambda: _borrowed(db_session))
 
-    await module.Matcher().tick(now=start)
+    await module.MonitorAgent().tick(now=start)
     assert (await _failures(db_session, sick))[0] == 1
 
-    await module.Matcher().tick(now=start + timedelta(minutes=4))
+    await module.MonitorAgent().tick(now=start + timedelta(minutes=4))
     assert (await _failures(db_session, sick))[0] == 1, "пауза не вышла: подписку не трогали"
 
     second = start + quarantine_delay(1)
-    await module.Matcher().tick(now=second)
+    await module.MonitorAgent().tick(now=second)
     streak, _error, until = await _failures(db_session, sick)
     assert streak == 2, "ровно в срок подписка снова в обходе, и снова падает"
     assert until == second + quarantine_delay(2)
 
     await _poison(db_session, sick, category="motorbike")
     await db_session.commit()
-    await module.Matcher().tick(now=until)
+    await module.MonitorAgent().tick(now=until)
     assert await _failures(db_session, sick) == (0, None, None), "починили — карантин снят"
 
 
@@ -428,7 +428,7 @@ async def test_a_failure_after_the_enqueue_rolls_back_only_that_slots_rows(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """SAVEPOINT откатывает уже поставленную карточку больной подписки, но не соседней."""
-    from sniffer.worker import matcher as module
+    from sniffer.worker import monitor as module
 
     now = _now()
     _h, healthy = await _slot(db_session, 9220, expires_at=None)
@@ -445,7 +445,7 @@ async def test_a_failure_after_the_enqueue_rolls_back_only_that_slots_rows(
 
     monkeypatch.setattr(DeliveryRepository, "advance_scan", flaky)
 
-    assert await module.Matcher().tick(now=now) == 1
+    assert await module.MonitorAgent().tick(now=now) == 1
 
     async def queued_for(sub_id: int) -> tuple[int, int]:
         notes = await db_session.scalar(
@@ -654,7 +654,7 @@ async def test_a_renewal_inside_the_grace_keeps_the_queue(db_session: AsyncSessi
 async def test_the_matcher_cancels_the_lapsed_queue_on_its_pass(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from sniffer.worker import matcher as module
+    from sniffer.worker import monitor as module
 
     expiry = _now()
     user_id, sub_id = await _slot(db_session, 9640, expires_at=expiry)
@@ -671,7 +671,7 @@ async def test_the_matcher_cancels_the_lapsed_queue_on_its_pass(
     )
     await db_session.commit()
     monkeypatch.setattr(module, "session_scope", lambda: _borrowed(db_session))
-    matcher = module.Matcher()
+    matcher = module.MonitorAgent()
 
     await matcher.tick(now=expiry + timedelta(hours=7))
 

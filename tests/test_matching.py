@@ -10,7 +10,7 @@ import pytest
 from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
 from sniffer.domain.records import Listing, StoredPassport, SubscriptionState
 from sniffer.matching import MATCH_MIN_SCORE, filter_for, needs_usd_rate, score, worth_sending
-from sniffer.worker.matcher import _scheduled
+from sniffer.worker.monitor_queue import scheduled as _scheduled
 
 NOW = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
 

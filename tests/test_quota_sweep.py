@@ -88,7 +88,7 @@ async def test_the_worker_loop_runs_the_sweep_and_counts_its_work() -> None:
     """Забытый вызов или потерянное слагаемое молча оставили бы слоты занятыми."""
     from sniffer.worker import __main__ as worker
 
-    steps = {name: Step(index) for index, name in enumerate(["a", "b", "c", "d", "e", "f", "g"], 1)}
+    steps = {name: Step(index) for index, name in enumerate(["a", "b", "c", "d", "e", "f"], 1)}
     sweep = Step(1000)
 
     tick: Any = worker._tick  # шаги — подставные, сигнатура их не знает
