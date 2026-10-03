@@ -14,9 +14,14 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from aiogram.filters.callback_data import CallbackData
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+)
 
-from sniffer.bot import wording_plan
+from sniffer.bot import wording, wording_plan
 from sniffer.bot.conversation import Reply
 from sniffer.bot.paging import MoreOffer, all_label, more_label
 from sniffer.bot.slot_wording import FOLLOW_LABEL
@@ -114,6 +119,17 @@ def without_paging(keyboard: InlineKeyboardMarkup | None) -> InlineKeyboardMarku
         for row in keyboard.inline_keyboard
     ]
     return InlineKeyboardMarkup(inline_keyboard=[row for row in rows if row])
+
+
+def main_menu() -> ReplyKeyboardMarkup:
+    """Постоянная клавиатура под полем ввода. Старые клиенты без неё работают командами."""
+    names = wording.MENU_BUTTONS
+    rows = [names[0:2], names[2:4], names[4:]]
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=name) for name in row] for row in rows],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
 
 
 def markup(reply: Reply) -> InlineKeyboardMarkup | None:

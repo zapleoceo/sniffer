@@ -192,6 +192,7 @@ subscriptions     priority               # 016_stars_slots: порядок пр�
 payments          source                 # 016_stars_slots: апдейт или сверка
 payments          period_end_estimated   # 016_stars_slots: срок посчитан сверкой, а не взят у Telegram
 schema_proposals                         # хвост цепочки на момент введения таблицы (004)
+search_tabs                              # вкладки поиска и архив «Удалить поиск» (017)
 SENTINELS
 }
 

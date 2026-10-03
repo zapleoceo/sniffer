@@ -773,12 +773,15 @@ docker exec sniffer-postgres psql -U sniffer -d sniffer -c "\dt user_consents bi
 | `OWNER_CHAT_ID` | кому уходят возвраты, ошибки записи платежа и обращения `/paysupport`; **пока не задан — подписка не продаётся** (некому отвечать за возвраты, а это требование Telegram) | заполнен |
 | `SALES_ENABLED` | продажа подписки Stars; **выкл по умолчанию**, `OWNER_CHAT_ID` её не включает. Включать только после сценария S13 из `docs/payments-live-check.md` (оплата → слот → слежение, возврат, сверка). Выданные ссылки при выключенном флаге принимаются | `false` |
 | `PAYSUPPORT_REPLY_HOURS` | срок ответа на обращения по оплате в условиях и в ответе клиенту, 1–720 часов | `48` |
+| `TOPICS_ENABLED` | темы Telegram (поиск = тема, нотифаер шлёт в тему поиска); работает только вместе с Threaded mode в @BotFather — бот проверяет `getMe().has_topics_enabled` при старте | `false` |
 | `TELEGRAM_ENV` | `test` — тестовая среда Telegram (`/bot<token>/test/<метод>`) для бота, нотифаера и оповещений коллектора; в бою пусто | `prod` |
 
 Тестовый экземпляр бота (отдельный токен из тестового @BotFather, **отдельная база**,
 `TELEGRAM_ENV=test`) поднимают отдельно от боевого и не на сервере: порядок и сценарии —
-[`payments-live-check.md`](payments-live-check.md). Темы в личных чатах бота в @BotFather
-не включаются: при них Telegram удерживает 15% с каждой покупки звёздами.
+[`payments-live-check.md`](payments-live-check.md). Темы в личных чатах бота (Threaded mode
+в @BotFather) владелец включает сам: решение 03–04.10.2026, комиссию Telegram 15% с покупки
+звёздами при этом принял. Пока режим не включён там и флаг `TOPICS_ENABLED` не стоит, бот работает
+без тем — см. [`search-tabs.md`](search-tabs.md).
 
 #### Диалог-паспорт
 

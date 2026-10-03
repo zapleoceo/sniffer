@@ -13,7 +13,16 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import CallbackQuery, Message
 
-from sniffer.bot import more_cards, paging, query_menu, threads, wording, wording_plan
+from sniffer.bot import (
+    more_cards,
+    paging,
+    query_menu,
+    tab_flow,
+    threads,
+    topics,
+    wording,
+    wording_plan,
+)
 from sniffer.bot import voice as voice_input
 from sniffer.bot.catalog_finder import CatalogFinder
 from sniffer.bot.commands import looks_like_command
@@ -25,6 +34,7 @@ from sniffer.bot.keyboards import (
     PageCallback,
     PlanCallback,
     RequestsCallback,
+    main_menu,
     markup,
     request_actions,
     requests_markup,
@@ -84,7 +94,12 @@ def conversation() -> Conversation:
 
 @router.message(CommandStart())
 async def start(message: Message) -> None:
-    await message.answer(GREETING)
+    await message.answer(GREETING, reply_markup=main_menu())
+
+
+@router.message(Command("help"))
+async def help_command(message: Message) -> None:
+    await message.answer(wording.HELP)
 
 
 @router.message(Command("requests"))
@@ -116,6 +131,7 @@ async def new_request(message: Message, command: CommandObject) -> None:
         await message.answer(threads.ASK_WHAT)
         return
     await conversation().on_text(client, query, _sender(message))
+    await _sync_title(message, client)
 
 
 @router.message(Command("plan"))
@@ -140,6 +156,7 @@ async def search(message: Message) -> None:
         await message.answer(wording_plan.UNKNOWN_COMMAND)
         return
     await conversation().on_text(client, text, _sender(message))
+    await _sync_title(message, client)
 
 
 @router.message(F.voice)
@@ -171,6 +188,7 @@ async def voice(message: Message) -> None:
 
     await message.answer(voice_input.HEARD.format(text=text))
     await conversation().on_text(client, text, _sender(message))
+    await _sync_title(message, client)
 
 
 @router.callback_query(AnswerCallback.filter())
@@ -181,7 +199,7 @@ async def answer(callback: CallbackQuery, callback_data: AnswerCallback) -> None
     if not isinstance(message, Message):
         # Сообщение старше 48 часов Telegram отдаёт недоступным — отвечать не в что.
         return
-    client = Client(callback.from_user.id, callback.from_user.username)
+    client = topics.client_of_callback(callback, message)
     if not await query_menu.select(client, callback_data.root):
         return
     await conversation().on_answer(
@@ -205,7 +223,7 @@ async def feedback(callback: CallbackQuery, callback_data: FeedbackCallback) -> 
         # Кнопка из старой версии бота: молча игнорировать честнее, чем падать.
         log.warning("bot.unknown_feedback", kind=callback_data.kind)
         return
-    client = Client(callback.from_user.id, callback.from_user.username)
+    client = topics.client_of_callback(callback, message)
     if not await query_menu.select(client, callback_data.root):
         return
     await conversation().on_feedback(client, kind, _sender(message))
@@ -215,7 +233,13 @@ def _client(message: Message) -> Client | None:
     if message.from_user is None:
         # Пост от имени канала: паспорт привязывать не к кому.
         return None
-    return Client(message.from_user.id, message.from_user.username)
+    return topics.client_of_message(message)
+
+
+async def _sync_title(message: Message, client: Client) -> None:
+    """В теме имя темы следует за названием поиска; без темы ничего не делает."""
+    if client.thread_id is not None and message.bot is not None:
+        await tab_flow.sync_title(message.bot, client)
 
 
 def _sender(message: Message) -> Send:
@@ -241,7 +265,7 @@ async def manage_request(callback: CallbackQuery, callback_data: RequestsCallbac
     message = callback.message
     if not isinstance(message, Message):
         return
-    client = Client(callback.from_user.id, callback.from_user.username)
+    client = topics.client_of_callback(callback, message)
     action, root = callback_data.action, callback_data.root
     if action == "list":
         await _show_requests(message, client)

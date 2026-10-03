@@ -164,7 +164,9 @@ async def test_the_process_builds_its_delivery_with_the_policy_from_the_environm
     seen: list[Policy | None] = []
 
     class SpyDelivery:
-        def __init__(self, send: object, *, policy: Policy | None = None) -> None:
+        def __init__(
+            self, send: object, *, send_in_thread: object = None, policy: Policy | None = None
+        ) -> None:
             seen.append(policy)
 
         async def tick(self, *, now: object = None) -> int:

@@ -29,7 +29,7 @@ import structlog
 from sniffer.domain.monitoring import OVERFLOW_KIND
 from sniffer.domain.records import OutboxMessage
 from sniffer.notifier.digest import SEPARATOR, header, split
-from sniffer.notifier.outcome import Failure, classify
+from sniffer.notifier.outcome import THREAD_GONE, Failure, classify
 from sniffer.notifier.policy import MAX_ATTEMPTS, Action, Policy, Verdict, decide
 from sniffer.notifier.ports import Scope, Work, work_scope
 
@@ -49,6 +49,14 @@ TITLE_LIMIT = 200
 FACTS_LIMIT = 120
 
 Sender = Callable[[int, str], Awaitable[None]]
+# Отправка в тему личного чата: третьим аргументом `message_thread_id`.
+ThreadSender = Callable[[int, str, int], Awaitable[None]]
+# Приписка к сообщению, ушедшему в General вместо исчезнувшей темы: один раз, потому что
+# связь после этого утрачена и следующие карточки темы уже не ищут.
+LOST_NOTE = (
+    "Вкладка этого поиска недоступна (её удалили?), поэтому пишу сюда. "
+    "Открыть вкладку заново: /watch → поиск → «Вкладка»."
+)
 Clock = Callable[[], datetime]
 
 
@@ -70,6 +78,8 @@ class Unit(NamedTuple):
     messages: list[OutboxMessage]
     part: int = 1
     parts: int = 1
+    thread_id: int | None = None
+    note: str = ""
 
 
 class Delivery:
@@ -79,12 +89,15 @@ class Delivery:
         self,
         send: Sender,
         *,
+        send_in_thread: ThreadSender | None = None,
         pause_s: float = SEND_PAUSE_S,
         clock: Clock = _utcnow,
         scope: Scope = work_scope,
         policy: Policy | None = None,
     ) -> None:
         self._send = send
+        self._send_in_thread = send_in_thread
+        self._lost: set[int] = set()
         self._pause_s = pause_s
         self._clock = clock
         self._scope = scope
@@ -98,6 +111,7 @@ class Delivery:
         if self._paused_until is not None and self._clock() < self._paused_until:
             return 0
         moment = now or self._clock()
+        self._lost.clear()
         async with self._scope() as work:
             # Очередь тех, кто заблокировал бота, отменяется до выборки: её
             # наполняют и те, кто о блокировке не знает (матчер, сборщик ответов).
@@ -108,9 +122,10 @@ class Delivery:
             if expired:
                 log.info("notifier.expired", cancelled=expired)
             pending = await work.queue.take_pending(limit=BATCH, now=moment)
+            threads = await _threads(work, pending)
             await work.commit()
         sent, called = 0, False
-        for unit in _units(pending):
+        for unit in _units(pending, threads):
             if called:
                 # Пауза нужна между обращениями к Bot API. Строка, которую успела
                 # забрать другая копия, к Telegram не ходила, и ждать после неё незачем.
@@ -128,7 +143,12 @@ class Delivery:
             if not held:
                 # Другая копия успела раньше или строку отложили: слать нечего.
                 return Step(sent=0, called=False)
-            failure = await self._attempt(Unit(held, unit.part, unit.parts))
+            # Тема, потерянная ранее в ЭТОМ проходе: очередь планировалась до отказа, и вторая
+            # карточка поиска не должна ни стучаться в мёртвую тему, ни повторять приписку.
+            thread = None if self._is_lost(held) else unit.thread_id
+            failure = await self._attempt(Unit(held, unit.part, unit.parts, thread))
+            if failure is not None and failure.reason == THREAD_GONE and thread:
+                failure = await self._to_general(work, Unit(held, unit.part, unit.parts))
             if failure is not None:
                 return await self._fail(work, held, failure)
             # Время берём ПОСЛЕ ответа Telegram: это момент отправки, а не начало
@@ -148,10 +168,33 @@ class Delivery:
         """
         try:
             text = _text(unit)
-            await self._send(unit.messages[0].recipient_id, text)
+            await self._dispatch(unit, text)
         except BaseException as exc:
             return classify(exc)
         return None
+
+    def _is_lost(self, held: list[OutboxMessage]) -> bool:
+        subscriptions = _subscriptions(held)
+        return bool(subscriptions) and subscriptions <= self._lost
+
+    async def _dispatch(self, unit: Unit, text: str) -> None:
+        recipient = unit.messages[0].recipient_id
+        if unit.thread_id is not None and self._send_in_thread is not None:
+            await self._send_in_thread(recipient, text, unit.thread_id)
+        else:
+            await self._send(recipient, text)
+
+    async def _to_general(self, work: Work, unit: Unit) -> Failure | None:
+        """Тема исчезла: связь утрачена, сообщение уходит без темы с приписью.
+
+        Связь переводится в `lost` ДО повторной отправки: упади повтор, следующая попытка
+        строки уже не станет искать исчезнувшую тему.
+        """
+        if work.tabs is not None:
+            for sub in _subscriptions(unit.messages):
+                await work.tabs.mark_lost(sub)
+                self._lost.add(sub)
+        return await self._attempt(Unit(unit.messages, unit.part, unit.parts, None, LOST_NOTE))
 
     async def _fail(self, work: Work, held: list[OutboxMessage], failure: Failure) -> Step:
         now = self._clock()
@@ -191,8 +234,10 @@ def _text(unit: Unit) -> str:
     """Текст одной отправки: подборка, если карточек несколько или это часть подборки."""
     if len(unit.messages) > 1 or unit.parts > 1:
         payloads = [message.payload for message in unit.messages]
-        return render_digest(payloads, part=unit.part, parts=unit.parts)
-    return render(unit.messages[0].payload)
+        body = render_digest(payloads, part=unit.part, parts=unit.parts)
+    else:
+        body = render(unit.messages[0].payload)
+    return f"{escape(unit.note)}\n\n{body}" if unit.note else body
 
 
 def render(payload: dict[str, Any]) -> str:
@@ -261,7 +306,17 @@ def render_digest(payloads: list[dict[str, Any]], *, part: int = 1, parts: int =
     return header(part, parts) + SEPARATOR + SEPARATOR.join(cards)
 
 
-def _units(messages: list[OutboxMessage]) -> list[Unit]:
+def _subscriptions(messages: list[OutboxMessage]) -> set[int]:
+    return {m.subscription_id for m in messages if m.subscription_id is not None}
+
+
+async def _threads(work: Work, pending: list[OutboxMessage]) -> dict[int, int]:
+    """Живые темы подписок прохода одним запросом; без `work.tabs` — тем нет."""
+    ids = [m.subscription_id for m in pending if m.subscription_id is not None]
+    return {} if work.tabs is None else await work.tabs.threads_for(ids)
+
+
+def _units(messages: list[OutboxMessage], threads: dict[int, int] | None = None) -> list[Unit]:
     """Что уходит за проход и в каком порядке: одиночные карточки, затем подборки клиентов.
 
     Подборка клиента режется на сообщения по границе карточки (`digest.split`),
@@ -270,16 +325,19 @@ def _units(messages: list[OutboxMessage]) -> list[Unit]:
     бы планирование всего прохода, а не только свою отправку под охраной.
     """
     units: list[Unit] = []
-    digests: dict[int, list[OutboxMessage]] = {}
+    # Подборка — на пару (клиент, тема): карточки двух поисков в разных темах не склеиваются.
+    digests: dict[tuple[int, int | None], list[OutboxMessage]] = {}
+    found = threads or {}
     for message in messages:
+        thread = found.get(message.subscription_id) if message.subscription_id else None
         if message.payload.get("delivery_mode") == "digest":
-            digests.setdefault(message.user_id, []).append(message)
+            digests.setdefault((message.user_id, thread), []).append(message)
         else:
-            units.append(Unit([message]))
-    for batch in digests.values():
+            units.append(Unit([message], thread_id=thread))
+    for (_, thread), batch in digests.items():
         parts = split([render(message.payload) for message in batch])
         for number, group in enumerate(parts, start=1):
-            units.append(Unit([batch[index] for index in group], number, len(parts)))
+            units.append(Unit([batch[index] for index in group], number, len(parts), thread))
     return units
 
 

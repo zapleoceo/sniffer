@@ -1078,6 +1078,8 @@ def test_dispatcher_knows_the_dialog() -> None:
     assert [router.name for router in dispatcher.sub_routers] == [
         "billing",
         "slots",
+        "menu",
+        "watch",
         "search",
         "membership",
     ]
