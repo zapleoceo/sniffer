@@ -57,7 +57,7 @@ class WatchRepository(Repository):
         return [SlotRow(root, active, expires, bool(gone)) for root, active, expires, gone in rows]
 
     async def count_searches(self, user_id: int) -> int:
-        """Сколько поисков не убрано: ровно то, что считается пределом «5 / 10»."""
+        """Сколько поисков не убрано: ровно то, что считается пределом «1 / 10»."""
         chain = func.coalesce(models.Passport.root_id, models.Passport.id)
         return int(
             await self._session.scalar(
