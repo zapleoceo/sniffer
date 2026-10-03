@@ -49,6 +49,11 @@ ANSWERS: dict[str, tuple[Reply, Kind, str]] = {
         "bad_markup",
     ),
     "unseen_400": (refusal(400, "Bad Request: nobody has seen this"), Kind.REJECTED, "bad_request"),
+    "migrated": (
+        refusal(400, "Bad Request: group chat was upgraded", migrate_to_chat_id=-1001234567),
+        Kind.REJECTED,
+        "migrated",
+    ),
     "token": (refusal(401, "Unauthorized"), Kind.SYSTEM, "token_rejected"),
     "not_found": (refusal(404, "Not Found"), Kind.SYSTEM, "token_rejected"),
     "server": (refusal(500, "Internal Server Error"), Kind.TRANSIENT, "transient"),

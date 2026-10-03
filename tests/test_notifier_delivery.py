@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections.abc import Callable
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -255,6 +255,19 @@ def test_collection_result_is_structured_and_escapes_every_field() -> None:
     assert "Нашлось &lt;одно&gt;" in result
     assert "<Honda>" not in result and "&lt;Honda&gt;" in result
     assert "7 &lt; 8 млн" in result
+
+
+async def test_without_an_injected_clock_the_moments_are_real_utc_time() -> None:
+    """В бою часы не подставляют: метки — настоящее время и обязательно с поясом."""
+    store = Store([Row(1, scheduled_at=datetime.now(UTC) - timedelta(minutes=1))])
+    before = datetime.now(UTC)
+    delivery = Delivery(Telegram(store, Clock()), pause_s=0.0, scope=store.scope)
+
+    assert await delivery.tick() == 1
+
+    sent_at = store.row(1).sent_at
+    assert sent_at is not None and sent_at.tzinfo is not None
+    assert before <= sent_at <= datetime.now(UTC)
 
 
 # ── подмена очереди не врёт про настоящую ───────────────────────────────────
