@@ -17,7 +17,7 @@ from aiogram.filters.callback_data import CallbackData
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from sniffer.bot.conversation import Reply
-from sniffer.bot.threads import title
+from sniffer.bot.threads import labels
 from sniffer.domain.records import QueryOverview
 
 # Сколько кнопок в ряд. Три коротких («автомат», «механика», «не важно») в один
@@ -29,8 +29,11 @@ ROW = 2
 SUBSCRIBE_LABEL = "🔔 Следить за новыми — 1 ⭐/мес"
 
 # Отдельная ветка на каждый поиск — то, из-за чего уточнение не уезжает в чужой
-# паспорт. Подпись говорит «новый», а не «сбросить»: прежняя ветка остаётся.
+# паспорт. Подпись говорит «новый», а не «сбросить»: прежний поиск остаётся.
 NEW_THREAD_LABEL = "➕ Новый поиск"
+# Человек видит одно слово — «поиски», — а не «запросы» и «ветки».
+SEARCHES_LABEL = "📂 Мои поиски"
+ALL_SEARCHES_LABEL = "← Все поиски"
 
 
 class AnswerCallback(CallbackData, prefix="ans"):
@@ -99,7 +102,7 @@ def markup(reply: Reply) -> InlineKeyboardMarkup | None:
         rows.append(
             [
                 InlineKeyboardButton(
-                    text="📂 Мои запросы", callback_data=RequestsCallback(action="list").pack()
+                    text=SEARCHES_LABEL, callback_data=RequestsCallback(action="list").pack()
                 )
             ]
         )
@@ -107,18 +110,22 @@ def markup(reply: Reply) -> InlineKeyboardMarkup | None:
     return None
 
 
-def requests_markup(items: list[QueryOverview]) -> InlineKeyboardMarkup:
+def requests_markup(items: list[QueryOverview], *, marked: bool = True) -> InlineKeyboardMarkup:
+    """Список поисков кнопками. `marked=False` — без «✓» (пока взведён `/new`)."""
     icons = {"active": "🟢", "paused": "⏸", "expired": "⌛", "off": "▫️"}
+    # Подписи считаются по всему списку сразу: два поиска с одним названием
+    # различаются бюджетом, а увидеть это можно только рядом друг с другом.
+    names = labels([item.passport for item in items])
     rows = [
         [
             InlineKeyboardButton(
-                text=_request_label(item, icons),
+                text=_request_label(item, name, icons, marked=marked),
                 callback_data=RequestsCallback(action="open", root=item.root).pack(),
             )
         ]
-        for item in items
+        for item, name in zip(items, names, strict=True)
     ]
-    # Последней строкой, а не первой: человек пришёл сюда за своими ветками, и
+    # Последней строкой, а не первой: человек пришёл сюда за своими поисками, и
     # «новый поиск» над ними превращал бы список в развилку. Кнопка нужна тем,
     # кто про `/new` не знает, — а список и так видно.
     rows.append(
@@ -131,9 +138,9 @@ def requests_markup(items: list[QueryOverview]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _request_label(item: QueryOverview, icons: dict[str, str]) -> str:
-    selected = "✓ " if item.is_active else ""
-    return f"{selected}{icons[item.monitoring]} {title(item.passport)}"
+def _request_label(item: QueryOverview, name: str, icons: dict[str, str], *, marked: bool) -> str:
+    selected = "✓ " if marked and item.is_active else ""
+    return f"{selected}{icons[item.monitoring]} {name}"
 
 
 def request_actions(item: QueryOverview) -> InlineKeyboardMarkup:
@@ -178,7 +185,7 @@ def request_actions(item: QueryOverview) -> InlineKeyboardMarkup:
     rows.append(
         [
             InlineKeyboardButton(
-                text="← Все запросы", callback_data=RequestsCallback(action="list").pack()
+                text=ALL_SEARCHES_LABEL, callback_data=RequestsCallback(action="list").pack()
             )
         ]
     )

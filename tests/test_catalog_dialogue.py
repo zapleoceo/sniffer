@@ -16,8 +16,9 @@ from sniffer.config import Settings
 from sniffer.domain.passport import Passport
 from sniffer.domain.records import StoredPassport
 from sniffer.search.intake_rules import parse_query
+from sniffer.simulation.stubs import MemoryStore
 from sniffer.sources.base import RawItem
-from tests.test_bot_dialog import CLIENT, FakeJournal, MemoryStore, Replies
+from tests.test_bot_dialog import CLIENT, FakeJournal, Replies
 
 
 def scope() -> Dialogue:

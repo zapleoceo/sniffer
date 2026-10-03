@@ -113,6 +113,26 @@ if [ "$SUMMARY_ONLY" = 1 ]; then
   exit 0
 fi
 
+# Часовой миграции: колонка ОБЯЗАНА быть в живой базе, иначе деплой красный.
+# Шаблон один на все колонки, а вызовы ниже — пары «таблица колонка»: копию
+# проверки можно было ослабить в одном месте и забыть в другом, а константу
+# `HAS_NEW=1` на месте проверки никто бы не заметил. Контракт функции держит
+# tests/test_deploy_sentinels.py: он гоняет её на подставном `docker` и
+# убеждается, что отсутствие колонки красит деплой, а присутствие — нет.
+# Ответ, в котором не число, считается отсутствием: `[ x -lt 1 ]` на не-числе
+# не падает, а молча уходит в ветку «на месте».
+require_column() {
+  local table="$1" column="$2" found
+  found="$(docker exec "$PG_CID" psql -U sniffer -d sniffer -tAc "select count(*) from information_schema.columns where table_schema='public' and table_name='${table}' and column_name='${column}'" 2>/dev/null || echo 0)"
+  case "$found" in ''|*[!0-9]*) found=0 ;; esac
+  if [ "$found" -lt 1 ]; then
+    echo "   миграции не применились: ${table}.${column} отсутствует — см. раздел «миграции схемы»" >&2
+    FAIL=1
+  else
+    info "миграции: ${table}.${column} на месте"
+  fi
+}
+
 # ── 0. Замок: два деплоя одновременно перетрут друг другу рабочее дерево ─────
 LOCK_FILE="/var/lock/sniffer-deploy.lock"
 if ! : >"$LOCK_FILE" 2>/dev/null; then LOCK_FILE="/tmp/sniffer-deploy.lock"; fi
@@ -379,26 +399,15 @@ if [ -n "${PG_CID:-}" ]; then
   fi
   # Число таблиц не ловит непринятую МИГРАЦИЮ: 02.09.2026 таблицы были, а
   # колонок source/external_id/scan_listing_id не было, и matcher падал. Колонка
-  # из миграции единого каталога — часовой того, что ALTER'ы доехали, а не только
-  # CREATE TABLE. Появится новая миграция — сюда добавляется её колонка-часовой.
-  HAS_COL="$(docker exec "$PG_CID" psql -U sniffer -d sniffer -tAc "select count(*) from information_schema.columns where table_name='listings' and column_name='source'" 2>/dev/null || echo 0)"
-  if [ "${HAS_COL:-0}" -lt 1 ]; then
-    echo "   миграции не применились: listings.source отсутствует — см. раздел «миграции схемы»" >&2
-    FAIL=1
-  else
-    info "миграции: listings.source на месте"
-  fi
-  # Часовой САМОГО СВЕЖЕГО ALTER в 001_init.sql. Колонка выше доказывает только
-  # то, что файл когда-то дошёл до ALTER'ов, — а бот читает `users` на КАЖДОМ
-  # сообщении, и отсутствие этой колонки означает не деградацию, а молчащий бот
-  # при зелёном деплое.
-  HAS_NEW="$(docker exec "$PG_CID" psql -U sniffer -d sniffer -tAc "select count(*) from information_schema.columns where table_name='users' and column_name='awaiting_new_request'" 2>/dev/null || echo 0)"
-  if [ "${HAS_NEW:-0}" -lt 1 ]; then
-    echo "   миграции не применились: users.awaiting_new_request отсутствует — см. раздел «миграции схемы»" >&2
-    FAIL=1
-  else
-    info "миграции: users.awaiting_new_request на месте"
-  fi
+  # из свежего ALTER — часовой того, что ALTER'ы доехали, а не только CREATE
+  # TABLE. ЛЮБАЯ новая колонка (`ADD COLUMN IF NOT EXISTS` в infra/sql) обязана
+  # получить здесь свою строку: tests/test_deploy_sentinels.py красит сборку,
+  # если новый ALTER остался без часового, и если часовой стоит на несуществующей
+  # колонке. Бот читает `users` и `passports` на КАЖДОМ сообщении, и отсутствие
+  # колонки там означает не деградацию, а молчащий бот при зелёном деплое.
+  require_column listings source               # миграция единого каталога, 02.09.2026
+  require_column users awaiting_new_request    # `/new`: следующее сообщение открывает поиск
+  require_column passports last_used_at        # порядок списка поисков: выбор возвращает поиск
   # Часовой ПОСЛЕДНЕЙ миграции в цепочке. Цикл выше применяет их по порядку и
   # падает на ошибке, но это доказывает только то, что psql не вернул ошибку на
   # ЗАПУЩЕННОМ файле: новый файл, не попавший в `git pull`, не запустится вовсе

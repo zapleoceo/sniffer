@@ -41,134 +41,20 @@ from sniffer.bot.keyboards import (
 from sniffer.bot.store import Client, Dialogue
 from sniffer.broker import usage
 from sniffer.domain.dialogue import (
-    EVENT_USER_MESSAGE,
     SKIP,
-    DialogueState,
     Feedback,
-    advance,
     feedback_buttons,
     question_for,
-    replay,
 )
 from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
-from sniffer.domain.records import PassportEvent, QueryOverview, StoredPassport
-from sniffer.domain.threads import MAX_LIVE_THREADS
+from sniffer.domain.records import QueryOverview
 from sniffer.search.intake_rules import parse_query
 from sniffer.search.vocabulary import served_cities
+from sniffer.simulation.stubs import MemoryStore
 from sniffer.sources.base import RawItem
 
 NOW = datetime(2026, 8, 29, 12, 0, tzinfo=UTC)
 CLIENT = Client(tg_user_id=42, username="dima")
-
-
-class MemoryStore:
-    """`DialogueStore` на словарях: диалог без Postgres, но с версиями."""
-
-    def __init__(self) -> None:
-        self.rows: list[StoredPassport] = []
-        self.events: list[PassportEvent] = []
-        self._users: dict[int, int] = {}
-        self._active: dict[int, int] = {}
-        self._editing: set[int] = set()
-        self._awaiting: set[int] = set()
-
-    async def load(self, client: Client) -> Dialogue:
-        user_id = self._users.setdefault(client.tg_user_id, len(self._users) + 1)
-        active = self._active.get(user_id)
-        current = next(
-            (
-                row
-                for row in reversed(self.rows)
-                if row.user_id == user_id
-                and row.is_current
-                and (active is None or row.root == active)
-            ),
-            None,
-        )
-        if current is None:
-            return Dialogue(user_id=user_id)
-        root = current.root
-        chain = {row.id for row in self.rows if row.id == root or row.root_id == root}
-        events = [event for event in self.events if event.passport_id in chain]
-        return Dialogue(
-            user_id=user_id,
-            passport=current,
-            state=replay(events),
-            editing=current.root in self._editing,
-            starting_new=user_id in self._awaiting,
-        )
-
-    async def live_threads(self, dialogue: Dialogue) -> list[QueryOverview]:
-        """Ветки в работе, свежие сверху и обрезанные пределом — как в SQL.
-
-        Предел повторён здесь не ради симметрии: по длине этого списка бот решает,
-        вытесняется ли ветка, и список без предела никогда не сказал бы «мест нет».
-        """
-        active = self._active.get(dialogue.user_id)
-        live = [
-            QueryOverview(root=row.root, passport=row.passport, is_active=row.root == active)
-            for row in reversed(self.rows)
-            if row.user_id == dialogue.user_id and row.is_current
-        ]
-        return live[:MAX_LIVE_THREADS]
-
-    async def await_new(self, dialogue: Dialogue) -> None:
-        self._awaiting.add(dialogue.user_id)
-
-    async def start(self, dialogue: Dialogue, passport: Passport) -> Dialogue:
-        stored = StoredPassport(
-            id=len(self.rows) + 1, user_id=dialogue.user_id, version=1, passport=passport
-        )
-        self.rows.append(stored)
-        self._active[dialogue.user_id] = stored.root
-        self._editing.discard(stored.root)
-        self._awaiting.discard(dialogue.user_id)
-        self._event(stored.id, EVENT_USER_MESSAGE, {"text": passport.raw_query})
-        return Dialogue(user_id=dialogue.user_id, passport=stored, state=DialogueState())
-
-    async def revise(
-        self, dialogue: Dialogue, passport: Passport, *, kind: str, payload: dict[str, Any]
-    ) -> Dialogue:
-        assert dialogue.passport is not None
-        root = dialogue.passport.root
-        self.rows = [
-            replace(row, is_current=False) if row.id == root or row.root_id == root else row
-            for row in self.rows
-        ]
-        stored = StoredPassport(
-            id=len(self.rows) + 1,
-            user_id=dialogue.user_id,
-            version=dialogue.passport.version + 1,
-            root_id=root,
-            passport=passport,
-        )
-        self.rows.append(stored)
-        self._active[dialogue.user_id] = root
-        self._editing.discard(root)
-        self._event(stored.id, kind, payload)
-        return Dialogue(
-            user_id=dialogue.user_id, passport=stored, state=advance(dialogue.state, kind, payload)
-        )
-
-    async def note(self, dialogue: Dialogue, *, kind: str, payload: dict[str, Any]) -> Dialogue:
-        assert dialogue.passport is not None
-        self._event(dialogue.passport.id, kind, payload)
-        return replace(dialogue, state=advance(dialogue.state, kind, payload))
-
-    async def select(self, dialogue: Dialogue, root: int, *, editing: bool = False) -> Dialogue:
-        owned = any(row.user_id == dialogue.user_id and row.root == root for row in self.rows)
-        if not owned:
-            return dialogue
-        self._active[dialogue.user_id] = root
-        self._awaiting.discard(dialogue.user_id)
-        if editing:
-            self._editing.add(root)
-        else:
-            self._editing.discard(root)
-        return await self.load(CLIENT)
-
-    def _event(self, passport_id: int, kind: str, payload: dict[str, Any]) -> None:
-        self.events.append(PassportEvent(passport_id=passport_id, kind=kind, payload=payload))
 
 
 class FakeIntake:
@@ -1079,8 +965,11 @@ async def test_request_menu_handler_covers_the_whole_navigation(
     repeated: list[int] = []
     armed: list[bool] = []
 
-    async def list_for(_client: Client) -> list[QueryOverview]:
-        return items
+    async def list_for(_client: Client) -> query_menu.Menu:
+        return query_menu.Menu(items=items)
+
+    async def get_one(_client: Client, root: int) -> QueryOverview | None:
+        return next((row for row in items if row.root == root), None)
 
     async def select(_client: Client, root: int, *, editing: bool = False) -> bool:
         selected.append((root, editing))
@@ -1099,6 +988,7 @@ async def test_request_menu_handler_covers_the_whole_navigation(
 
     monkeypatch.setattr(handler, "Message", FakeMessage)
     monkeypatch.setattr(query_menu, "list_for", list_for)
+    monkeypatch.setattr(query_menu, "get_one", get_one)
     monkeypatch.setattr(query_menu, "select", select)
     monkeypatch.setattr(query_menu, "toggle", toggle)
     monkeypatch.setattr(handler, "conversation", lambda: Talker())
@@ -1125,18 +1015,22 @@ async def test_request_menu_handler_covers_the_whole_navigation(
 async def test_empty_and_stale_request_menus_answer_plainly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def nothing(_client: Client) -> list[QueryOverview]:
-        return []
+    async def nothing(_client: Client) -> query_menu.Menu:
+        return query_menu.Menu(items=[])
+
+    async def unknown(_client: Client, _root: int) -> None:
+        return None
 
     monkeypatch.setattr(handler, "Message", FakeMessage)
     monkeypatch.setattr(query_menu, "list_for", nothing)
+    monkeypatch.setattr(query_menu, "get_one", unknown)
     message = FakeMessage("", from_user=FakeUser())
     callback = cast(Any, FakeCallback(message))
 
     await handler.requests(cast(Message, message))
     await handler.manage_request(callback, RequestsCallback(action="open", root=999))
 
-    assert "Запросов пока нет" in message.answers[0][0]
+    assert "Поисков пока нет" in message.answers[0][0]
     assert "не найден" in message.answers[1][0]
 
 

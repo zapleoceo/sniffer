@@ -284,8 +284,16 @@ CREATE TABLE IF NOT EXISTS passports (
     confidence   REAL        NOT NULL DEFAULT 0,
     missing_fields TEXT[]    NOT NULL DEFAULT '{}',
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    is_current   BOOLEAN     NOT NULL DEFAULT TRUE
+    is_current   BOOLEAN     NOT NULL DEFAULT TRUE,
+    last_used_at TIMESTAMPTZ
 );
+
+-- Когда поиск использовали в последний раз: выбрали в `/requests`, нажали
+-- кнопку под его выдачей, поправили. По этому времени, а не по времени правки,
+-- упорядочен список поисков: иначе выбор вытесненного поиска не возвращал бы его
+-- в список, хотя бот обещает именно это. NULL — с появления колонки поиск не
+-- трогали; тогда порядок даёт created_at, то есть прежний.
+ALTER TABLE passports ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS passports_user_idx ON passports (user_id, is_current);
 CREATE INDEX IF NOT EXISTS passports_root_idx ON passports (root_id, version DESC);

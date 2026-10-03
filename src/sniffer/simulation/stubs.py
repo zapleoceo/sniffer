@@ -5,10 +5,11 @@
 Упрости здесь — и метрика «сколько вопросов до выдачи» начала бы мерить
 подделку, а не бота.
 
-Тот же по устройству словарь лежит в `tests/test_bot_dialog.py::MemoryStore`.
-Это одно знание в двух копиях, и правильный конец у него один: тот файл
-импортирует отсюда. Пока копии две, менять их надо парой — иначе тесты диалога
-и симулятор разойдутся в понимании того, что такое «версия паспорта».
+Подделка одна на тесты диалога и симулятор: тесты импортируют её отсюда. Две
+копии разошлись бы в понимании того, что такое «версия паспорта» и что снимает
+взведённое `/new`, — и тесты показывали бы одно поведение, а симулятор другое.
+Что именно подделка обязана делать так же, как `PassportStore`, закреплено
+контрактными тестами (`tests/test_store_contract.py`): они идут на обеих.
 """
 
 from __future__ import annotations
@@ -30,13 +31,24 @@ class MemoryStore:
     def __init__(self) -> None:
         self.rows: list[StoredPassport] = []
         self.events: list[PassportEvent] = []
+        # Состояние мониторинга по корню ветки (`active` / `paused` / `expired`).
+        # Подписок в подделке нет, а текст о вытеснении зависит от них, поэтому
+        # тест выставляет состояние руками; не названная ветка — без мониторинга.
+        self.monitoring: dict[int, str] = {}
         self._users: dict[int, int] = {}
         self._active: dict[int, int] = {}
         self._editing: set[int] = set()
         self._awaiting: set[int] = set()
+        # Когда ветку использовали в последний раз: порядок списка, как
+        # `passports.last_used_at` в базе. Счётчик, а не время: тест не ждёт часов.
+        self._used: dict[int, int] = {}
+        self._clock = 0
 
     async def load(self, client: Client) -> Dialogue:
-        user_id = self._users.setdefault(client.tg_user_id, len(self._users) + 1)
+        return self._dialogue(self._users.setdefault(client.tg_user_id, len(self._users) + 1))
+
+    def _dialogue(self, user_id: int) -> Dialogue:
+        """Разговор клиента по его id: так же читает его `load` и возвращает `select`."""
         active = self._active.get(user_id)
         current = next(
             (
@@ -69,8 +81,15 @@ class MemoryStore:
         self._active[dialogue.user_id] = stored.root
         self._editing.discard(stored.root)
         self._awaiting.discard(dialogue.user_id)
+        self._touch(stored.root)
         self._event(stored.id, EVENT_USER_MESSAGE, {"text": passport.raw_query})
         return Dialogue(user_id=dialogue.user_id, passport=stored, state=DialogueState())
+
+    async def start_requested(self, dialogue: Dialogue, passport: Passport) -> Dialogue | None:
+        """Как в базе: создаёт, только если флаг ещё взведён. Нет «await» — нет и гонки."""
+        if dialogue.user_id not in self._awaiting:
+            return None
+        return await self.start(dialogue, passport)
 
     async def revise(
         self, dialogue: Dialogue, passport: Passport, *, kind: str, payload: dict[str, Any]
@@ -92,6 +111,11 @@ class MemoryStore:
         self.rows.append(stored)
         self._active[dialogue.user_id] = root
         self._editing.discard(root)
+        # Правка — тоже выбор ветки: в базе её делает `save_revision` через
+        # `select`, и флаг `/new` вместе с ним. Подделка, которая этого не делает,
+        # показывала бы тестам одно поведение, а проду другое.
+        self._awaiting.discard(dialogue.user_id)
+        self._touch(root)
         self._event(stored.id, kind, payload)
         return Dialogue(
             user_id=dialogue.user_id,
@@ -106,18 +130,25 @@ class MemoryStore:
         return replace(dialogue, state=advance(dialogue.state, kind, payload))
 
     async def live_threads(self, dialogue: Dialogue) -> list[QueryOverview]:
-        """Ветки в работе, свежие сверху и не больше предела — как в SQL.
+        """Ветки в списке: недавно использованные сверху, не больше предела — как в SQL.
 
         Предел повторён здесь не ради красоты: по длине этого списка бот решает,
         вытесняется ли ветка, и список без предела никогда не сказал бы «мест нет».
+        Порядок — по использованию, а не по правке: выбор вытесненной ветки
+        возвращает её в список, как в базе.
         """
         active = self._active.get(dialogue.user_id)
-        live = [
-            QueryOverview(root=row.root, passport=row.passport, is_active=row.root == active)
-            for row in reversed(self.rows)
-            if row.user_id == dialogue.user_id and row.is_current
+        mine = [row for row in self.rows if row.user_id == dialogue.user_id and row.is_current]
+        mine.sort(key=lambda row: (self._used.get(row.root, 0), row.id), reverse=True)
+        return [
+            QueryOverview(
+                root=row.root,
+                passport=row.passport,
+                is_active=row.root == active,
+                monitoring=self.monitoring.get(row.root, "off"),
+            )
+            for row in mine[:MAX_LIVE_THREADS]
         ]
-        return live[:MAX_LIVE_THREADS]
 
     async def await_new(self, dialogue: Dialogue) -> None:
         self._awaiting.add(dialogue.user_id)
@@ -128,14 +159,16 @@ class MemoryStore:
             return dialogue
         self._active[dialogue.user_id] = root
         self._awaiting.discard(dialogue.user_id)
+        self._touch(root)
         if editing:
             self._editing.add(root)
         else:
             self._editing.discard(root)
-        client = next(
-            Client(tg_id) for tg_id, user_id in self._users.items() if user_id == dialogue.user_id
-        )
-        return await self.load(client)
+        return self._dialogue(dialogue.user_id)
+
+    def _touch(self, root: int) -> None:
+        self._clock += 1
+        self._used[root] = self._clock
 
     def _event(self, passport_id: int, kind: str, payload: dict[str, Any]) -> None:
         self.events.append(PassportEvent(passport_id=passport_id, kind=kind, payload=payload))

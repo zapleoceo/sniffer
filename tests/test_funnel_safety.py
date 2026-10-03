@@ -8,10 +8,10 @@ from sniffer.bot.conversation import Conversation, Found
 from sniffer.domain.dialogue import SKIP
 from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
 from sniffer.search.intake_rules import parse_query
+from sniffer.simulation.stubs import MemoryStore
 from tests.test_bot_dialog import (
     CLIENT,
     FakeJournal,
-    MemoryStore,
     Replies,
     RulesIntake,
     bike,

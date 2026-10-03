@@ -34,7 +34,7 @@ from sniffer.simulation.fit import off_target
 from sniffer.simulation.harness import Metrics, run_all, run_scenario
 from sniffer.simulation.report import render_replies, render_report
 from sniffer.simulation.scenarios import SCENARIOS
-from sniffer.simulation.script import Says, Scenario
+from sniffer.simulation.script import Says, Scenario, StartsNew, Switches
 from sniffer.simulation.verdict import dialogue_faults, relevance_faults, wish_faults
 
 KEYS = tuple(scenario.key for scenario in SCENARIOS)
@@ -102,6 +102,79 @@ def test_scenario_meets_its_expectations(runs: dict[str, Metrics], key: str) -> 
     faults = dialogue_faults(runs[key])
 
     assert not faults, f"{key}: " + "; ".join(faults)
+
+
+# ── поиски: `/new` и переключение ───────────────────────────────────────────
+
+
+def test_every_scenario_with_several_searches_says_what_each_one_holds() -> None:
+    """Сценарий про `/new` без `expect_threads` проверял бы только последний поиск.
+
+    Суть таких сценариев — что НЕ попало в соседний поиск, а это видно лишь по
+    содержимому каждого: поле последнего паспорта скажет только про него.
+    """
+    several = [
+        scenario.key
+        for scenario in SCENARIOS
+        if any(isinstance(step, StartsNew | Switches) for step in scenario.steps)
+    ]
+
+    assert several, "в таблице нет ни одного сценария с `/new`"
+    bare = [key for key in several if not next(s for s in SCENARIOS if s.key == key).expect_threads]
+    assert not bare, f"сценарии про поиски без expect_threads: {bare}"
+
+
+async def test_a_search_that_got_the_wrong_budget_is_a_dialogue_defect() -> None:
+    """Проверка поисков умеет краснеть: бюджет, не попавший в свой поиск, — дефект диалога.
+
+    Без этого теста зелёные сценарии про `/new` могли бы быть зелёными потому, что
+    сверка поисков ничего не сверяет.
+    """
+    metrics = await run_scenario(
+        Scenario(
+            key="wrong_budget",
+            title="ожидание нарочно неверное",
+            steps=(
+                Says("ищу скутер в нячанге до 400 долларов"),
+                StartsNew(),
+                Says("сниму квартиру в нячанге до 10 млн"),
+            ),
+            expect_threads=({"category": "motorbike", "budget.max": 999.0}, {"category": "room"}),
+        )
+    )
+
+    faults = dialogue_faults(metrics)
+
+    assert any(fault.startswith("поиск 1:") and "budget.max = 400.0" in fault for fault in faults)
+    assert any(fault.startswith("поиск 2:") and "category" in fault for fault in faults)
+
+
+async def test_a_wrong_number_of_searches_is_a_dialogue_defect() -> None:
+    """`/new`, который не открыл поиск (или открыл два), — это сразу видно по числу."""
+    metrics = await run_scenario(
+        Scenario(
+            key="wrong_count",
+            title="одна фраза — один поиск",
+            steps=(Says("ищу скутер в нячанге"),),
+            expect_threads=({"category": "motorbike"}, {"category": "motorbike"}),
+        )
+    )
+
+    assert "поисков 1, ожидалось 2" in dialogue_faults(metrics)
+
+
+async def test_the_two_new_steps_do_not_count_as_silence() -> None:
+    """Шаги «/new» и «выбрал поиск» ничего не отвечают сами — ответ за хендлером."""
+    metrics = await run_scenario(
+        Scenario(
+            key="silence",
+            title="шаги без ответа",
+            steps=(Says("ищу скутер в нячанге"), StartsNew(), Switches(1)),
+            expect_results=None,
+        )
+    )
+
+    assert metrics.silent_steps == ()
 
 
 # ── кубики, которые не деньги ───────────────────────────────────────────────

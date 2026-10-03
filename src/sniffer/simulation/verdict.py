@@ -54,6 +54,7 @@ def dialogue_faults(metrics: Metrics) -> tuple[str, ...]:
         found.append(f"в ответах нет «{scenario.expect_text}»")
 
     found += _field_faults(metrics)
+    found += _thread_faults(metrics)
     return tuple(found)
 
 
@@ -98,8 +99,26 @@ def _field_faults(metrics: Metrics) -> list[str]:
     return faults_found
 
 
+def _thread_faults(metrics: Metrics) -> list[str]:
+    """Что лежит в каждом поиске клиента — и что попало не в тот."""
+    wanted = metrics.scenario.expect_threads
+    if not wanted:
+        return []
+    if len(metrics.threads) != len(wanted):
+        return [f"поисков {len(metrics.threads)}, ожидалось {len(wanted)}"]
+    return [
+        f"поиск {number}: {message}"
+        for number, (have, expected) in enumerate(zip(metrics.threads, wanted, strict=True), 1)
+        for path, value in expected.items()
+        if (message := _check(have.get(path), path, value))
+    ]
+
+
 def _compare(metrics: Metrics, path: str, expected: object) -> str:
-    actual = metrics.passport_fields.get(path)
+    return _check(metrics.passport_fields.get(path), path, expected)
+
+
+def _check(actual: object, path: str, expected: object) -> str:
     if actual is None:
         return f"{path} не распозналось, ожидалось {expected!r}"
     if not _same(actual, expected):
