@@ -12,6 +12,7 @@ from sniffer.domain.passport import Category, Intent, default_deal_type
 from sniffer.domain.prices import parse_price
 from sniffer.domain.records import Chat, Listing, RawMessage
 from sniffer.pipeline.gate import CategoryDetector, GateResult, gate
+from sniffer.pipeline.listing_facts import fact_columns
 from sniffer.pipeline.listing_price import price_columns
 
 STAGE_GATED = "gated"
@@ -73,6 +74,11 @@ def listing_from(
     Порядок «текст лота главнее чата» тот же, что у разбора запроса клиента:
     `parse_query` кладёт `city or default_city`. Заодно чинится случай, который
     был и раньше: продавец из нячангской группы, продающий байк в Дананге.
+
+    Район, язык, заголовок и факты (площадь, этаж, удобства, год, пробег…) читает
+    `listing_facts.fact_columns`; явные `attributes` разбора запроса главнее прочитанного.
+    Заголовок — первая содержательная строка поста, а не первая непустая: так «AN-HOME» и
+    «#нячанг #аренда» перестали быть названием 1900 карточек.
     """
     if raw.id is None:
         raise ValueError("raw message without database id")
@@ -80,6 +86,13 @@ def listing_from(
         raise ValueError("cannot build listing from rejected message")
     category = result.categories[0].value
     prices = price_columns(parse_price(raw.text, category=category, deal_type=deal_type), deal_type)
+    facts = fact_columns(
+        raw.text,
+        category=category,
+        deal_type=deal_type,
+        attributes=attributes,
+        city=city or chat.city,
+    )
     return Listing(
         raw_message_id=raw.id,
         source="telegram_archive",
@@ -87,7 +100,8 @@ def listing_from(
         deal_type=deal_type,
         category=category,
         city=city or chat.city,
-        title=_title(raw.text),
+        district=facts.district,
+        title=facts.title,
         summary=_summary(raw.text),
         tg_link=_link(chat.tg_id, chat.username, raw.msg_id),
         posted_at=raw.posted_at,
@@ -95,9 +109,9 @@ def listing_from(
         price_amount=prices.amount,
         price_currency=prices.currency,
         price_period=prices.period,
-        attributes={**(attributes or {}), **prices.attributes},
+        attributes={**facts.attributes, **prices.attributes},
         confidence=0.55 if prices.amount is not None or prices.attributes else 0.4,
-        lang=None,
+        lang=facts.lang,
     )
 
 
@@ -107,11 +121,6 @@ def _link(tg_id: int, username: str | None, msg_id: int) -> str:
     digits = str(abs(tg_id))
     internal = digits[3:] if tg_id < 0 and digits.startswith("100") else digits
     return f"https://t.me/c/{internal}/{msg_id}"
-
-
-def _title(text: str) -> str:
-    line = next((line.strip() for line in text.splitlines() if line.strip()), "объявление")
-    return line[:180]
 
 
 def _summary(text: str) -> str:
