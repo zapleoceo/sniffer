@@ -17,11 +17,15 @@ from sniffer.domain.price_vocab import UNIT_FACTORS
 # 15кк», «до 2 tỷ» и «до 20🍋» читались долларами (15, 2 и 20), а «цена 15кк» в
 # объявлении — миллионами. Без «м» и «ml»: клиент пишет «400 м от моря» и «500 мл», и
 # это не деньги. Длинные названия впереди, чтобы «млрд» не уступило «м».
-_NOT_A_BUDGET_UNIT = frozenset({"м", "ml"})
+_NOT_A_BUDGET_UNIT = frozenset({"м", "ml", "мил", "mil"})
+# «мил» целиком не берём: «до 5 миль от моря» — не 5 миллионов; «миллион» пишем полностью.
 _UNITS = "|".join(
-    re.escape(name)
-    for name, _ in sorted(UNIT_FACTORS, key=lambda item: -len(item[0]))
-    if name not in _NOT_A_BUDGET_UNIT
+    [
+        re.escape(name)
+        for name, _ in sorted(UNIT_FACTORS, key=lambda item: -len(item[0]))
+        if name not in _NOT_A_BUDGET_UNIT
+    ]
+    + ["миллион"]
 )
 
 # Пробел внутри числа только обычный и неразрывный: `\s` пустил бы перенос

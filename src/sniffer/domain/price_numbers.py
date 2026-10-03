@@ -31,6 +31,10 @@ MAX_DIGITS = 18
 # каждой позиции и разбор занимал четверть секунды (замер Opus 03.10.2026).
 _COMPACT_RE = re.compile(r"(?<!\d)(\d{1,18})\s*(tr|triệu|trieu)(\d{1,3})(?!\d)", re.IGNORECASE)
 _GROUPED_RE = re.compile(r"\d{1,3}(?:[ .,]\s?\d{3})+")
+# После хвоста без единицы сумма кончается: конец строки, знак препинания, валюта.
+# «15 млн 500 метров», «25 млн 100 км», «21 млн 200 cc» — это не 15,5 млн, а слово
+# за числом; «9 млн 500 000» — не хвост, а ещё одно число.
+_ENDS_THE_SUM_RE = re.compile(r"\s*(?:$|[^\w\s]|(?:vnd|vnđ|₫|đ|dong|донг)(?![\w]))", re.IGNORECASE)
 # Число перед тире — не начало вилки, а номер, если сумма за тире больше него
 # во столько раз: «Yamaha NVX 125 — 4 200 000 ₫». Вилки такого размаха не пишут.
 _INDEX_RATIO = 50
@@ -87,7 +91,12 @@ def _tail(match: re.Match[str]) -> float:
     main = factor(match.group("unit"))
     if match.group("tail_unit") is not None:
         small = factor(match.group("tail_unit"))
-    elif main in (10**6, 10**9) and len(raw) == 3 and int(raw) % 50 == 0:
+    elif (
+        main in (10**6, 10**9)
+        and len(raw) == 3
+        and int(raw) % 50 == 0
+        and _ENDS_THE_SUM_RE.match(match.string, match.end("tail"))
+    ):
         small = main // 1000
     else:
         return 0.0
@@ -113,7 +122,9 @@ def _is_index(match: re.Match[str], low: float, high: float) -> bool:
     if high > _INDEX_RATIO * low:
         return True
     link = text[match.end("lo") : match.start("hi")]
-    spaced_dash = link[:1].isspace() and link[-1:].isspace() and not any(c.isalpha() for c in link)
+    # Только длинное тире: «2 — 13 млн», «Ха Куанг 2 – 35 млн». Дефис с пробелами
+    # («5 - 20 млн») пишут вилкой.
+    spaced_dash = link.strip() in {"—", "–"} and link[:1].isspace() and link[-1:].isspace()
     return spaced_dash and high > _SPACED_INDEX_RATIO * low
 
 

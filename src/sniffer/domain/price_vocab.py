@@ -151,8 +151,8 @@ OTHER_BEFORE_RE = re.compile(
 # Метка называет другую сделку: «Стоимость покупки 2 млн» в объявлении об аренде —
 # цена покупки, а «Аренда 6 млн» в объявлении о продаже — доход от аренды. Сторона
 # объявления известна только архиву и плану поиска, поэтому решает их `prices.py`.
-SELL_LABEL_RE = re.compile(r"покупк|выкуп|purchase|buy", re.IGNORECASE)
-RENT_LABEL_RE = re.compile(r"аренд|rent|thuê", re.IGNORECASE)
+SELL_LABEL_RE = re.compile(r"(?<!\w)(?:покупк|выкуп|purchase|buy)", re.IGNORECASE)
+RENT_LABEL_RE = re.compile(r"(?<!\w)(?:аренд|rent|thuê)", re.IGNORECASE)
 # Что стоит ПЕРЕД таким словом и делает его свойством предмета, а не названием
 # суммы: «без комиссии 12 млн», «с парковкой 15 млн», «включая интернет».
 FEATURE_BEFORE_RE = re.compile(

@@ -355,3 +355,49 @@ def test_the_upper_end_of_a_range_is_rounded_like_the_lower() -> None:
     (fact,) = parse_prices("Цена: 1.9–2.05 млн")
 
     assert (fact.amount, fact.up_to) == (1_900_000, 2_050_000)
+
+
+@pytest.mark.parametrize(
+    ("text", "amount"),
+    [
+        ("Сдаю квартиру 15 млн 500 метров до моря", 15_000_000),
+        ("Цена 10 млн 150 метров до пляжа", 10_000_000),
+        ("Продам SH 150, 65 млн 150 кубов", 65_000_000),
+        ("Bán nhà 3 tỷ 500 mét đến biển", 3_000_000_000),
+        ("Аренда 9 млн 500 000 депозит", 9_000_000),
+        ("Продам Honda Vision 25 млн 100 км пробега", 25_000_000),
+        ("Цена 21 млн 200 cc", 21_000_000),
+        ("Сдаю квартиру 12 млн 200 м2", 12_000_000),
+        ("Аренда 6 млн 2 человека", 6_000_000),
+        ("Цена 4 миллиона 500.", 4_500_000),
+        ("Цена 4 миллиона 500 донгов", 4_500_000),
+    ],
+)
+def test_a_word_after_the_tail_means_the_tail_is_not_money(text: str, amount: int) -> None:
+    """Хвост — следующий разряд, только если после него сумма кончается; слово за ним — не хвост."""
+    (fact,) = parse_prices(text)
+
+    assert fact.amount == amount
+
+
+@pytest.mark.parametrize(
+    ("text", "low", "high"),
+    [
+        ("Цены: 5 - 20 млн в месяц", 5_000_000, 20_000_000),
+        ("Студии 4 - 15 млн/мес", 4_000_000, 15_000_000),
+    ],
+)
+def test_a_range_with_a_hyphen_and_spaces_is_a_range(text: str, low: int, high: int) -> None:
+    (fact,) = parse_prices(text)
+
+    assert (fact.amount, fact.up_to) == (low, high)
+
+
+def test_the_other_deal_label_needs_a_whole_word() -> None:
+    """«different» содержит «rent»: не метка аренды."""
+    fact = parse_price(
+        "Price in different currencies: 25 mil VND", category="motorbike", deal_type="sell"
+    )
+
+    assert fact is not None
+    assert fact.amount == 25_000_000

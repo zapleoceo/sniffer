@@ -16,7 +16,7 @@ from sniffer.search.budget_rules import parse_budget
 
 # «м» — метры, «ml» — миллилитры: в объявлении рядом с суммой они читаются деньгами
 # («36 m» одной строкой), а в речи клиента («400 м от моря») нет.
-NOT_A_BUDGET_UNIT = {"м", "ml"}
+NOT_A_BUDGET_UNIT = {"м", "ml", "мил", "mil"}
 
 
 @pytest.mark.parametrize(
@@ -52,3 +52,8 @@ def test_metres_are_not_millions_in_a_client_phrase() -> None:
     budget = parse_budget("квартира в 400 м от моря, до 10 млн")
 
     assert budget.max == 10_000_000
+
+
+def test_miles_are_not_millions_in_a_client_phrase() -> None:
+    assert parse_budget("до 5 миль от моря, до 400$").max == 400
+    assert parse_budget("квартира до 5 миллионов").max == 5_000_000

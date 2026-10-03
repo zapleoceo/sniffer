@@ -146,10 +146,10 @@ def _is_alone(line: str, match: re.Match[str]) -> bool:
     return _LETTERS_RE.search(rest) is None
 
 
-def _around(line: str, match: re.Match[str], *, carried: bool) -> _Around:
+def _around(line: str, match: re.Match[str], end: int, *, carried: bool) -> _Around:
     before = line[max(0, match.start() - _WINDOW) : match.start()]
     lead, segment = _split(before)
-    post = line[match.end() : match.end() + 60]
+    post = line[end : end + 60]
     source = _source(lead, segment, carried=carried)
     return _Around(
         before, lead, segment, post, source, _is_alone(line, match), _period(segment, post)
@@ -225,11 +225,15 @@ def _bare_number(match: re.Match[str], amount: int, ctx: _Around) -> str | None:
 
 
 def _fact(line: str, match: re.Match[str], *, carried: bool) -> PriceFact | None:
-    ctx = _around(line, match, carried=carried)
+    figure = numbers(match)
+    if figure is None:
+        return None
+    # Контекст «после» считается от конца записи суммы, а не от конца совпадения:
+    # хвост, не ставший частью суммы («15 млн 500 метров»), — уже слова вокруг неё.
+    ctx = _around(line, match, figure.end, carried=carried)
     unit, written = match.group("unit"), match.group("cur") or match.group("pcur")
     code = currency_code(written)
-    figure = numbers(match)
-    if figure is None or _rejected(ctx, code) or not _unit_ok(unit, code, ctx):
+    if _rejected(ctx, code) or not _unit_ok(unit, code, ctx):
         return None
     low, high = figure.low, figure.high
     factor = scale(unit, written, code, low)
