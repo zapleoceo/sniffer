@@ -22,7 +22,7 @@ def test_the_rank_skips_quarantined_slots_and_chains_without_a_current_passport(
     assert "quarantined_until <=" in sql
     assert "passports.is_current" in sql
     assert "bot_blocked_at" in sql
-    assert "ORDER BY subscriptions.user_id, subscriptions.id" in sql
+    assert "ORDER BY subscriptions.user_id, subscriptions.priority, subscriptions.id" in sql
 
 
 def test_the_rank_and_the_portion_share_one_condition() -> None:
@@ -35,3 +35,11 @@ def test_the_rank_and_the_portion_share_one_condition() -> None:
         "expires_at",
     ):
         assert condition in ranked and condition in due, condition
+
+
+def test_the_lapse_mark_covers_expired_and_switched_off_slots_and_never_overwrites() -> None:
+    sql = text(monitors._lapse_statement(now=NOW))
+    assert "no_slot_since IS NULL" in sql, "начало паузы пишется один раз"
+    assert "subscriptions.is_active IS false" in sql
+    assert "subscriptions.expires_at <=" in sql
+    assert "CASE WHEN (subscriptions.expires_at <=" in sql, "пауза началась с конца срока"

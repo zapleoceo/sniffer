@@ -23,7 +23,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import ColumnElement, Select, Update, func, or_, select, update
+from sqlalchemy import ColumnElement, Select, Update, case, func, or_, select, update
 
 from sniffer.db import models
 from sniffer.db.mappers import to_subscription_state
@@ -95,7 +95,7 @@ def _ranked_statement(user_ids: Sequence[int], *, now: datetime) -> Select[tuple
         .join(models.Passport, _chain() == models.Subscription.passport_root)
         .join(models.User, models.User.id == models.Subscription.user_id)
         .where(models.Subscription.user_id.in_(list(user_ids)), *_servable(now))
-        .order_by(models.Subscription.user_id, models.Subscription.id)
+        .order_by(models.Subscription.user_id, models.Subscription.priority, models.Subscription.id)
     )
 
 
@@ -119,6 +119,21 @@ def _due_statement(
         # на проход новая, и разницы нет; но порция не должна зависеть от того, кто и когда
         # успел прочитать те же строки в этой же сессии.
         .execution_options(populate_existing=True)
+    )
+
+
+def _lapse_statement(*, now: datetime) -> Update:
+    lapsed = models.Subscription.expires_at <= now
+    return (
+        update(models.Subscription)
+        # `no_slot_since IS NULL`: начало паузы пишется один раз, повтор его не сдвигает.
+        .where(
+            models.Subscription.no_slot_since.is_(None),
+            or_(models.Subscription.is_active.is_(False), lapsed),
+        )
+        .values(no_slot_since=case((lapsed, models.Subscription.expires_at), else_=now))
+        .returning(models.Subscription.id)
+        .execution_options(synchronize_session=False)
     )
 
 
@@ -239,9 +254,9 @@ class MonitorRepository(Repository):
     async def ranked_slots(self, user_ids: Sequence[int], *, now: datetime) -> dict[int, list[int]]:
         """Слоты клиентов с правом и без ручной паузы — в порядке приоритета.
 
-        Приоритета как колонки пока нет (его даст биллинг слотов), поэтому порядок — по `id`:
-        более ранняя подписка старше. Условие то же `_servable`, что у выбора порции, иначе
-        ранг считался бы среди слотов, которых монитор всё равно не возьмёт (карантинных,
+        Порядок — `priority`, затем `id` (колонка из 016_stars_slots.sql; перенос слота меняет
+        именно её): более ранний по порядку старше. Условие то же `_servable`, что у выбора порции,
+        иначе ранг считался бы среди слотов, которых монитор всё равно не возьмёт (карантинных,
         без текущего паспорта).
         """
         rows = await self._session.execute(_ranked_statement(user_ids, now=now))
@@ -249,6 +264,20 @@ class MonitorRepository(Repository):
         for user_id, subscription_id in rows:
             ranked.setdefault(user_id, []).append(subscription_id)
         return ranked
+
+    async def mark_lapsed(self, *, now: datetime) -> int:
+        """Записать начало паузы слотам, у которых права уже нет, а отметки ещё нет.
+
+        Слот без права (`entitled`: срок вышел или он выключен) в порцию и в ранг не входит,
+        поэтому агент его не видит и `no_slot_since` сам поставить не может. Без этой отметки
+        слот, вернувшийся после продления, включения или переноса, начинал бы с накопленного
+        хвоста: прыжок курсора к «сейчас» срабатывал только на слоты сверх числа подписок,
+        а они лишь часть случаев. Началом паузы служит конец срока (пауза началась тогда, а не
+        когда мы заметили), у выключенного слота без истёкшего срока — «сейчас». Возвращает, у
+        скольких слотов пауза началась.
+        """
+        began = await self._session.execute(_lapse_statement(now=now))
+        return len(began.all())
 
     async def set_no_slot_since(self, subscription_id: int, since: datetime | None) -> None:
         """Отметить, с какого момента слот без права (`None` — снова работает)."""

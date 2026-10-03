@@ -240,12 +240,18 @@ async def test_a_stop_signal_in_the_rate_source_is_not_swallowed(
         await MonitorAgent(rate=Rates(stop)).tick(now=NOW)
 
 
+class NoLimit:
+    async def count(self, user_id: int, now: datetime) -> int | None:
+        return None
+
+
 async def test_the_worker_gives_the_matcher_the_live_dollar_rate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Проводка в точке входа: дефект D2 сидел именно в ней, а не в самом матчере."""
     answers = Rates(RATE)
     monkeypatch.setattr(worker_main, "usd_vnd_rate", answers)
+    monkeypatch.setattr(worker_main, "LedgerSlots", NoLimit)
     world = install(monkeypatch, subscriptions=[usd_subscription()], page=[listing()])
 
     await worker_main.build_monitor().tick(now=NOW)
@@ -479,7 +485,7 @@ async def test_the_pass_cancels_the_lapsed_queue_before_it_takes_new_work(
 
     await matcher.tick(now=NOW)
 
-    assert world.monitors.order[:2] == ["cancel", "claim"]
+    assert world.monitors.order[:3] == ["cancel", "mark_lapsed", "claim"]
     assert world.monitors.cancellations == [{"now": NOW, "grace": timedelta(hours=6)}]
     assert matcher.counters.cancelled_lapsed == 3
 

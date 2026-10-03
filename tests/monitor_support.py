@@ -154,6 +154,7 @@ class FakeMonitors:
     # Слоты клиентов в порядке приоритета; не заданы — все подписки порции в порядке id.
     ranks: dict[int, list[int]] | None = None
     no_slot: dict[int, datetime | None] = field(default_factory=dict)
+    marked: list[datetime] = field(default_factory=list)
     overflow: list[tuple[int, Overflow, int]] = field(default_factory=list)
 
     async def ranked_slots(self, user_ids: Any, *, now: datetime) -> dict[int, list[int]]:
@@ -163,6 +164,11 @@ class FakeMonitors:
         for subscription in sorted(self.ready, key=lambda item: item.id):
             ranked.setdefault(subscription.user_id, []).append(subscription.id)
         return ranked
+
+    async def mark_lapsed(self, *, now: datetime) -> int:
+        self.order.append("mark_lapsed")
+        self.marked.append(now)
+        return 0
 
     async def set_no_slot_since(self, subscription_id: int, since: datetime | None) -> None:
         self.no_slot[subscription_id] = since

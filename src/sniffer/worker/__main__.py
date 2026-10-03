@@ -32,6 +32,7 @@ from sniffer.worker.quota_sweep import ReservationSweep
 from sniffer.worker.recategorize import Recategorize
 from sniffer.worker.retention import Retention
 from sniffer.worker.screening import Screening
+from sniffer.worker.slot_ledger import LedgerSlots
 
 log = structlog.get_logger(__name__)
 
@@ -59,7 +60,7 @@ def build_monitor() -> MonitorAgent:
     не видел — дефект сидел в проводке, а не в самом матчере. Поэтому проводка вынесена в
     функцию, и её проверяет отдельный тест.
     """
-    return MonitorAgent(rate=usd_vnd_rate)
+    return MonitorAgent(rate=usd_vnd_rate, slots=LedgerSlots())
 
 
 # Как часто агент слежения смотрит, не появилось ли новое. Секунды, а не 15 минут коллектора:

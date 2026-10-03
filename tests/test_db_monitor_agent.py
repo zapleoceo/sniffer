@@ -401,3 +401,42 @@ async def test_a_card_of_another_category_still_blocks_the_cursor(
     )
 
     assert found == card.id
+
+
+async def test_mark_lapsed_starts_the_pause_at_the_end_of_the_term_once(
+    db_session: AsyncSession,
+) -> None:
+    now = _now()
+    ended = now - timedelta(days=2)
+    _, expired = await _slot(db_session, 9301, expires_at=ended)
+    _, paid = await _slot(db_session, 9302, expires_at=now + timedelta(days=3))
+    _, unpaid = await _slot(db_session, 9303)
+    monitors = MonitorRepository(db_session)
+
+    assert await monitors.mark_lapsed(now=now) == 1
+    assert await monitors.mark_lapsed(now=now + timedelta(hours=1)) == 0, (
+        "начало паузы не сдвигается"
+    )
+    await db_session.commit()
+
+    async def paused_since(sub_id: int) -> datetime | None:
+        row = await db_session.get(models.Subscription, sub_id, populate_existing=True)
+        assert row is not None
+        return row.no_slot_since
+
+    assert await paused_since(expired) == ended
+    assert await paused_since(paid) is None
+    assert await paused_since(unpaid) is None
+
+
+async def test_ranked_slots_follow_priority_before_id(db_session: AsyncSession) -> None:
+    now = _now()
+    user_id, older = await _slot(db_session, 9311)
+    newer = models.Subscription(user_id=user_id, passport_root=older + 1000, priority=-1)
+    db_session.add(newer)
+    await db_session.flush()
+    await db_session.commit()
+
+    ranked = await MonitorRepository(db_session).ranked_slots([user_id], now=now)
+
+    assert ranked == {user_id: [newer.id, older]}, "перенос слота меняет priority, а не id"

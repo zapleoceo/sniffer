@@ -65,11 +65,10 @@ class Slots(Protocol):
 
 
 class UnlimitedSlots:
-    """Пока биллинг слотов не подключён: все слоты с правом работают.
+    """Без ограничения числа слотов: все слоты с правом работают.
 
-    Заменяется реализацией, которая считает живые подписки Stars (`slots(user, now)` из
-    пакета оплаты). Подключается одним аргументом `MonitorAgent(slots=...)`, и код слота не
-    меняется: ему нужен только ответ «работает или стоит».
+    Умолчание для сборки без биллинга (тесты). В бою `build_monitor` подключает
+    `worker.slot_ledger.LedgerSlots`: число слотов — живые подписки Stars клиента.
     """
 
     async def count(self, user_id: int, now: datetime) -> int | None:
@@ -138,6 +137,11 @@ class MonitorAgent:
             if lapsed:
                 self.counters.cancelled_lapsed += lapsed
                 log.info("monitor.lapsed_cancelled", cancelled=lapsed)
+            # Слот без права порция уже не выбирает: начало его паузы записываем здесь, до
+            # выбора, иначе вернувшийся слот не узнает, сколько простоял.
+            paused = await stores.monitors.mark_lapsed(now=moment)
+            if paused:
+                log.info("monitor.paused_without_right", slots=paused)
             due = await stores.monitors.claim_due(limit=self._batch, now=moment)
             for sick in due.broken:
                 # Паспорт не разобрался: до слота дело не дошло, но молчать о нём нельзя.
@@ -176,10 +180,15 @@ class MonitorAgent:
         if not users:
             return set()
         ranked = await monitors.ranked_slots(users, now=moment)
-        working: set[int] = set()
+        # Слот без срока (`expires_at IS NULL`: выдан владельцем, без платежа) в число
+        # оплаченных не входит и от него не зависит: считать его в ранг значило бы
+        # остановить все такие слоты, у клиента-то оплаченных ноль.
+        unmetered = {item.id for item in ready if item.expires_at is None}
+        working: set[int] = set(unmetered)
         for user_id in users:
             granted = await self._slots.count(user_id, moment)
-            working |= open_slot_ids(ranked.get(user_id, []), granted)
+            paid = [item for item in ranked.get(user_id, []) if item not in unmetered]
+            working |= open_slot_ids(paid, granted)
         return working
 
     async def _pause(

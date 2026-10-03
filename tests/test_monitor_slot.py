@@ -20,6 +20,8 @@ from tests.monitor_support import NOW, World, install, listing, passport, subscr
 
 # 19:00 по Вьетнаму: не тихие часы, сутки 2026-10-03.
 TODAY = date(2026, 10, 3)
+# Оплаченный срок: слот со сроком считается в число подписок, слот без срока — нет.
+PAID = NOW + timedelta(days=3)
 
 
 def many(count: int, first: int = 1) -> list[Listing]:
@@ -204,8 +206,8 @@ async def test_without_new_cards_the_slot_does_not_even_ask_for_them(
 async def test_slots_beyond_the_paid_count_stand_without_losing_anything(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    first = subscription(1)
-    second = subscription(2, user_id=first.user_id, passport_root=202)
+    first = subscription(1, expires_at=PAID)
+    second = subscription(2, user_id=first.user_id, passport_root=202, expires_at=PAID)
     world = install(monkeypatch, subscriptions=[first, second], page=many(2))
     agent = MonitorAgent(slots=Fixed(1))
 
@@ -219,7 +221,8 @@ async def test_slots_beyond_the_paid_count_stand_without_losing_anything(
 
 
 async def test_no_slots_at_all_stops_every_monitor(monkeypatch: pytest.MonkeyPatch) -> None:
-    world = install(monkeypatch, subscriptions=[subscription(1), subscription(2)], page=many(2))
+    paid = [subscription(1, expires_at=PAID), subscription(2, expires_at=PAID)]
+    world = install(monkeypatch, subscriptions=paid, page=many(2))
 
     assert await MonitorAgent(slots=Fixed(0)).tick(now=NOW) == 0
 
@@ -229,7 +232,11 @@ async def test_no_slots_at_all_stops_every_monitor(monkeypatch: pytest.MonkeyPat
 
 async def test_the_pause_start_is_written_once(monkeypatch: pytest.MonkeyPatch) -> None:
     since = NOW - timedelta(hours=3)
-    world = install(monkeypatch, subscriptions=[subscription(1, no_slot_since=since)], page=many(1))
+    world = install(
+        monkeypatch,
+        subscriptions=[subscription(1, expires_at=PAID, no_slot_since=since)],
+        page=many(1),
+    )
 
     await MonitorAgent(slots=Fixed(0)).tick(now=NOW)
 
@@ -277,3 +284,55 @@ async def test_a_filter_edit_keeps_the_cursor_of_the_slot(monkeypatch: pytest.Mo
     [(spec, after_id, _)] = world.listings.asked
     assert spec.city == "da_nang", "применён новый фильтр"
     assert after_id == 7, "курсор прежний"
+
+
+# ── право слота и возврат после паузы (итоговое ревью wave3, находка 1) ──────────────────
+
+
+async def test_the_pause_start_is_marked_before_the_portion_is_chosen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = install(monkeypatch, subscriptions=[subscription(1)], page=many(1))
+
+    await MonitorAgent().tick(now=NOW)
+
+    assert world.monitors.marked == [NOW]
+    assert world.monitors.order.index("mark_lapsed") < world.monitors.order.index("claim")
+
+
+async def test_an_unpaid_slot_without_a_term_is_not_stopped_by_a_zero_slot_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Слот владельца (без срока) не занимает оплаченного места и не зависит от него."""
+    world = install(monkeypatch, subscriptions=[subscription(1)], page=many(1))
+
+    assert await MonitorAgent(slots=Fixed(0)).tick(now=NOW) == 1
+
+    assert world.monitors.scanned == [1] and world.monitors.no_slot == {}
+
+
+async def test_a_paid_slot_beyond_the_live_subscriptions_waits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    term = PAID
+    first = subscription(1, expires_at=term)
+    second = subscription(2, user_id=first.user_id, passport_root=202, expires_at=term)
+    world = install(monkeypatch, subscriptions=[first, second], page=many(1))
+
+    await MonitorAgent(slots=Fixed(1)).tick(now=NOW)
+
+    assert world.monitors.scanned == [1] and world.monitors.no_slot == {2: NOW}
+
+
+async def test_a_slot_back_after_a_long_gap_starts_from_now_not_from_the_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Продление после истечения: пауза записана `mark_lapsed` (>24 ч), курсор прыгает."""
+    gap = NOW - timedelta(days=5)
+    renewed = subscription(1, expires_at=NOW + timedelta(days=30), no_slot_since=gap)
+    world = install(monkeypatch, subscriptions=[renewed], page=many(3))
+    world.listings.head = 900
+
+    assert await MonitorAgent(slots=Fixed(1)).tick(now=NOW) == 0
+
+    assert (1, 900) in world.delivery.advanced and world.monitors.no_slot == {1: None}
