@@ -101,3 +101,13 @@ async def test_start_shows_the_keyboard_and_help_names_the_buttons(
 def test_the_command_menu_has_the_same_items_as_the_keyboard() -> None:
     names = {name for name, _ in COMMANDS}
     assert {"new", "requests", "plan", "subscription", "help"} <= names
+
+
+def test_menu_and_payment_routers_come_before_the_dialog_in_the_dispatcher() -> None:
+    """Подпись кнопки — обычный текст: после диалога его `F.text` принял бы её за поиск."""
+    from sniffer.bot import app as bot_app
+
+    names = [router.name for router in bot_app.build_dispatcher().sub_routers]
+    assert names.index("menu") < names.index("search")
+    assert names.index("billing") < names.index("search")
+    assert names.index("slots") < names.index("search")
