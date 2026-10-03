@@ -1,46 +1,51 @@
-"""Колонки-часовые деплоя: правило «свежий ALTER — свой часовой» держит CI, а не память.
+"""Часовые деплоя: «свежий ALTER и новая таблица — своя строка» держит CI, а не память.
 
-Часовой — строка `require_column <таблица> <колонка>` в `infra/deploy.sh`, которая
-валит деплой, если ALTER не доехал до живой базы (живой отказ 02.09.2026: таблицы
-были, колонок не было, а деплой рапортовал успех). Охрана у такой проверки
-хрупкая в трёх местах, и каждое было найдено пробной мутацией, а не чтением:
+Часовой — строка таблицы `schema_sentinels` в `infra/deploy.sh`: `таблица колонка`
+для колонки из `ALTER TABLE … ADD COLUMN IF NOT EXISTS` и `таблица` для новой
+таблицы целиком. Он валит деплой, если миграция не доехала до живой базы (живой
+отказ 02.09.2026: таблицы были, колонок не было, а деплой рапортовал успех).
+Охрана у такой проверки хрупкая в четырёх местах, и каждое было найдено пробной
+мутацией, а не чтением:
 
 * часовой заменили константой (`HAS_NEW=1`) — проверка исчезла, деплой зелёный;
 * в имени колонки опечатка, записанная в другом регистре, — деплой вечно красный;
-* новая колонка появилась, а часового на ней нет — и никто этого не заметил.
+* появилась новая колонка или таблица, а строки на ней нет — и никто не заметил;
+* строки на месте, а цикл, который их читает, никто не вызывает.
 
-Поэтому здесь проверяется не вид строк, а три вещи. Пары «таблица — колонка»
-читаются из самого скрипта и сверяются с моделями и с ALTER ИМЕННО ЭТОЙ таблицы.
-Любой ALTER, которого не было на момент введения правила, обязан иметь часового
-(храповик: список старых закрыт и только сокращается). А сама функция
-исполняется на подставном `docker`, и по её поведению видно, что отсутствие
-колонки красит деплой, а присутствие — нет.
+Поэтому здесь проверяется не вид строк, а устройство. Строки читаются из самого
+скрипта и сверяются с моделями и с DDL ИМЕННО ЭТОЙ таблицы. Любой ALTER и любая
+таблица, которых не было на момент введения правила, обязаны иметь строку
+(храповик: списки старых закрыты и только сокращаются). Саму функцию и цикл
+исполняет `test_deploy_sentinel_run.py` на подставном `docker`.
 """
 
 from __future__ import annotations
 
 import re
-import shutil
-import subprocess
 from pathlib import Path
-
-import pytest
 
 from sniffer.db import collection_models as _collection_models  # noqa: F401
 from sniffer.db.models import Base
-from tests.sql_chain_support import SQL_DIR, added_columns
+from tests.deploy_support import Row, script, sentinel_rows
+from tests.shell_support import function_source
+from tests.sql_chain_support import SQL_DIR, added_columns, created_tables
 
-ROOT = Path(__file__).resolve().parents[1]
-DEPLOY = ROOT / "infra" / "deploy.sh"
-
-# Вызов часового: отдельная строка, хвостовой комментарий допускается.
-_CALL = re.compile(r"^[ \t]*require_column[ \t]+(\w+)[ \t]+(\w+)[ \t]*(?:#.*)?$", re.MULTILINE)
-_FUNCTION = re.compile(r"^require_column\(\) \{\n.*?^\}\n", re.MULTILINE | re.DOTALL)
+# Часовые, которые стояли в деплое ДО таблицы (отдельными вызовами и блоком
+# «хвост цепочки»). Таблица их заменила, и ни одна проверка не должна потеряться:
+# убрать строку можно только вместе с самой колонкой или таблицей.
+ORIGINAL = frozenset(
+    {
+        ("listings", "source"),
+        ("users", "awaiting_new_request"),
+        ("passports", "last_used_at"),
+        ("schema_proposals", None),
+    }
+)
 
 # ALTER'ы, существовавшие к введению правила, у которых часового нет. Список
 # ЗАКРЫТ: новая строка в него — это обход правила, и ревью обязано её заметить.
 # Список только сокращается: появился часовой — строка отсюда уходит, иначе
-# `test_the_legacy_list_only_names_real_unguarded_alters` краснеет.
+# `test_the_legacy_lists_only_name_real_unguarded_objects` краснеет.
 LEGACY_WITHOUT_SENTINEL = frozenset(
     {
         "chats.backfill_msg_id",
@@ -62,31 +67,62 @@ LEGACY_WITHOUT_SENTINEL = frozenset(
     }
 )
 
+# Таблицы, существовавшие к введению правила, без строки. Закрыт по той же
+# причине и сокращается так же. Таблица, которой здесь нет, обязана попасть в
+# `schema_sentinels` в том же коммите, что и её DDL.
+LEGACY_TABLES_WITHOUT_SENTINEL = frozenset(
+    {
+        "broker_calls",
+        "catalog_coverage",
+        "catalog_observations",
+        "catalog_publications",
+        "chat_candidates",
+        "chat_join_events",
+        "chat_rejects",
+        "chats",
+        "client_requests",
+        "collection_actions",
+        "collection_subscribers",
+        "collection_tasks",
+        "dialog_messages",
+        "jobs",
+        "listing_media",
+        "notifications",
+        "outbox",
+        "passport_events",
+        "payments",
+        "raw_messages",
+        "sellers",
+        "subscriptions",
+        "telegram_sessions",
+    }
+)
 
-def _script() -> str:
-    return DEPLOY.read_text(encoding="utf-8")
 
-
-def _sentinels() -> list[tuple[str, str]]:
-    return _CALL.findall(_script())
-
-
-def _alters(directory: Path = SQL_DIR) -> set[tuple[str, str]]:
-    """Пары «таблица — колонка» из всех `ALTER TABLE … ADD COLUMN IF NOT EXISTS`."""
-    return added_columns(directory)
-
-
-def _guard() -> str:
-    found = _FUNCTION.search(_script())
-    assert found, "функции require_column в deploy.sh нет — часовые стали вызовами в пустоту"
-    return found.group(0)
+def unguarded(directory: Path, rows: list[Row]) -> tuple[list[str], list[str]]:
+    """Что цепочка добавляет без часового: колонки `таблица.колонка` и таблицы."""
+    guarded_columns: set[tuple[str, str]] = {(t, c) for t, c in rows if c is not None}
+    guarded_tables = {table for table, _ in rows}
+    columns = sorted(f"{t}.{c}" for t, c in added_columns(directory) - guarded_columns)
+    tables = sorted(created_tables(directory) - guarded_tables)
+    return (
+        [name for name in columns if name not in LEGACY_WITHOUT_SENTINEL],
+        [name for name in tables if name not in LEGACY_TABLES_WITHOUT_SENTINEL],
+    )
 
 
 # ── что часовой называет ────────────────────────────────────────────────────
 
 
 def test_the_script_has_sentinels_at_all() -> None:
-    assert _sentinels(), "часовых не нашлось — проверка охраняет пустоту"
+    assert sentinel_rows(), "часовых не нашлось — проверка охраняет пустоту"
+
+
+def test_the_table_keeps_the_sentinels_that_existed_before_it() -> None:
+    """Таблица заменила отдельные вызовы и блок «хвоста цепочки»: проверки не теряются."""
+    lost = ORIGINAL - set(sentinel_rows())
+
+    assert not lost, f"пропал часовой, стоявший в деплое до таблицы: {sorted(lost, key=str)}"
 
 
 def test_there_is_exactly_one_column_probe_and_it_is_the_function() -> None:
@@ -96,23 +132,31 @@ def test_there_is_exactly_one_column_probe_and_it_is_the_function() -> None:
     не стоило ничего. Запрос к `information_schema.columns` один — в функции.
     """
     probe = "information_schema.columns"
+    guard = function_source(script(), "require_column")
 
-    assert _script().count(probe) == _guard().count(probe) == 1, (
+    assert script().count(probe) == guard.count(probe) == 1, (
         "запрос к information_schema.columns вне require_column: часовой-копия"
     )
 
 
-def test_every_sentinel_names_a_model_column_that_an_alter_adds_to_that_table() -> None:
+def test_every_sentinel_names_a_model_object_that_the_chain_adds() -> None:
     """Опечатка делает часового вечно красным, переименование — вечно зелёным.
 
-    ALTER сверяется ПО ТАБЛИЦЕ: `users.created_at` прошёл бы сверку «где-нибудь
-    есть ADD COLUMN created_at» за счёт `notifications`, хотя на `users` такого
-    ALTER нет и часовой охранял бы чужую колонку.
+    ALTER сверяется ПО ТАБЛИЦЕ: `users.created_at` прошёл бы сверку «где-нибудь есть
+    ADD COLUMN created_at» за счёт `notifications`, хотя на `users` такого ALTER нет
+    и часовой охранял бы чужую колонку. Часовой на таблице целиком обязан ссылаться
+    на таблицу, которую цепочка действительно создаёт.
     """
-    alters = _alters()
+    alters, created = added_columns(), created_tables()
 
-    for table, column in _sentinels():
+    for table, column in sentinel_rows():
         assert table in Base.metadata.tables, f"{table}: нет такой таблицы в моделях"
+        if column is None:
+            assert table in created, (
+                f"{table}: ни одного `CREATE TABLE IF NOT EXISTS {table}` — "
+                "часовой охраняет несуществующее"
+            )
+            continue
         assert column in {c.name for c in Base.metadata.tables[table].columns}, (
             f"{table}.{column}: нет в моделях"
         )
@@ -123,177 +167,81 @@ def test_every_sentinel_names_a_model_column_that_an_alter_adds_to_that_table() 
 
 
 def test_a_sentinel_is_not_listed_twice() -> None:
-    pairs = _sentinels()
+    rows = sentinel_rows()
 
-    assert len(pairs) == len(set(pairs)), "один и тот же часовой дважды"
+    assert len(rows) == len(set(rows)), "один и тот же часовой дважды"
 
 
-# ── храповик: свежий ALTER без часового краснит сборку ──────────────────────
+# ── храповик: свежий ALTER или таблица без часового краснит сборку ───────────
 
 
 def test_a_fresh_alter_without_a_sentinel_turns_the_build_red() -> None:
-    """Правило «новая колонка — свой часовой» исполняется, а не помнится.
+    """Правило «новая колонка — своя строка» исполняется, а не помнится.
 
-    «Свежий» здесь — любой ALTER, которого нет в закрытом списке старых. Забыл
-    часового — упал этот тест, и сообщение называет, что дописать. Убрали
-    существующий часовой — упал он же: колонка снова «свежая и без охраны».
+    «Свежий» — любой ALTER, которого нет в закрытом списке старых. Забыл строку —
+    упал этот тест, и сообщение называет, что дописать. Убрали существующую —
+    упал он же: колонка снова «свежая и без охраны».
     """
-    guarded = set(_sentinels())
-    fresh = {f"{table}.{column}" for table, column in _alters() - guarded}
-    unguarded = sorted(fresh - LEGACY_WITHOUT_SENTINEL)
+    columns, _ = unguarded(SQL_DIR, sentinel_rows())
 
-    assert not unguarded, (
+    assert not columns, (
         "ALTER без часового: "
-        + ", ".join(unguarded)
-        + " — допишите в infra/deploy.sh строку `require_column <таблица> <колонка>`"
+        + ", ".join(columns)
+        + " — допишите в `schema_sentinels` (infra/deploy.sh) строку `<таблица> <колонка>`"
     )
 
 
-def test_the_legacy_list_only_names_real_unguarded_alters() -> None:
-    """Закрытый список не врёт: в нём нет ни выдуманных, ни уже охраняемых строк."""
-    alters = {f"{table}.{column}" for table, column in _alters()}
-    guarded = {f"{table}.{column}" for table, column in _sentinels()}
+def test_a_fresh_table_without_a_sentinel_turns_the_build_red() -> None:
+    """То же для таблиц: деньги и права живут в НОВЫХ таблицах, а «таблиц ≥ 5» их не видит."""
+    _, tables = unguarded(SQL_DIR, sentinel_rows())
+
+    assert not tables, (
+        "таблица без часового: "
+        + ", ".join(tables)
+        + " — допишите в `schema_sentinels` (infra/deploy.sh) строку `<таблица>`"
+    )
+
+
+def test_the_legacy_lists_only_name_real_unguarded_objects() -> None:
+    """Закрытые списки не врут: в них нет ни выдуманных, ни уже охраняемых строк."""
+    rows = sentinel_rows()
+    alters = {f"{table}.{column}" for table, column in added_columns()}
+    guarded = {f"{table}.{column}" for table, column in rows if column}
+    guarded_tables = {table for table, _ in rows}
 
     assert LEGACY_WITHOUT_SENTINEL <= alters, sorted(LEGACY_WITHOUT_SENTINEL - alters)
     assert not LEGACY_WITHOUT_SENTINEL & guarded, "часовой появился — уберите строку из списка"
+    assert LEGACY_TABLES_WITHOUT_SENTINEL <= created_tables()
+    assert not LEGACY_TABLES_WITHOUT_SENTINEL & guarded_tables, "часовой появился — уберите таблицу"
 
 
-def test_the_alter_scan_sees_a_column_from_a_file_numbered_010(tmp_path: Path) -> None:
-    """Подставной `010_probe.sql`: ALTER за двузначной маской остался бы без часового."""
+def test_the_ratchets_see_a_table_and_a_column_from_a_file_numbered_010(tmp_path: Path) -> None:
+    """Подставной `010_probe.sql`: за двузначной маской новая таблица осталась бы без часового."""
     (tmp_path / "010_probe.sql").write_text(
-        "ALTER TABLE users ADD COLUMN IF NOT EXISTS probe_flag BOOLEAN;", encoding="utf-8"
+        "CREATE TABLE IF NOT EXISTS probe_things (\n    id BIGINT\n);\n"
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS probe_flag BOOLEAN;\n",
+        encoding="utf-8",
     )
 
-    assert _alters(tmp_path) == {("users", "probe_flag")}
+    assert unguarded(tmp_path, []) == (["users.probe_flag"], ["probe_things"])
+    assert unguarded(tmp_path, [("probe_things", None), ("users", "probe_flag")]) == ([], [])
 
 
-# ── сама функция: красит ли она деплой ──────────────────────────────────────
+# ── устройство: часовые не обходятся и не остаются без вызова ────────────────
 
 
-def _bash(program: str) -> str | None:
-    """Выполнить программу в bash и вернуть stdout+stderr. `None` — bash недоступен.
+def test_a_sentinel_is_called_from_exactly_one_place_and_it_is_the_loop() -> None:
+    """Прямой вызов `require_column` вне цикла — второй способ завести часового, то есть копия."""
+    calls = re.findall(r"^[ \t]*require_column[ \t].*$", script(), re.MULTILINE)
+    loop = function_source(script(), "check_schema_sentinels")
 
-    Программа уходит на stdin БАЙТАМИ: в текстовом режиме Windows превратил бы
-    `\\n` в `\\r\\n`, и bash читал бы чужой скрипт с `\\r` в конце каждой строки.
-    """
-    exe = shutil.which("bash")
-    if exe is None:
-        return None
-    try:
-        done = subprocess.run(  # noqa: S603 - фиксированный argv
-            [exe, "-s"],
-            input=program.encode("utf-8"),
-            capture_output=True,
-            timeout=60,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    text = (done.stdout + done.stderr).decode("utf-8", errors="replace")
-    return f"{text}\nEXIT={done.returncode}"
-
-
-def _bash_works() -> bool:
-    out = _bash("echo ok")
-    return out is not None and out.startswith("ok")
-
-
-needs_bash = pytest.mark.skipif(not _bash_works(), reason="bash недоступен: функцию не запустить")
-
-
-def _run_guard(
-    answer: str,
-    table: str = "users",
-    column: str = "awaiting_new_request",
-    *,
-    docker_exit: int = 0,
-) -> str:
-    """Исполняет `require_column` против подставного `docker` и отдаёт итог одним текстом.
-
-    Подставной `docker` отвечает `answer` ТОЛЬКО на запрос про
-    `users.awaiting_new_request` (по тексту запроса, как настоящая база), на всё
-    остальное — нулём: перепутанные местами таблица и колонка или чужая колонка
-    в запросе видны как «часовой не нашёл колонку». Порядок условий в запросе
-    не важен. `docker_exit` — код возврата самого `docker`: контейнер мог не
-    ответить вовсе.
-    """
-    program = "\n".join(
-        [
-            "FAIL=0",
-            "PG_CID=fake",
-            'info() { echo "INFO: $*"; }',
-            "docker() {",
-            f"  if [ {docker_exit} -ne 0 ]; then return {docker_exit}; fi",
-            '  if [[ "$*" == *"table_name=\'users\'"* && '
-            '"$*" == *"column_name=\'awaiting_new_request\'"* ]]; then',
-            f"    printf '%s\\n' '{answer}'",
-            "  else",
-            "    printf '0\\n'",
-            "  fi",
-            "}",
-            _guard(),
-            f"require_column {table} {column}",
-            'echo "FAIL=$FAIL"',
-        ]
-    )
-    out = _bash(program)
-    assert out is not None
-    return out
-
-
-@needs_bash
-def test_a_present_column_leaves_the_deploy_green() -> None:
-    out = _run_guard("1")
-
-    assert "FAIL=0" in out
-    assert "users.awaiting_new_request на месте" in out
-
-
-@needs_bash
-@pytest.mark.parametrize(
-    "answer", ["0", "", "ERROR", "t"], ids=["zero", "empty", "error", "garbage"]
-)
-def test_a_missing_column_or_an_unreadable_answer_turns_the_deploy_red(answer: str) -> None:
-    """Не число — то же, что ноль: `[ x -lt 1 ]` на не-числе молча уходит в «на месте»."""
-    out = _run_guard(answer)
-
-    assert "FAIL=1" in out
-    assert "users.awaiting_new_request отсутствует" in out
-
-
-@needs_bash
-def test_a_docker_that_does_not_answer_turns_the_deploy_red() -> None:
-    """Контейнер базы мог лежать: молчание — не «колонка на месте»."""
-    out = _run_guard("", docker_exit=1)
-
-    assert "FAIL=1" in out
-    assert "users.awaiting_new_request отсутствует" in out
-
-
-@needs_bash
-def test_the_probe_asks_about_the_named_table_and_column() -> None:
-    """Подставной docker отвечает «1» только на `users.awaiting_new_request`.
-
-    Вызов про другую колонку обязан получить «нет»: иначе функция спрашивает не
-    о том, что ей назвали.
-    """
-    out = _run_guard("1", table="users", column="is_blocked")
-
-    assert "FAIL=1" in out
-    assert "users.is_blocked отсутствует" in out
-
-
-@needs_bash
-def test_the_deploy_script_parses() -> None:
-    """Опечатка в скрипте красит каждый деплой, а ловится только на сервере."""
-    exe = shutil.which("bash")
-    assert exe is not None
-    done = subprocess.run(  # noqa: S603 - фиксированный argv
-        [exe, "-n"],
-        input=_script().encode("utf-8"),
-        capture_output=True,
-        timeout=60,
-        check=False,
+    assert len(calls) == 1 and calls[0].strip() in loop, (
+        "часовые заводятся строками `schema_sentinels`, а не вызовами: " + str(calls)
     )
 
-    assert done.returncode == 0, done.stderr.decode("utf-8", errors="replace")
+
+def test_the_functional_check_runs_the_loop() -> None:
+    """Строки без вызова цикла — таблица в пустоту: деплой зелёный при любой базе."""
+    calls = re.findall(r"^[ \t]+check_schema_sentinels[ \t]*$", script(), re.MULTILINE)
+
+    assert len(calls) == 1, f"цикл часовых вызывается {len(calls)} раз, ожидался ровно один"

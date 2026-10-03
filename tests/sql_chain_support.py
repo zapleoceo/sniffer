@@ -21,6 +21,7 @@ MASK = "[0-9][0-9][0-9]_*.sql"
 
 _ALTER = re.compile(r"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(\w+)\s+(.*?)(?:;|\Z)", re.I | re.S)
 _ADD = re.compile(r"ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+(\w+)", re.I)
+_CREATE = re.compile(r"CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+(\w+)", re.I)
 
 
 def chain(directory: Path = SQL_DIR) -> list[Path]:
@@ -41,3 +42,8 @@ def added_columns(directory: Path = SQL_DIR) -> set[tuple[str, str]]:
         for match in _ALTER.finditer(ddl(directory))
         for column in _ADD.findall(match.group(2))
     }
+
+
+def created_tables(directory: Path = SQL_DIR) -> set[str]:
+    """Таблицы, которые цепочка создаёт: `CREATE TABLE IF NOT EXISTS <имя>`."""
+    return set(_CREATE.findall(ddl(directory)))
