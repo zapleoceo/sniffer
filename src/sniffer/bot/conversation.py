@@ -21,7 +21,7 @@ from typing import Protocol, cast
 import structlog
 
 from sniffer.bot import journal, wording
-from sniffer.bot.billing import OFFER
+from sniffer.bot.billing_wording import OFFER
 from sniffer.bot.cards import render_cards
 from sniffer.bot.store import Client, Dialogue, DialogueStore
 from sniffer.bot.threads import open_thread

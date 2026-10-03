@@ -20,6 +20,7 @@ from aiogram.types import LinkPreviewOptions
 from sniffer.config import Settings, get_settings
 from sniffer.notifier.delivery import Delivery, Sender
 from sniffer.runtime.service import Service, idle_loop, run_service
+from sniffer.telegram_env import bot_session
 
 log = structlog.get_logger(__name__)
 
@@ -36,7 +37,8 @@ def missing_settings(settings: Settings) -> list[str]:
 
 async def run(stop: asyncio.Event) -> None:
     log.info("notifier.started")
-    bot = Bot(token=get_settings().bot_token)
+    settings = get_settings()
+    bot = Bot(token=settings.bot_token, session=bot_session(settings))
     delivery = Delivery(_sender(bot))
     try:
         await idle_loop(stop, delivery.tick, service=NAME, poll_interval_s=POLL_INTERVAL_S)

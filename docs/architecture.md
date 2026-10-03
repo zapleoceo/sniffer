@@ -682,6 +682,33 @@ LLM в цикле уведомлений почти не участвует: и�
 пользователем в первые сутки — это не гипотеза, а стандартная судьба
 алерт-ботов.
 
+### 7.1 Оплата звёздами: устройство в `bot/`
+
+Правила — [monetization.md](monetization.md), проверка живьём —
+[payments-live-check.md](payments-live-check.md). Устройство держится на одном приёме,
+том же, что у клиента брокера: бизнес-логика не знает ни aiogram, ни базы, а внешний мир
+приходит протоколами (`bot/billing_ports.py`: `BotApi` и `Ledger`).
+
+| Модуль | Ответственность | Знает |
+|---|---|---|
+| `domain/plans.py` | цена, период, валюта, потолки — числа одного места | ничего |
+| `domain/billing.py` | виды платежа, причины отказа, строка журнала, событие | ничего |
+| `bot/billing.py` | правила без ввода-вывода: нагрузка счёта v2, проверки, вердикт о платеже | `domain` |
+| `bot/billing_wording.py`, `billing_owner_wording.py` | что говорим клиенту и владельцу | `domain` |
+| `bot/billing_service.py` | покупка: экран с цифрами, ссылка, `pre_checkout` в 8 секунд | порты |
+| `bot/billing_payments.py` | платёж после списания, возвраты, события подписки | порты |
+| `bot/billing_support.py` | `/paysupport`, `/support` | порты |
+| `bot/billing_guard.py` | охрана шагов до корня иерархии исключений | — |
+| `bot/billing_ledger.py`, `billing_telegram.py` | адаптеры: база и Bot API | `db`, aiogram |
+| `bot/billing_ui.py`, `bot/handlers/billing.py` | кнопки и роутер: тонкий слой над сервисами | aiogram |
+| `db/repositories/billing.py` | весь SQL оплаты | `db`, `domain` |
+
+Лист-проверки: модули логики не должны тянуть ни `sniffer.db`, ни aiogram — это проверяет
+`tests/test_billing_isolation.py` запуском в отдельном процессе. Роутер оплаты подключается
+**до** диалога (`bot/app.py`): `F.text` диалога ловит всё, в том числе команды, а
+`/paysupport` обязателен по ToS Telegram. Схема — `infra/sql/011_stars_billing.sql`
+(`payments` расширена, добавлены `user_consents` и `billing_events`).
+
 ## 8. Что используем
 
 | Слой | Решение | Статус | Почему это |

@@ -30,6 +30,21 @@ class PaymentKind(StrEnum):
     UNKNOWN = "unknown"
 
 
+class Reason(StrEnum):
+    """Почему платёж или счёт не принят. Клиенту каждая причина говорится своими словами."""
+
+    LEGACY_INVOICE = "legacy_invoice"
+    BAD_PAYLOAD = "bad_payload"
+    FOREIGN_BUYER = "foreign_buyer"
+    WRONG_CURRENCY = "wrong_currency"
+    WRONG_AMOUNT = "wrong_amount"
+    NOT_A_SUBSCRIPTION = "not_a_subscription"
+    NO_CONSENT = "no_consent"
+    UNAVAILABLE = "unavailable"
+    TIMEOUT = "timeout"
+    INTERRUPTED = "interrupted"
+
+
 class EventKind(StrEnum):
     """Что записано в журнале событий оплаты (`billing_events.kind`)."""
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from functools import lru_cache
 from typing import Annotated, Literal
 
@@ -16,11 +17,29 @@ def _empty_to_zero(v: object) -> object:
     return v
 
 
+def _blank_to(default: int) -> Callable[[object], object]:
+    """Пустое значение в `.env` — «не заведено»: берём умолчание, а не роняем процесс."""
+
+    def convert(v: object) -> object:
+        return default if isinstance(v, str) and not v.strip() else v
+
+    return convert
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     # Telegram — бот (клиентский интерфейс)
     bot_token: str = ""
+    # `test` — тестовая среда Telegram (отдельные аккаунты и боты, звёзды бесплатны): так
+    # проверяют оплату без списаний (docs/payments-live-check.md). В бою пусто или `prod`.
+    # Токен тестового бота в боевой среде не работает, и наоборот: перепутать нечем.
+    telegram_env: str = "prod"
+    # Срок ответа на обращения по оплате (`/paysupport`), часов. Пишется в условиях и в
+    # ответе клиенту: Telegram требует отвечать на такие обращения вовремя.
+    paysupport_reply_hours: Annotated[int, BeforeValidator(_blank_to(48))] = Field(
+        default=48, ge=1, le=720
+    )
 
     # Telegram — юзербот (чтение сообществ)
     # Пустая строка в .env — это "не заведено", а не ошибка типа. Без
@@ -96,6 +115,10 @@ class Settings(BaseSettings):
     extract_batch: int = 10
     default_city: str = "nha_trang"
     log_level: str = "INFO"
+
+    @property
+    def telegram_test_environment(self) -> bool:
+        return self.telegram_env.strip().lower() == "test"
 
     @property
     def media_enabled(self) -> bool:

@@ -16,6 +16,7 @@ from collections.abc import Iterable
 from aiogram.filters.callback_data import CallbackData
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from sniffer.bot.billing_wording import SUBSCRIBE_LABEL
 from sniffer.bot.conversation import Reply
 from sniffer.bot.threads import labels
 from sniffer.domain.records import QueryOverview
@@ -24,9 +25,9 @@ from sniffer.domain.records import QueryOverview
 # ряд ещё читаются, длинные подписи телефон обрежет.
 ROW = 2
 
-# Цена стоит прямо на кнопке. Кнопка «следить», ведущая к счёту без
-# предупреждения о деньгах, — это тёмный паттерн, даже если речь про звезду.
-SUBSCRIBE_LABEL = "🔔 Следить за новыми — 1 ⭐/мес"
+# Подпись «Следить» с ценой — `billing_wording.SUBSCRIBE_LABEL`: цена стоит прямо на
+# кнопке (кнопка, ведущая к счёту без предупреждения о деньгах, — тёмный паттерн, даже
+# если речь про звезду), а число звёзд берётся из тарифа и здесь не пишется.
 
 # Отдельная ветка на каждый поиск — то, из-за чего уточнение не уезжает в чужой
 # паспорт. Подпись говорит «новый», а не «сбросить»: прежний поиск остаётся.

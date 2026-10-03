@@ -20,10 +20,11 @@ from aiogram import Bot
 from aiogram.filters import Command
 from aiogram.types import Chat, Message, User
 
-from sniffer.bot import billing, keyboards, query_menu, threads
+from sniffer.bot import billing_wording, keyboards, query_menu, threads
 from sniffer.bot.handlers import search as handler
 from sniffer.bot.keyboards import RequestsCallback, requests_markup
 from sniffer.bot.store import Client
+from sniffer.domain.billing import Reason
 from sniffer.domain.passport import Budget, Category, Currency, Intent
 from sniffer.domain.records import QueryOverview
 from sniffer.domain.threads import MAX_LIVE_THREADS
@@ -345,11 +346,11 @@ def test_the_person_sees_searches_not_branches_or_requests() -> None:
         keyboards.SEARCHES_LABEL,
         keyboards.ALL_SEARCHES_LABEL,
         # Подписка и оплата называют тот же поиск: третье имя для него здесь не нужно.
-        billing.DESCRIPTION,
-        billing.THANKS,
-        billing.ALREADY,
-        billing.PAYLOAD_REFUSED,
-        billing.PAYMENT_STRANDED,
+        billing_wording.invoice_description(),
+        billing_wording.confirmation(1),
+        billing_wording.OFFER,
+        billing_wording.refusal(Reason.BAD_PAYLOAD),
+        billing_wording.payment_refunded(Reason.WRONG_AMOUNT),
     ]
 
     for text in shown:
