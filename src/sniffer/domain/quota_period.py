@@ -10,22 +10,30 @@ k месяцев, с обрезкой дня по длине месяца.
 накапливалась бы (31 янв → 28 фев → 28 мар), и день уходил бы навсегда. От
 якоря 31 января границы такие: 28 февраля, 31 марта, 30 апреля, 31 мая.
 
-Время только UTC и только с часовым поясом: граница, посчитанная в местном
-времени, сдвигалась бы на час-два и менялась бы от сервера к серверу, а
-«точность расчёта» — требование владельца. Наивный момент — это баг вызывающего,
-и здесь он падает громко, а не угадывается.
+Календарь — вьетнамский (UTC+7): клиенты живут во Вьетнаме, и «месяц» для них
+считается по местным числам. Арифметика в UTC давала бы странное: пришёл 31
+октября в два часа ночи по местному времени (30 октября 19:00 UTC) — граница
+выпала бы на 1 декабря по местному, хотя «месяц спустя» — 30 ноября. У Вьетнама
+нет перехода на летнее время, поэтому фиксированный сдвиг даёт тот же результат,
+что и база часовых поясов, и не требует `tzdata` на сервере. Хранится и
+возвращается всё равно UTC: граница — это момент, а не запись о поясе.
+
+Момент без часового пояса — баг вызывающего, и здесь он падает громко, а не
+угадывается: «точность расчёта» — требование владельца.
 """
 
 from __future__ import annotations
 
 import calendar
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
+
+VIETNAM = timezone(timedelta(hours=7), "Asia/Ho_Chi_Minh")
 
 
 @dataclass(frozen=True, slots=True)
 class Period:
-    """Полуинтервал [start, end): конец уже принадлежит следующему периоду."""
+    """Полуинтервал [start, end) в UTC: конец уже принадлежит следующему периоду."""
 
     start: datetime
     end: datetime
@@ -40,17 +48,20 @@ def _utc(moment: datetime) -> datetime:
     return moment.astimezone(UTC)
 
 
-def add_months(moment: datetime, months: int) -> datetime:
-    """Тот же момент через `months` календарных месяцев; день обрезается по длине месяца."""
-    moment = _utc(moment)
-    index = moment.year * 12 + (moment.month - 1) + months
+def add_months(moment: datetime, months: int, zone: tzinfo = VIETNAM) -> datetime:
+    """Тот же момент через `months` календарных месяцев по календарю `zone`.
+
+    День обрезается по длине месяца, время суток сохраняется; результат в UTC.
+    """
+    local = _utc(moment).astimezone(zone)
+    index = local.year * 12 + (local.month - 1) + months
     year, month_zero = divmod(index, 12)
     month = month_zero + 1
-    day = min(moment.day, calendar.monthrange(year, month)[1])
-    return moment.replace(year=year, month=month, day=day)
+    day = min(local.day, calendar.monthrange(year, month)[1])
+    return local.replace(year=year, month=month, day=day).astimezone(UTC)
 
 
-def period_containing(anchor: datetime, now: datetime) -> Period:
+def period_containing(anchor: datetime, now: datetime, zone: tzinfo = VIETNAM) -> Period:
     """Период якоря, в который попадает `now`.
 
     Момент раньше якоря — расхождение часов между процессами на миллисекунды:
@@ -58,8 +69,9 @@ def period_containing(anchor: datetime, now: datetime) -> Period:
     """
     anchor, now = _utc(anchor), _utc(now)
     if now < anchor:
-        return Period(anchor, add_months(anchor, 1))
-    months = (now.year - anchor.year) * 12 + (now.month - anchor.month)
-    if add_months(anchor, months) > now:
+        return Period(anchor, add_months(anchor, 1, zone))
+    local_anchor, local_now = anchor.astimezone(zone), now.astimezone(zone)
+    months = (local_now.year - local_anchor.year) * 12 + (local_now.month - local_anchor.month)
+    if add_months(anchor, months, zone) > now:
         months -= 1
-    return Period(add_months(anchor, months), add_months(anchor, months + 1))
+    return Period(add_months(anchor, months, zone), add_months(anchor, months + 1, zone))

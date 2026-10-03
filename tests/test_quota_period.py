@@ -8,11 +8,11 @@
 from __future__ import annotations
 
 import random
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 
 import pytest
 
-from sniffer.domain.quota_period import Period, add_months, period_containing
+from sniffer.domain.quota_period import VIETNAM, Period, add_months, period_containing
 
 
 def at(text: str) -> datetime:
@@ -117,6 +117,24 @@ def test_contains_is_half_open() -> None:
     assert not period.contains(period.end)
 
 
+def test_the_calendar_is_vietnamese_so_a_night_anchor_does_not_slip_a_day() -> None:
+    """31 октября в 2 часа ночи по Хошимину — это 30 октября 19:00 UTC.
+
+    Месяц спустя клиент ждёт 30 ноября (обрезка 31 → 30). Арифметика по UTC
+    выдала бы 30 ноября 19:00 UTC, то есть 1 декабря по местному, и «месяц»
+    оказался бы длиннее на день.
+    """
+    anchor = at("2026-10-30T19:00:00")
+
+    local = period_containing(anchor, anchor).end.astimezone(VIETNAM)
+    naive_utc = period_containing(anchor, anchor, UTC).end.astimezone(VIETNAM)
+
+    assert local.date() == date(2026, 11, 30)
+    assert naive_utc.date() == date(2026, 12, 1)
+    # Сдвиг Вьетнама закреплён абсолютным моментом, а не тем же `VIETNAM`, что и в коде.
+    assert period_containing(anchor, anchor).end == at("2026-11-29T19:00:00")
+
+
 def reference_days_in_month(year: int, month: int) -> int:
     """Длина месяца без `calendar`: через разность первых чисел."""
     first = datetime(year, month, 1, tzinfo=UTC)
@@ -124,45 +142,49 @@ def reference_days_in_month(year: int, month: int) -> int:
     return (following - first).days
 
 
-def reference_add(anchor: datetime, months: int) -> datetime:
-    """Шаг за шагом, месяц за месяцем: второй способ получить ту же границу."""
-    year, month = anchor.year, anchor.month
+def reference_add(anchor: datetime, months: int, zone: timezone) -> datetime:
+    """Шаг за шагом, месяц за месяцем, по местному календарю: второй способ."""
+    local = anchor.astimezone(zone)
+    year, month = local.year, local.month
     for _ in range(months):
         month += 1
         if month == 13:
             year, month = year + 1, 1
-    return anchor.replace(
-        year=year, month=month, day=min(anchor.day, reference_days_in_month(year, month))
+    moved = local.replace(
+        year=year, month=month, day=min(local.day, reference_days_in_month(year, month))
     )
+    return moved.astimezone(UTC)
 
 
-def reference_period(anchor: datetime, now: datetime) -> tuple[datetime, datetime]:
+def reference_period(anchor: datetime, now: datetime, zone: timezone) -> tuple[datetime, datetime]:
     index = 0
-    while reference_add(anchor, index + 1) <= now:
+    while reference_add(anchor, index + 1, zone) <= now:
         index += 1
-    return reference_add(anchor, index), reference_add(anchor, index + 1)
+    return reference_add(anchor, index, zone), reference_add(anchor, index + 1, zone)
 
 
-def test_the_periods_agree_with_an_independent_stepwise_calculation() -> None:
+@pytest.mark.parametrize("zone", [VIETNAM, UTC, timezone(timedelta(hours=-5))], ids=str)
+def test_the_periods_agree_with_an_independent_stepwise_calculation(zone: timezone) -> None:
     generator = random.Random(20261003)  # noqa: S311 -- воспроизводимая выборка, не секрет
     base = datetime(2024, 1, 1, tzinfo=UTC)
     for _ in range(3000):
         anchor = base + timedelta(seconds=generator.randrange(3 * 365 * 86_400))
         now = anchor + timedelta(seconds=generator.randrange(2 * 365 * 86_400))
 
-        period = period_containing(anchor, now)
+        period = period_containing(anchor, now, zone)
 
-        assert (period.start, period.end) == reference_period(anchor, now), (anchor, now)
+        assert (period.start, period.end) == reference_period(anchor, now, zone), (anchor, now)
         assert period.contains(now)
         assert 28 <= (period.end - period.start).days <= 31
 
 
-def test_consecutive_periods_touch_without_gaps_or_overlaps() -> None:
+@pytest.mark.parametrize("zone", [VIETNAM, UTC], ids=str)
+def test_consecutive_periods_touch_without_gaps_or_overlaps(zone: timezone) -> None:
     anchor = at("2027-01-31T23:59:59")
-    period = period_containing(anchor, anchor)
+    period = period_containing(anchor, anchor, zone)
     for _ in range(60):
-        following = period_containing(anchor, period.end)
+        following = period_containing(anchor, period.end, zone)
 
         assert following.start == period.end
-        assert period_containing(anchor, period.end - timedelta(microseconds=1)) == period
+        assert period_containing(anchor, period.end - timedelta(microseconds=1), zone) == period
         period = following
