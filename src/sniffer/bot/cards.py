@@ -16,6 +16,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from html import escape
 
+from sniffer.bot.naming import plural
 from sniffer.config import get_settings
 from sniffer.sources.base import RawItem
 from sniffer.verifier.liveness import Liveness, as_utc, assess
@@ -55,13 +56,8 @@ def render_card(item: RawItem, *, now: datetime | None = None) -> str:
 
 
 def _days(count: int) -> str:
-    """«21 день», «22 дня», «25 дней»: бот, который путает склонения, выглядит сломанным."""
-    if 11 <= count % 100 <= 14:
-        return "дней"
-    last = count % 10
-    if last == 1:
-        return "день"
-    return "дня" if last in (2, 3, 4) else "дней"
+    """«21 день», «22 дня», «25 дней»: склонение одно на весь бот (`naming.plural`)."""
+    return plural(count, ("день", "дня", "дней"))
 
 
 def _title(item: RawItem) -> str:

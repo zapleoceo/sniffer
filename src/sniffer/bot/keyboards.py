@@ -16,6 +16,7 @@ from collections.abc import Iterable
 from aiogram.filters.callback_data import CallbackData
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from sniffer.bot import wording_plan
 from sniffer.bot.conversation import Reply
 from sniffer.bot.threads import labels
 from sniffer.domain.records import QueryOverview
@@ -60,6 +61,12 @@ class SubscribeCallback(CallbackData, prefix="sub"):
 class RequestsCallback(CallbackData, prefix="req"):
     action: str
     root: int = 0
+
+
+class PlanCallback(CallbackData, prefix="plan"):
+    """Кнопка платного плана под предложением подписки."""
+
+    action: str
 
 
 def markup(reply: Reply) -> InlineKeyboardMarkup | None:
@@ -107,6 +114,24 @@ def markup(reply: Reply) -> InlineKeyboardMarkup | None:
             ]
         )
         return InlineKeyboardMarkup(inline_keyboard=rows)
+    if reply.offer_plan:
+        # Цена на самой кнопке (R2 §3.5): кнопка, ведущая к деньгам без цифры, — тёмный
+        # паттерн. Рядом — выход без оплаты: «ваши поиски» остаются доступны.
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text=wording_plan.SUBSCRIBE_LABEL,
+                        callback_data=PlanCallback(action="subscribe").pack(),
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text=SEARCHES_LABEL, callback_data=RequestsCallback(action="list").pack()
+                    )
+                ],
+            ]
+        )
     return None
 
 

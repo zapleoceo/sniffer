@@ -17,19 +17,23 @@ from aiogram.types import (
     PreCheckoutQuery,
 )
 
-from sniffer.bot import billing, query_menu, subscription, threads, wording
+from sniffer.bot import billing, query_menu, subscription, threads, wording, wording_plan
 from sniffer.bot import voice as voice_input
 from sniffer.bot.catalog_finder import CatalogFinder
+from sniffer.bot.commands import looks_like_command
 from sniffer.bot.conversation import Conversation, Reply, Send
 from sniffer.bot.keyboards import (
     AnswerCallback,
     FeedbackCallback,
+    PlanCallback,
     RequestsCallback,
     SubscribeCallback,
     markup,
     request_actions,
     requests_markup,
 )
+from sniffer.bot.quota import QuotaService
+from sniffer.bot.quota_ledger import account_of, new_quota
 from sniffer.bot.store import Client, PassportStore
 from sniffer.domain.dialogue import Feedback
 
@@ -37,25 +41,29 @@ log = structlog.get_logger(__name__)
 
 router = Router(name="search")
 
-GREETING = (
-    "Я ищу частные объявления по чатам и доскам Вьетнама и приношу ссылки на оригиналы.\n\n"
-    "Напишите словами, что нужно: <i>ищу скутер в Нячанге до 400 долларов</i> "
-    "или <i>сниму квартиру в Нячанге до 10 млн донгов</i>.\n\n"
-    "Если чего-то важного не хватает, уточню парой вопросов — отвечать можно кнопкой "
-    "или словами. Объявление не перепечатываю: даю ссылку на источник и честно помечаю, "
-    "если лот старый и мог быть продан.\n\n"
-    "Ищете несколько разных вещей? Начинайте каждую с /new — поиски не перепутаются. "
-    "Последние поиски и переключение между ними — /requests."
-)
+# Текст приветствия — в `wording`: его правит владелец, и править его не должно требовать
+# хендлера. Имя осталось здесь, потому что на него ссылаются тесты и другие модули.
+GREETING = wording.GREETING
 
 _conversation: Conversation | None = None
+
+
+_quota: QuotaService | None = None
+
+
+def quota() -> QuotaService:
+    """Одна квота на процесс. Журнал в базе, а не в ней, как и состояние разговора."""
+    global _quota
+    if _quota is None:
+        _quota = new_quota()
+    return _quota
 
 
 def conversation() -> Conversation:
     """Один разговор на процесс. Состояние всё равно в базе, а не в нём."""
     global _conversation
     if _conversation is None:
-        _conversation = Conversation(PassportStore(), scoped_finder=CatalogFinder())
+        _conversation = Conversation(PassportStore(), scoped_finder=CatalogFinder(), quota=quota())
     return _conversation
 
 
@@ -95,12 +103,28 @@ async def new_request(message: Message, command: CommandObject) -> None:
     await conversation().on_text(client, query, _sender(message))
 
 
+@router.message(Command("plan"))
+async def plan(message: Message) -> None:
+    """Остаток карточек и дата обновления. Только чтение: ничего не списывает и не начинает."""
+    client = _client(message)
+    if client is None:  # pragma: no cover — сообщение без автора
+        return
+    standing = await quota().standing(await account_of(client))
+    await message.answer(wording_plan.plan_text(standing))
+
+
 @router.message(F.text)
 async def search(message: Message) -> None:
     client = _client(message)
     if client is None:
         return
-    await conversation().on_text(client, message.text or "", _sender(message))
+    text = message.text or ""
+    if looks_like_command(text):
+        # Известные команды перехватили свои обработчики выше; сюда добралась неизвестная.
+        # Поиск по слову «terms» вместо ответа «такой команды нет» (FLOW-17) — это дефект.
+        await message.answer(wording_plan.UNKNOWN_COMMAND)
+        return
+    await conversation().on_text(client, text, _sender(message))
 
 
 @router.message(F.voice)
@@ -225,6 +249,20 @@ async def subscribe(callback: CallbackQuery, callback_data: SubscribeCallback) -
         # нет, и токена у него взять негде.
         provider_token="",
     )
+
+
+@router.callback_query(PlanCallback.filter())
+async def plan_action(callback: CallbackQuery, callback_data: PlanCallback) -> None:
+    """Кнопка «Подписка» под предложением.
+
+    TODO(A5): здесь начинается `/subscription` (подтверждение с цифрами → согласие →
+    ссылка на счёт). Пока оформления нет, говорим об этом прямо.
+    """
+    await callback.answer()
+    message = callback.message
+    if not isinstance(message, Message) or callback_data.action != "subscribe":
+        return
+    await message.answer(wording_plan.SUBSCRIPTION_SOON)
 
 
 @router.callback_query(RequestsCallback.filter())

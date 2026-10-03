@@ -56,6 +56,11 @@ class User(BigIdMixin, Base):
     # Пусто — можно. Момент, а не флаг: снятие блока возвращает пустое значение и
     # слежение возобновляется само, а по самому моменту видно, с каких пор тишина.
     bot_blocked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Якорь квоты: момент первого списания. Ставится один раз (010_quota_ledger.sql);
+    # после появления периодов его держит составной внешний ключ.
+    quota_anchor_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Когда человеку в последний раз предложили подписку: не чаще раза в сутки.
+    paywall_offered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Passport(BigIdMixin, Base):

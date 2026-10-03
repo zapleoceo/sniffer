@@ -21,6 +21,7 @@ from sniffer.worker.archive import ArchivePipeline
 from sniffer.worker.chotot_sync import ChototSync
 from sniffer.worker.expiry import Expiry
 from sniffer.worker.matcher import Matcher
+from sniffer.worker.quota_sweep import ReservationSweep
 from sniffer.worker.recategorize import Recategorize
 from sniffer.worker.retention import Retention
 from sniffer.worker.screening import Screening
@@ -56,9 +57,12 @@ async def run(stop: asyncio.Event) -> None:
     expiry = Expiry()
     recategorize = Recategorize()
     screening = Screening()
+    reservations = ReservationSweep()
     await idle_loop(
         stop,
-        lambda: _tick(retention, archive, matcher, chotot, expiry, recategorize, screening),
+        lambda: _tick(
+            retention, archive, matcher, chotot, expiry, recategorize, screening, reservations
+        ),
         service=NAME,
     )
 
@@ -71,6 +75,7 @@ async def _tick(
     expiry: Expiry,
     recategorize: Recategorize,
     screening: Screening,
+    reservations: ReservationSweep,
 ) -> int:
     """Сколько работы сделали за проход.
 
@@ -92,7 +97,10 @@ async def _tick(
     # валют», который модель этим проходом признала не товаром.
     expired += await screening.tick()
     matched = await matcher.tick()
-    return synced + processed + expired + matched + await retention.tick()
+    # Резервы показов снимаются независимо от воронки: это не карточки, а слоты квоты
+    # людей, которым сообщение не дошло, и ждать конца воронки им незачем.
+    swept = await reservations.tick()
+    return synced + processed + expired + matched + swept + await retention.tick()
 
 
 SERVICE = Service(name=NAME, requires=missing_settings, run=run)

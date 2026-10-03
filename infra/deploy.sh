@@ -168,6 +168,12 @@ subscriptions     last_error             # монитор, карантин: ч�
 subscriptions     quarantined_until      # монитор, карантин: до какого времени не трогать
 users             bot_blocked_at         # клиент заблокировал бота: нотифаер не шлёт, матчер не ставит в очередь
 outbox            last_error             # причина отмены или отказа строки очереди
+users             quota_anchor_at        # 010_quota_ledger: якорь периода, он же часовой того, что файл доехал
+users             paywall_offered_at     # не чаще раза в сутки предлагаем подписку
+client_requests   shown_count            # сколько карточек показано по запросу
+client_requests   withheld_count         # сколько удержано лимитом квоты
+quota_periods                            # журнал показов: период квоты (010)
+offer_views                              # журнал показов: показанные карточки (010)
 schema_proposals                         # хвост цепочки на момент введения таблицы (004)
 SENTINELS
 }

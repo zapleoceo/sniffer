@@ -80,7 +80,6 @@ LEGACY_TABLES_WITHOUT_SENTINEL = frozenset(
         "chat_join_events",
         "chat_rejects",
         "chats",
-        "client_requests",
         "collection_actions",
         "collection_subscribers",
         "collection_tasks",
@@ -91,7 +90,7 @@ LEGACY_TABLES_WITHOUT_SENTINEL = frozenset(
         "passport_events",
         "payments",
         "raw_messages",
-        # subscriptions и outbox охраняются колонками-часовыми в deploy.sh
+        # subscriptions, outbox и client_requests охраняются колонками-часовыми в deploy.sh
         "sellers",
         "telegram_sessions",
     }

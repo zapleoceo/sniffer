@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import cast
 
-from sqlalchemy import Table, func, select, update
+from sqlalchemy import Table, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from sniffer.db import models
@@ -90,3 +90,27 @@ class UserRepository(Repository):
         if row is None:  # pragma: no cover — строка вставлена в этой же транзакции
             raise LookupError(f"вставленный пользователь {tg_user_id} не читается")
         return to_user(row)
+
+    async def claim_paywall_offer(
+        self, user_id: int, *, now: datetime, cooldown: timedelta
+    ) -> bool:
+        """Занять право предложить подписку: не чаще, чем раз в `cooldown`.
+
+        Условный `UPDATE`, а не «прочитал — решил — записал»: двойное нажатие запускает
+        два поиска сразу, и проверка без атомарности показала бы предложение обоим.
+        «Сейчас» приходит параметром, `now()` базы не используется (как во всей квоте).
+        """
+        users = cast(Table, models.User.__table__)
+        claimed = await self._session.scalar(
+            update(users)
+            .where(
+                users.c.id == user_id,
+                or_(
+                    users.c.paywall_offered_at.is_(None),
+                    users.c.paywall_offered_at <= now - cooldown,
+                ),
+            )
+            .values(paywall_offered_at=now)
+            .returning(users.c.id)
+        )
+        return claimed is not None
