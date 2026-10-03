@@ -353,3 +353,10 @@ async def test_the_grace_moves_the_cutoff_back_by_exactly_its_length() -> None:
     )
 
     assert params_of(session.statements[0])["expires_at_1"] == MOMENT - timedelta(minutes=90)
+
+
+def test_the_claim_is_a_fresh_snapshot_not_what_the_session_has_read_before() -> None:
+    """Строка из карты сессии вернулась бы со старым `failed_streak`: пауза от чужого числа."""
+    statement = _due_statement(limit=1, now=MOMENT)
+
+    assert statement.get_execution_options().get("populate_existing") is True

@@ -4,7 +4,7 @@
 платежи, а здесь — состояние самого обхода (ротация и карантин). Второй ответственностью
 в одном файле было бы то, что менять их приходится по разным поводам.
 
-Три свойства, ради которых модуль есть:
+Четыре свойства, ради которых модуль есть:
 
 * **Обход по кругу.** Порядок — «кого не смотрели дольше всех, первым», а не по `id`:
   прежний `ORDER BY id LIMIT 50` навсегда прятал 51-ю подписку (D4).
@@ -13,6 +13,8 @@
   (D5). Здесь каждая строка разбирается отдельно, а больная возвращается с причиной.
 * **Карантин по времени.** Сбойная подписка не выбирается до `quarantined_until`, потом
   выбирается снова сама: чинить её руками ради возвращения в обход не нужно.
+* **Отмена просроченной очереди.** Найденное в оплаченный период доходит ещё льготный срок
+  после окончания подписки, дальше строка `outbox` отменяется (`cancel_lapsed`, D7).
 """
 
 from __future__ import annotations
@@ -81,6 +83,12 @@ def _due_statement(
         .order_by(models.Subscription.last_scanned_at.asc().nulls_first(), models.Subscription.id)
         .with_for_update(of=models.Subscription, skip_locked=True)
         .limit(limit)
+        # Порция — снимок базы на момент блокировки, а не то, что сессия когда-то прочитала:
+        # строка, уже лежащая в карте идентичности, иначе вернулась бы со старым
+        # `failed_streak`, и пауза карантина считалась бы от устаревшего числа. В бою сессия
+        # на проход новая, и разницы нет; но порция не должна зависеть от того, кто и когда
+        # успел прочитать те же строки в этой же сессии.
+        .execution_options(populate_existing=True)
     )
 
 
@@ -154,6 +162,7 @@ class MonitorRepository(Repository):
             update(models.Subscription)
             .where(models.Subscription.id == subscription_id)
             .values(last_scanned_at=now)
+            .execution_options(synchronize_session=False)
         )
 
     async def record_scan(self, subscription_id: int, *, now: datetime) -> None:
@@ -162,6 +171,7 @@ class MonitorRepository(Repository):
             update(models.Subscription)
             .where(models.Subscription.id == subscription_id)
             .values(last_scanned_at=now, failed_streak=0, last_error=None, quarantined_until=None)
+            .execution_options(synchronize_session=False)
         )
 
     async def quarantine(
@@ -183,4 +193,5 @@ class MonitorRepository(Repository):
                 last_error=error[:ERROR_LIMIT],
                 quarantined_until=until,
             )
+            .execution_options(synchronize_session=False)
         )
