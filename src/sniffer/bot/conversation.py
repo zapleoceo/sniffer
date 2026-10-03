@@ -21,12 +21,14 @@ from typing import Protocol, cast
 import structlog
 
 from sniffer.bot import journal, wording
-from sniffer.bot.billing import OFFER
-from sniffer.bot.cards import render_cards
+
+# `Reply as Reply` — явный реэкспорт (strict mypy): хендлеры, клавиатуры и симулятор
+# импортируют `Reply` отсюда с первого дня, и переезд в presenter их не ломает.
+from sniffer.bot.presenter import Reply as Reply
+from sniffer.bot.presenter import present
 from sniffer.bot.store import Client, Dialogue, DialogueStore
 from sniffer.bot.threads import open_thread
 from sniffer.broker.usage import request_scope
-from sniffer.config import get_settings
 from sniffer.domain.dialogue import (
     EVENT_FEEDBACK,
     EVENT_MANUAL_EDIT,
@@ -34,13 +36,11 @@ from sniffer.domain.dialogue import (
     EVENT_USER_MESSAGE,
     SKIP,
     Feedback,
-    Option,
     Question,
     apply_answer,
     apply_feedback,
     blocking_question,
     corrects,
-    feedback_buttons,
     feedback_question,
     parse_option,
     question_by_code,
@@ -62,19 +62,6 @@ from sniffer.sources.catalog_sink import remember
 from sniffer.verifier import screen
 
 log = structlog.get_logger(__name__)
-
-
-@dataclass(frozen=True, slots=True)
-class Reply:
-    """Одно сообщение клиенту. Кнопки описаны доменом, рисует их `keyboards`."""
-
-    text: str
-    question: Question | None = None
-    feedback: tuple[Option, ...] = field(default_factory=tuple)
-    # Предложить слежение за новыми объявлениями. Признак, а не готовая кнопка:
-    # домен решает «уместно ли», разметку рисует `keyboards`.
-    offer_subscription: bool = False
-    passport_root: int | None = None
 
 
 class Parser(Protocol):
@@ -610,34 +597,7 @@ class Conversation:
 
         if turn is not None:
             turn.found = found
-        if not found.items:
-            if found.deferred:
-                await send(Reply(found.status or wording.SEARCH_FAILED))
-                return
-            # Пустая выдача — самый честный повод предложить слежение: искать
-            # больше негде, а новое появится.
-            await send(
-                Reply(
-                    f"{found.status}\n\n{OFFER}"
-                    if found.status
-                    else f"{wording.nothing_found(passport)}\n\n{OFFER}",
-                    offer_subscription=True,
-                    passport_root=dialogue.passport.root,
-                )
-            )
-            return
-        shown = min(len(found.items), get_settings().max_cards)
-        header = wording.result_header(passport, len(found.items), shown)
-        if found.status:
-            header = f"{found.status}\n\n{header}"
-        await send(
-            Reply(
-                f"{header}\n\n{render_cards(found.items)}",
-                feedback=feedback_buttons(passport),
-                offer_subscription=True,
-                passport_root=dialogue.passport.root,
-            )
-        )
+        await send(present(passport, found, root=dialogue.passport.root))
 
 
 def _lap(stage: str) -> None:
