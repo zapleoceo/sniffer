@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from sniffer.db import models
 from sniffer.db.repositories.delivery import DeliveryRepository
 from sniffer.db.repositories.monitors import ERROR_LIMIT, MonitorRepository, _due_statement
@@ -360,3 +362,22 @@ def test_the_claim_is_a_fresh_snapshot_not_what_the_session_has_read_before() ->
     statement = _due_statement(limit=1, now=MOMENT)
 
     assert statement.get_execution_options().get("populate_existing") is True
+
+
+@pytest.mark.parametrize("bookkeeping", ["touch", "record_scan", "quarantine"])
+async def test_the_bookkeeping_updates_do_not_walk_the_sessions_identity_map(
+    bookkeeping: str,
+) -> None:
+    """Отметки обхода — прямые UPDATE: каждая синхронизация перебирала бы всю порцию в памяти."""
+    session = Recorder()
+    repo = MonitorRepository(session)  # type: ignore[arg-type]
+
+    if bookkeeping == "touch":
+        await repo.touch(5, now=MOMENT)
+    elif bookkeeping == "record_scan":
+        await repo.record_scan(5, now=MOMENT)
+    else:
+        await repo.quarantine(5, now=MOMENT, streak=1, until=MOMENT, error="x")
+
+    options = session.statements[0].get_execution_options()
+    assert options.get("synchronize_session") is False
