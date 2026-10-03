@@ -39,23 +39,29 @@ class UserRepository(Repository):
         return [to_user(row) for row in rows]
 
     async def set_bot_blocked(self, tg_user_id: int, *, blocked: bool, at: datetime) -> int | None:
-        """Запомнить, что писать клиенту нельзя (или снова можно). Возврат — `users.id`.
+        """Запомнить, что писать клиенту нельзя, или снять метку. Возврат — `users.id`.
 
-        `None` — такого клиента у нас нет: человек нажал «Старт» и заблокировал
-        бота, не написав ни слова, и помнить о нём нечем и незачем.
+        `None` — менять нечего: такого клиента у нас нет (человек нажал «Старт» и
+        заблокировал бота, не написав ни слова — помнить о нём нечем и незачем) или
+        снимать нечего.
 
         Блокировка повторяется (403 на каждую попытку, потом ещё апдейт
         `my_chat_member`), и вторая отметка не должна сдвигать момент первой:
-        `coalesce` оставляет самую раннюю. Снятие, наоборот, безусловно — клиент,
-        написавший боту, доказал, что бот ему доступен.
+        `coalesce` оставляет самую раннюю. Снятие безусловно по смыслу — клиент
+        написал боту или разблокировал его, и бот ему доступен, — но пишет в строку
+        только когда метка стоит: так его можно звать на КАЖДОЕ сообщение клиента,
+        не плодя версий строки в таблице, которую бот читает на каждом сообщении.
         """
-        value = func.coalesce(models.User.bot_blocked_at, at) if blocked else None
-        done = await self._session.execute(
-            update(models.User)
-            .where(models.User.tg_user_id == tg_user_id)
-            .values(bot_blocked_at=value)
-            .returning(models.User.id)
-        )
+        statement = update(models.User).where(models.User.tg_user_id == tg_user_id)
+        if blocked:
+            statement = statement.values(
+                bot_blocked_at=func.coalesce(models.User.bot_blocked_at, at)
+            )
+        else:
+            statement = statement.where(models.User.bot_blocked_at.is_not(None)).values(
+                bot_blocked_at=None
+            )
+        done = await self._session.execute(statement.returning(models.User.id))
         return done.scalar_one_or_none()
 
     async def get_or_create(

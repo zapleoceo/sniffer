@@ -10,7 +10,8 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
-from sniffer.bot.handlers import search
+from sniffer.bot.handlers import membership, search
+from sniffer.bot.reachability import MarkReachable
 from sniffer.config import Settings, get_settings
 from sniffer.runtime.service import Service
 
@@ -24,7 +25,13 @@ def missing_settings(settings: Settings) -> list[str]:
 
 def build_dispatcher() -> Dispatcher:
     dispatcher = Dispatcher()
+    # Сообщение или нажатие клиента доказывает, что бот ему доступен, и снимает метку
+    # блокировки, если она осталась от потерянного апдейта (см. `reachability`). На
+    # `my_chat_member` — не вешать: апдейт о блокировке тоже «от клиента».
+    for observer in (dispatcher.message, dispatcher.callback_query, dispatcher.pre_checkout_query):
+        observer.outer_middleware(MarkReachable())
     dispatcher.include_router(search.router)
+    dispatcher.include_router(membership.router)
     return dispatcher
 
 

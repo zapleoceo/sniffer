@@ -1100,7 +1100,7 @@ def test_reply_without_buttons_has_no_keyboard() -> None:
 def test_dispatcher_knows_the_dialog() -> None:
     dispatcher = bot_app.build_dispatcher()
 
-    assert [router.name for router in dispatcher.sub_routers] == ["search"]
+    assert [router.name for router in dispatcher.sub_routers] == ["search", "membership"]
 
 
 async def test_appending_a_word_does_not_buy_three_more_questions() -> None:

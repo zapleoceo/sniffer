@@ -15,9 +15,10 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import Text, literal_column, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from sniffer.bot import reachability
 from sniffer.db import models
 from sniffer.db.repositories import (
     ListingRepository,
@@ -423,3 +424,51 @@ async def test_a_subscription_without_an_end_date_keeps_its_right(db_session: As
     )
 
     assert cancelled == 0
+
+
+# ── метка блокировки: снятие по сообщению клиента ───────────────────────────
+
+
+async def test_unblocking_does_not_rewrite_a_row_that_is_not_blocked(
+    db_session: AsyncSession,
+) -> None:
+    """Снятие зовётся на КАЖДОЕ сообщение клиента: версия строки `users` плодиться не должна."""
+    (user_id,) = await _clients(db_session, 1)
+    await db_session.commit()
+    version = select(literal_column("xmin::text", Text)).select_from(models.User)
+    before = await db_session.scalar(version.where(models.User.id == user_id))
+
+    assert await UserRepository(db_session).set_bot_blocked(900, blocked=False, at=NOW) is None
+    await db_session.commit()
+
+    assert await db_session.scalar(version.where(models.User.id == user_id)) == before
+
+
+async def test_a_message_lifts_the_block_on_a_real_database(
+    db_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(reachability, "session_scope", lambda: _own_session(db_engine))
+    async with _own_session(db_engine) as setup:
+        (user_id,) = await _clients(setup, 1)
+        await UserRepository(setup).set_bot_blocked(900, blocked=True, at=NOW)
+        await setup.commit()
+
+    await reachability.record(900, blocked=False, at=NOW + timedelta(minutes=1))
+
+    async with _own_session(db_engine) as check:
+        user = await check.get(models.User, user_id)
+    assert user is not None and user.bot_blocked_at is None
+
+
+async def test_a_block_reported_by_telegram_is_recorded_at_its_own_moment(
+    db_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(reachability, "session_scope", lambda: _own_session(db_engine))
+    async with _own_session(db_engine) as setup:
+        (user_id,) = await _clients(setup, 1)
+
+    await reachability.record(900, blocked=True, at=NOW - timedelta(hours=3))
+
+    async with _own_session(db_engine) as check:
+        user = await check.get(models.User, user_id)
+    assert user is not None and user.bot_blocked_at == NOW - timedelta(hours=3)

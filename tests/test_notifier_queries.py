@@ -155,6 +155,7 @@ async def test_blocking_keeps_the_earliest_moment_and_unblocking_clears_it() -> 
     blocking, unblocking = (sql(statement) for statement in session.statements)
     assert "coalesce(users.bot_blocked_at," in blocking.lower(), "повторный отказ сдвинул бы момент"
     assert params(session.statements[1])["bot_blocked_at"] is None, unblocking
+    assert "users.bot_blocked_at IS NOT NULL" in unblocking, "снятие переписывало бы каждую строку"
     assert "coalesce" not in unblocking.lower(), "снятие безусловно: клиент снова доступен"
     assert "users.tg_user_id =" in blocking and "RETURNING users.id" in blocking
 
