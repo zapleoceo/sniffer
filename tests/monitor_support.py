@@ -54,6 +54,17 @@ def subscription(number: int = 1, **overrides: object) -> SubscriptionState:
     return SubscriptionState(**fields)  # type: ignore[arg-type]
 
 
+def usd_subscription(number: int = 1, amount: float = 300) -> SubscriptionState:
+    """Подписка с долларовым бюджетом: потолок в донгах ей даёт только курс."""
+    stored = StoredPassport(
+        id=200 + number,
+        user_id=100 + number,
+        version=1,
+        passport=passport(budget=dollars(amount)),
+    )
+    return subscription(number, passport=stored)
+
+
 def listing(number: int = 1, *, moment: datetime = NOW, **overrides: object) -> Listing:
     fields: dict[str, object] = {
         "id": number,

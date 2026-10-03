@@ -16,6 +16,7 @@ import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import select
@@ -29,7 +30,7 @@ from sniffer.db.repositories import (
     UserRepository,
 )
 from sniffer.db.repositories.delivery import DeliveryRepository
-from sniffer.domain.passport import Category, Intent, Passport
+from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
 from sniffer.domain.records import Listing, RawMessage
 
 pytestmark = pytest.mark.skipif(
@@ -70,7 +71,9 @@ async def _slot(
     return user.id, row.id
 
 
-async def _card(session: AsyncSession, number: int, *, posted_at: datetime) -> Listing:
+async def _card(
+    session: AsyncSession, number: int, *, posted_at: datetime, price: Decimal | None = None
+) -> Listing:
     (raw_id,) = await RawMessageRepository(session).add_many(
         [
             RawMessage(
@@ -92,6 +95,8 @@ async def _card(session: AsyncSession, number: int, *, posted_at: datetime) -> L
             summary="Автомат",
             tg_link=f"https://t.me/c/1/{number}",
             posted_at=posted_at,
+            price_amount=price,
+            price_currency="VND" if price is not None else None,
         )
     )
 
@@ -184,3 +189,60 @@ async def test_set_active_judges_the_term_by_the_moment_it_was_given(
         user_id=user_id, passport_root=root, active=False, now=after_term
     )
     assert await repo.set_active(user_id=user_id, passport_root=root, active=False, now=now)
+
+
+# ── курс доллара (D2) ───────────────────────────────────────────────────────
+
+
+def _dollars(amount: float) -> Passport:
+    return _passport(budget=Budget(max=amount, currency=Currency.USD))
+
+
+async def test_a_dollar_budget_narrows_the_real_query(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """300 $ при 26 000 ₫/$ — потолок 7,8 млн: дорогая карточка не уходит, дешёвая уходит."""
+    from sniffer.worker import matcher as module
+
+    now = _now()
+    await _slot(db_session, 9010, expires_at=None, passport=_dollars(300))
+    hour_ago = now - timedelta(hours=1)
+    cheap = await _card(db_session, 10, posted_at=hour_ago, price=Decimal("5000000"))
+    await _card(db_session, 11, posted_at=hour_ago, price=Decimal("20000000"))
+    await db_session.commit()
+    monkeypatch.setattr(module, "session_scope", lambda: _borrowed(db_session))
+
+    async def rate() -> float | None:
+        return 26_000.0
+
+    assert await module.Matcher(rate=rate).tick(now=now) == 1
+
+    (message,) = await DeliveryRepository(db_session).take_pending(now=now)
+    assert message.payload["listing_id"] == cheap.id
+
+
+async def test_a_dollar_slot_without_a_rate_keeps_its_cursor_and_catches_up_later(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Без курса подписка ждёт и ничего не теряет: курсор стоит, потом карточка уходит."""
+    from sniffer.worker import matcher as module
+
+    now = _now()
+    _user_id, sub_id = await _slot(db_session, 9011, expires_at=None, passport=_dollars(300))
+    await _card(db_session, 12, posted_at=now - timedelta(hours=1), price=Decimal("5000000"))
+    await db_session.commit()
+    monkeypatch.setattr(module, "session_scope", lambda: _borrowed(db_session))
+
+    async def down() -> float | None:
+        return None
+
+    async def up() -> float | None:
+        return 26_000.0
+
+    assert await module.Matcher(rate=down).tick(now=now) == 0
+    cursor = await db_session.scalar(
+        select(models.Subscription.scan_listing_id).where(models.Subscription.id == sub_id)
+    )
+    assert cursor == 0, "курсор не двигался: карточка не просмотрена"
+
+    assert await module.Matcher(rate=up).tick(now=now + timedelta(minutes=2)) == 1

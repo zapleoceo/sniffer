@@ -10,6 +10,7 @@ from sniffer.matching.rules import (
     MATCH_MAX_AGE_DAYS,
     MATCH_MIN_SCORE,
     filter_for,
+    needs_usd_rate,
     score,
     worth_sending,
 )
@@ -18,6 +19,7 @@ __all__ = [
     "MATCH_MAX_AGE_DAYS",
     "MATCH_MIN_SCORE",
     "filter_for",
+    "needs_usd_rate",
     "score",
     "worth_sending",
 ]

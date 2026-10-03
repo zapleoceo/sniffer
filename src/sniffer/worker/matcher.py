@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -26,7 +27,8 @@ from sniffer.db.engine import session_scope
 from sniffer.db.repositories.delivery import DeliveryRepository
 from sniffer.db.repositories.listings import ListingRepository
 from sniffer.domain.records import Listing, SubscriptionState
-from sniffer.matching import filter_for, score, worth_sending
+from sniffer.matching import filter_for, needs_usd_rate, score, worth_sending
+from sniffer.worker.usd_rate import RateSource, UsdRate
 
 log = structlog.get_logger(__name__)
 
@@ -49,15 +51,28 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+@dataclass(slots=True)
+class MatcherCounters:
+    """Что проход сделал НЕ по плану, накопительно с запуска процесса.
+
+    Число, а не только строка в журнале: «сколько подписок ждёт курса» и «сколько в
+    карантине» — вопросы для панели и сторожа, а искать их grep-ом по логу нельзя.
+    """
+
+    skipped_no_rate: int = 0
+
+
 class Matcher:
     """Один проход сопоставления. Возврат — сколько карточек поставлено в очередь."""
 
-    def __init__(self, *, usd_vnd: float | None = None, clock: Clock = _utc_now) -> None:
-        # Курс нужен, чтобы долларовый бюджет стал потолком в донгах. Нет курса
-        # — потолка нет, и подписка проверяет только смысл: занижать бюджет
-        # выдуманным курсом хуже, чем не сужать вовсе.
-        self._usd_vnd = usd_vnd
+    def __init__(self, *, rate: RateSource | None = None, clock: Clock = _utc_now) -> None:
+        # Курс нужен, чтобы долларовый бюджет стал потолком в донгах. Источник не задан
+        # или не ответил — курса нет, и такая подписка ждёт (см. `tick`). Выдуманный курс
+        # занизил бы бюджет, а отбор без курса не сузил бы его вовсе: подписка шлёт сама,
+        # и дорогое объявление ушло бы клиенту как «идеально в бюджете».
+        self._rate = UsdRate(rate)
         self._clock = clock
+        self.counters = MatcherCounters()
 
     async def tick(self, *, now: datetime | None = None) -> int:
         moment = now or self._clock()
@@ -66,10 +81,22 @@ class Matcher:
             delivery = DeliveryRepository(session)
             listings = ListingRepository(session)
             due = await delivery.active_subscriptions(limit=SUBSCRIPTIONS_PER_TICK, now=moment)
+            waiting: list[int] = []
             for subscription in due:
+                usd_vnd: float | None = None
+                if needs_usd_rate(subscription.passport.passport):
+                    usd_vnd = await self._rate.get(moment)
+                    if usd_vnd is None:
+                        # Ни слать без бюджета, ни двигать курсор: когда курс вернётся,
+                        # подписка возьмёт всё с того же места, ничего не потеряв.
+                        waiting.append(subscription.id)
+                        continue
                 queued += await self._for_subscription(
-                    subscription, delivery, listings, moment=moment
+                    subscription, delivery, listings, moment=moment, usd_vnd=usd_vnd
                 )
+            if waiting:
+                self.counters.skipped_no_rate += len(waiting)
+                log.warning("matcher.waiting_for_rate", subscriptions=waiting)
             await session.commit()
         return queued
 
@@ -80,9 +107,10 @@ class Matcher:
         listings: ListingRepository,
         *,
         moment: datetime,
+        usd_vnd: float | None,
     ) -> int:
         passport = subscription.passport.passport
-        spec = filter_for(passport, usd_vnd=self._usd_vnd, now=moment)
+        spec = filter_for(passport, usd_vnd=usd_vnd, now=moment)
         if spec is None:
             # Без города и категории отбор превращается в «покажи всё подряд»,
             # а подписка на всё подряд — это спам, за который бота отключают.
