@@ -16,7 +16,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from sniffer.bot import wording
-from sniffer.bot.billing import OFFER
+from sniffer.bot.billing_wording import OFFER
 from sniffer.bot.presenter import Reply, present
 from sniffer.config import reload_settings
 from sniffer.domain.dialogue import feedback_buttons

@@ -84,6 +84,16 @@ class Payment(BigIdMixin, Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=NOW
     )
+    # Оплата звёздами (011_stars_billing.sql). Платёж пишется в журнал первым делом
+    # и целиком: по `raw` его можно разобрать и вернуть вручную, если что-то пошло не так.
+    tg_user_id: Mapped[int | None] = mapped_column(BigInteger)
+    invoice_payload: Mapped[str | None] = mapped_column(Text)
+    kind: Mapped[str | None] = mapped_column(Text)
+    is_first_recurring: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=FALSE)
+    # Срок от Telegram (`subscription_expiration_date`), а не наша арифметика.
+    period_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    refunded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    raw: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
 
 class Notification(BigIdMixin, Base):

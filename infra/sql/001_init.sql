@@ -419,7 +419,16 @@ CREATE TABLE IF NOT EXISTS payments (
     -- telegram_payment_charge_id: уникален у Telegram, уникален и у нас
     external_id     TEXT        NOT NULL UNIQUE,
     is_recurring    BOOLEAN     NOT NULL DEFAULT FALSE,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- Оплата звёздами: что за платёж, чей, по какому счёту и до какого срока.
+    -- См. 011_stars_billing.sql — там же ALTER для живой базы.
+    tg_user_id      BIGINT,
+    invoice_payload TEXT,
+    kind            TEXT CHECK (kind IN ('first', 'renewal', 'one_off', 'duplicate', 'unknown')),
+    is_first_recurring BOOLEAN  NOT NULL DEFAULT FALSE,
+    period_end      TIMESTAMPTZ,
+    refunded_at     TIMESTAMPTZ,
+    raw             JSONB
 );
 
 CREATE INDEX IF NOT EXISTS payments_user_idx ON payments (user_id, created_at DESC);

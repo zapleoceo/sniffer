@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from sniffer.bot import wording, wording_plan
-from sniffer.bot.billing import OFFER
+from sniffer.bot.billing_wording import OFFER
 from sniffer.bot.cards import render_cards
 from sniffer.config import get_settings
 from sniffer.domain.dialogue import Option, Question, feedback_buttons

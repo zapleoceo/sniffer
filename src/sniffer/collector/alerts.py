@@ -21,7 +21,9 @@ async def session_unavailable(settings: Settings, error: str) -> None:
         return
     from aiogram import Bot
 
-    bot = Bot(settings.bot_token)
+    from sniffer.telegram_env import bot_session
+
+    bot = Bot(settings.bot_token, session=bot_session(settings))
     try:
         await bot.send_message(
             settings.owner_chat_id,

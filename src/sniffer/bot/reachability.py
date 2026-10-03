@@ -55,5 +55,10 @@ class MarkReachable(BaseMiddleware):
     ) -> Any:
         user = data.get("event_from_user")
         if user is not None:
-            await record(user.id, blocked=False, at=datetime.now(UTC))
+            try:
+                await record(user.id, blocked=False, at=datetime.now(UTC))
+            except Exception as exc:
+                # Снятие метки — побочная работа: недоступная база не должна глушить ответ
+                # клиенту, а оплата и диалог без неё работают. Метку снимет следующее сообщение.
+                log.warning("bot.reachability_failed", user=user.id, error=repr(exc))
         return await handler(event, data)

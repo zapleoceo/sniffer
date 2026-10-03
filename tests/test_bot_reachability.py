@@ -262,3 +262,24 @@ async def test_the_record_commits_only_when_something_changed(
     await reachability.record(CLIENT, blocked=False, at=datetime.now(UTC))
 
     assert session.commits == commits
+
+
+async def test_an_unreachable_database_does_not_silence_the_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Снятие метки — побочная работа: ответ клиенту уходит, даже если база недоступна."""
+
+    async def broken(*args: Any, **kwargs: Any) -> None:
+        raise ConnectionRefusedError("db is down")
+
+    monkeypatch.setattr(reachability, "record", broken)
+    reached: list[object] = []
+
+    async def handler(event: Any, data: dict[str, Any]) -> str:
+        reached.append(event)
+        return "answered"
+
+    user = type("User", (), {"id": 7})()
+    result = await reachability.MarkReachable()(handler, object(), {"event_from_user": user})  # type: ignore[arg-type]
+
+    assert result == "answered" and len(reached) == 1

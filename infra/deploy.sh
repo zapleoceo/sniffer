@@ -174,6 +174,15 @@ client_requests   shown_count            # сколько карточек по�
 client_requests   withheld_count         # сколько удержано лимитом квоты
 quota_periods                            # журнал показов: период квоты (010)
 offer_views                              # журнал показов: показанные карточки (010)
+user_consents                           # согласие с условиями (011)
+billing_events                           # журнал событий подписки (011)
+payments          tg_user_id             # 011_stars_billing: чей платёж, нужен для возврата по charge_id
+payments          invoice_payload        # по какому счёту: так различаются подписки
+payments          kind                   # first | renewal | unknown
+payments          is_first_recurring     # первый платёж подписки: его id отменяет подписку
+payments          period_end             # срок от Telegram, не наша арифметика
+payments          refunded_at            # когда вернули
+payments          raw                    # SuccessfulPayment как пришёл
 schema_proposals                         # хвост цепочки на момент введения таблицы (004)
 SENTINELS
 }

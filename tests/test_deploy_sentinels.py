@@ -88,9 +88,8 @@ LEGACY_TABLES_WITHOUT_SENTINEL = frozenset(
         "listing_media",
         "notifications",
         "passport_events",
-        "payments",
         "raw_messages",
-        # subscriptions, outbox и client_requests охраняются колонками-часовыми в deploy.sh
+        # subscriptions, outbox, client_requests и payments охраняются колонками в deploy.sh
         "sellers",
         "telegram_sessions",
     }

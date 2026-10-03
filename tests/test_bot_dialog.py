@@ -17,7 +17,7 @@ import pytest
 from aiogram.types import Message
 
 from sniffer.bot import app as bot_app
-from sniffer.bot import journal, query_menu, subscription, threads
+from sniffer.bot import journal, query_menu, threads
 from sniffer.bot.conversation import Conversation, Found, Reply
 from sniffer.bot.handlers import search as handler
 from sniffer.bot.keyboards import (
@@ -25,7 +25,6 @@ from sniffer.bot.keyboards import (
     AnswerCallback,
     FeedbackCallback,
     RequestsCallback,
-    SubscribeCallback,
     markup,
     request_actions,
     requests_markup,
@@ -33,6 +32,7 @@ from sniffer.bot.keyboards import (
 from sniffer.bot.store import Client, Dialogue
 from sniffer.bot.wording import NO_REQUEST_YET, NOTHING_FOUND, NOTHING_TO_REFINE, SEARCH_FAILED
 from sniffer.broker import usage
+from sniffer.domain import plans
 from sniffer.domain.dialogue import (
     SKIP,
     Feedback,
@@ -103,13 +103,9 @@ class FakeMessage:
         self.chat = FakeChat()
         self.from_user = from_user
         self.answers: list[tuple[str, Any]] = []
-        self.invoices: list[dict[str, Any]] = []
 
     async def answer(self, text: str, **kwargs: Any) -> None:
         self.answers.append((text, kwargs.get("reply_markup")))
-
-    async def answer_invoice(self, **kwargs: Any) -> None:
-        self.invoices.append(kwargs)
 
 
 class FakeCallback:
@@ -374,7 +370,9 @@ async def test_an_empty_answer_offers_to_keep_watching() -> None:
     await talk(MemoryStore(), filled(), items=[]).on_text(CLIENT, "ищу вертолёт", replies)
 
     assert replies.sent[-1].offer_subscription is True
-    assert "звезда в месяц" in replies.texts[-1], "цену называем до нажатия, а не после"
+    assert f"{plans.SUBSCRIPTION_STARS} ⭐ в месяц" in replies.texts[-1], (
+        "цену называем до нажатия, а не после"
+    )
 
 
 async def test_results_the_client_may_not_like_offer_to_keep_watching() -> None:
@@ -1027,30 +1025,6 @@ async def test_empty_and_stale_request_menus_answer_plainly(
     assert "не найден" in message.answers[1][0]
 
 
-async def test_subscription_button_bills_its_own_request_not_the_newest_one(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    checked: list[tuple[int, int]] = []
-
-    async def owns(user_id: int, root: int) -> bool:
-        checked.append((user_id, root))
-        return True
-
-    async def inactive(_user_id: int, _root: int) -> None:
-        return None
-
-    monkeypatch.setattr(handler, "Message", FakeMessage)
-    monkeypatch.setattr(subscription, "owns", owns)
-    monkeypatch.setattr(subscription, "active_for", inactive)
-    message = FakeMessage("", from_user=FakeUser(user_id=42))
-    callback = cast(Any, FakeCallback(message))
-
-    await handler.subscribe(callback, SubscribeCallback(root=7))
-
-    assert checked == [(42, 7)]
-    assert message.invoices[0]["payload"].endswith(":7")
-
-
 def test_answer_and_feedback_fit_the_callback_limit() -> None:
     """В callback_data влезает 64 байта — потому по проводу едут короткие ключи."""
     packed = AnswerCallback(code="trans", value="automatic", root=7).pack()
@@ -1100,7 +1074,12 @@ def test_reply_without_buttons_has_no_keyboard() -> None:
 def test_dispatcher_knows_the_dialog() -> None:
     dispatcher = bot_app.build_dispatcher()
 
-    assert [router.name for router in dispatcher.sub_routers] == ["search", "membership"]
+    # Оплата ДО диалога: `F.text` диалога ловит всё, в том числе команды.
+    assert [router.name for router in dispatcher.sub_routers] == [
+        "billing",
+        "search",
+        "membership",
+    ]
 
 
 async def test_appending_a_word_does_not_buy_three_more_questions() -> None:

@@ -593,7 +593,10 @@ push master
    заблокировал бота, миграция `014_notifier_safety.sql`) и `outbox.last_error`
    (причина отмены или отказа строки очереди), `users.quota_anchor_at` — файл
    журнала показов `010` — и три колонки рядом с ней, а также таблицы
-   `quota_periods` и `offer_views`. Часовой нужен
+   `quota_periods` и `offer_views`, а оплату звёздами — семь колонок `payments`
+   из `011_stars_billing.sql` (`tg_user_id`, `invoice_payload`, `kind`,
+   `is_first_recurring`, `period_end`, `refunded_at`, `raw`): без них первый платёж не
+   запишется, а звёзды уже сняты. Часовой нужен
    потому, что бот читает `users` и `passports` на КАЖДОМ сообщении: отсутствие
    колонки означает не деградацию, а молчащий бот при зелёном деплое.
 
@@ -723,6 +726,47 @@ docker exec sniffer-postgres psql -U sniffer -d sniffer -c "\d payments" | head 
 Появятся `subscriptions.since_listing_id` / `expires_at` / `charge_id` и таблица
 `payments`. Схема накатывается ДО деплоя: старому коду новые колонки не мешают,
 новый без них падает на первом же запросе подписок.
+
+Подписка выдаётся **только ссылкой** `createInvoiceLink` (параметр
+`subscription_period` есть у него и нет у `sendInvoice`), поэтому «счёт-сообщение с
+кнопкой Pay» в этой записи прежних версий — не рабочий путь, а историческая ошибка
+(`docs/monetization.md`, раздел «Подписка: Telegram Stars»).
+
+#### Оплата звёздами: журнал платежей (03.10.2026)
+
+Всё в одном файле `infra/sql/011_stars_billing.sql`, и он идемпотентен:
+
+```bash
+docker exec -i sniffer-postgres psql -U sniffer -d sniffer -v ON_ERROR_STOP=1   < infra/sql/011_stars_billing.sql
+docker exec sniffer-postgres psql -U sniffer -d sniffer -c "\d payments" | grep -E "kind|raw|period_end"
+docker exec sniffer-postgres psql -U sniffer -d sniffer -c "\dt user_consents billing_events"
+```
+
+Появятся колонки `payments.tg_user_id`, `invoice_payload`, `kind`, `is_first_recurring`,
+`period_end`, `refunded_at`, `raw` и таблицы `user_consents` (согласие с условиями:
+версия и время) и `billing_events` (отмена, возврат и сбой подписки, обращения в
+поддержку). Колонки `payments` лежат и в теле `CREATE TABLE` в `001_init.sql`, и в
+`ALTER` — как все колонки, добавленные после первого запуска; каждая колонка из
+`ALTER` и каждая новая таблица имеют строку в `schema_sentinels` (`infra/deploy.sh`), а
+любая новая без строки краснит `tests/test_deploy_sentinels.py`.
+
+Файл `011_*` подхватывается маской по трёхзначному номеру (раздел 7.2). Правок данных
+(`UPDATE`, `DELETE`) в цепочке нет и быть не может: деплой гонит её на каждом запуске
+(`tests/test_sql_chain.py`).
+
+**Настройки оплаты в `.env`** (compose читает файл целиком, менять `docker-compose.yml` не
+нужно):
+
+| Переменная | Что делает | По умолчанию |
+|---|---|---|
+| `OWNER_CHAT_ID` | кому уходят возвраты, ошибки записи платежа и обращения `/paysupport`; **пока не задан — подписка не продаётся** (некому отвечать за возвраты, а это требование Telegram) | заполнен |
+| `PAYSUPPORT_REPLY_HOURS` | срок ответа на обращения по оплате в условиях и в ответе клиенту, 1–720 часов | `48` |
+| `TELEGRAM_ENV` | `test` — тестовая среда Telegram (`/bot<token>/test/<метод>`) для бота, нотифаера и оповещений коллектора; в бою пусто | `prod` |
+
+Тестовый экземпляр бота (отдельный токен из тестового @BotFather, **отдельная база**,
+`TELEGRAM_ENV=test`) поднимают отдельно от боевого и не на сервере: порядок и сценарии —
+[`payments-live-check.md`](payments-live-check.md). Темы в личных чатах бота в @BotFather
+не включаются: при них Telegram удерживает 15% с каждой покупки звёздами.
 
 #### Диалог-паспорт
 

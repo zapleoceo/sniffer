@@ -19,8 +19,18 @@ from __future__ import annotations
 FREE_CARDS_PER_PERIOD = 10
 PAID_CARDS_PER_PERIOD = 300
 # Цена одной подписки Telegram Stars: и первой (потолок 300 + слот), и каждой
-# следующей (ещё один слот).
+# следующей (ещё один слот). Число на кнопке, в тексте счёта, в условиях и в
+# `pre_checkout` — ЭТО число, а не копия: рассинхрон кнопки и счёта — «тёмный
+# паттерн», который проект сам себе запрещает.
 SUBSCRIPTION_STARS = 10
+
+# Единственный период, который принимает Telegram: 30 суток. Проверено живым
+# вызовом 01.09.2026 (86 400 даёт `SUBSCRIPTION_PERIOD_INVALID`) и подтверждено
+# справочником Bot API: «Currently, it must always be 2592000 (30 days)».
+SUBSCRIPTION_PERIOD_S = 2_592_000
+
+# Цифровые услуги продаются только за звёзды: код валюты Telegram Stars.
+SUBSCRIPTION_CURRENCY = "XTR"
 
 
 def card_cap(slots: int) -> int:
