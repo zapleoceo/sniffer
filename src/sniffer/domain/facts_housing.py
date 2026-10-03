@@ -16,7 +16,11 @@ from sniffer.domain.facts_amenities import amenity_facts
 from sniffer.domain.facts_area import read_area
 from sniffer.domain.facts_floor import read_floor, read_storeys
 from sniffer.domain.facts_sea import read_sea_distance
-from sniffer.domain.facts_terms import read_deposit_months, read_min_term_months
+from sniffer.domain.facts_terms import (
+    read_deposit_amount,
+    read_deposit_months,
+    read_min_term_months,
+)
 from sniffer.domain.facts_text import FactText
 
 HOUSE = "house"
@@ -42,6 +46,7 @@ def housing_facts(text: FactText, *, category: str, deal_type: str) -> dict[str,
     if deal_type == RENT_OUT:
         for key, value in (
             ("deposit_months", read_deposit_months(text)),
+            ("deposit_amount", read_deposit_amount(text)),
             ("min_term_months", read_min_term_months(text)),
         ):
             if value is not None:

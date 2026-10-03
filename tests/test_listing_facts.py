@@ -14,7 +14,7 @@ import pytest
 
 from sniffer.domain.records import Chat, RawMessage
 from sniffer.pipeline.archive import classify, listing_from
-from sniffer.pipeline.listing_facts import fact_columns
+from sniffer.pipeline.listing_facts import deposit_in_months, fact_columns
 from sniffer.search import vocabulary
 from sniffer.search.intake_rules import parse_query
 
@@ -209,23 +209,83 @@ def test_the_price_attributes_still_win_over_the_facts(chat: Chat) -> None:
     assert listing.attributes["area_m2"] == 35
 
 
-def test_a_danang_flat_in_a_nha_trang_chat_keeps_its_city_and_names_its_district(
-    chat: Chat,
-) -> None:
-    """Город по справочнику районов — решение владельца (docs/architecture.md, 5.0.3).
-
-    Район Дананга записан, а `city` не тронут: 410 нячангских карточек с названиями
-    районов Дананга (260 — вовсе без слова «Дананг») чинятся отдельным решением, а не
-    побочным эффектом чтения района.
-    """
+def test_a_danang_flat_in_a_nha_trang_chat_is_a_danang_card(chat: Chat) -> None:
+    """Решение владельца 04.10.2026: город называет сам пост, а не чат, где он лежит."""
     text = "🔥 STUDIO APARTMENT FOR RENT – HAI CHAU DISTRICT\n💰 Price: 9.5M VND/month"
 
     listing = card(text, chat)
 
-    assert listing.city == "nha_trang"
+    assert listing.city == "da_nang"
     assert listing.district == "hai_chau"
     assert listing.lang == "en"
     assert "zone" not in listing.attributes
+
+
+def test_a_nha_trang_flat_keeps_its_city_and_a_post_without_a_place_gets_the_chat_one(
+    chat: Chat,
+) -> None:
+    assert card("Сдаётся квартира в Oceanus, 15 млн VND/месяц", chat).city == "nha_trang"
+    assert card("Сдаётся квартира у моря, 15 млн VND/месяц", chat).city == "nha_trang"
+
+
+def test_a_hanoi_post_is_never_turned_into_danang_by_the_place_book(chat: Chat) -> None:
+    message = raw("Сдаётся квартира в Hai Chau, 15 млн VND/месяц")
+    hanoi = listing_from(
+        message,
+        chat,
+        classify(message, category_hints=DETECTOR),
+        deal_type="rent_out",
+        city="ha_noi",
+    )
+
+    assert hanoi.city == "ha_noi"
+
+
+def test_a_deposit_named_by_a_sum_becomes_months_through_the_monthly_rent(chat: Chat) -> None:
+    text = "Сдаётся квартира в Oceanus\nДепозит 18 млн\nЦена: 9 млн VND/месяц"
+
+    listing = card(text, chat)
+
+    assert listing.attributes["deposit_amount"] == 18_000_000
+    assert listing.attributes["deposit_months"] == 2
+
+
+def test_the_months_named_in_the_post_win_over_the_recalculated_ones() -> None:
+    columns = fact_columns(
+        "Депозит 1 месяц, залог 18 млн",
+        category="apartment",
+        deal_type="rent_out",
+        monthly_rent=9_000_000,
+    )
+
+    assert columns.attributes["deposit_months"] == 1
+    assert columns.attributes["deposit_amount"] == 18_000_000
+
+
+@pytest.mark.parametrize(
+    ("amount", "rent", "expected"),
+    [
+        (18_000_000, 9_000_000, 2),
+        (13_500_000, 9_000_000, 1.5),
+        (4_500_000, 9_000_000, 0.5),
+        (9_000_000, None, None),
+        (9_000_000, 0, None),
+        (900_000_000, 9_000_000, None),
+        (1_000_000, 9_000_000, None),
+        (63_000_000, 9_000_000, None),
+        (54_000_000, 9_000_000, 6),
+        ("18", 9_000_000, None),
+        (True, 9_000_000, None),
+    ],
+)
+def test_a_deposit_sum_in_months_is_plausible_or_nothing(
+    amount: object, rent: int | None, expected: float | None
+) -> None:
+    result = deposit_in_months(amount, rent)
+
+    assert result == expected
+    if isinstance(expected, int):
+        assert isinstance(result, int), "целое число месяцев не должно храниться как 2.0"
 
 
 def test_a_city_without_a_reference_gets_no_nha_trang_zone() -> None:

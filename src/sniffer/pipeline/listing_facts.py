@@ -34,12 +34,30 @@ _EMPTY: tuple[object, ...] = (None, "", [], {})
 
 @dataclass(frozen=True, slots=True)
 class FactColumns:
-    """Значения колонок `title`, `district`, `lang` и полный набор атрибутов карточки."""
+    """Значения колонок `title`, `district`, `city`, `lang` и полный набор атрибутов карточки."""
 
     title: str
     district: str | None = None
+    city: str | None = None
     lang: str | None = None
     attributes: dict[str, object] = field(default_factory=dict)
+
+
+MAX_DEPOSIT_MONTHS = 6
+
+
+def deposit_in_months(amount: object, monthly_rent: int | None) -> int | float | None:
+    """Залог суммой в месяцах аренды, с точностью до полумесяца; нелепое — `None`.
+
+    Больше шести месяцев залога не просят: такое отношение — это не залог, а сумма за
+    что-то другое или цена, записанная не в тех единицах.
+    """
+    if not isinstance(amount, int) or isinstance(amount, bool) or not monthly_rent:
+        return None
+    months = round(amount / monthly_rent * 2) / 2
+    if not 0.5 <= months <= MAX_DEPOSIT_MONTHS:
+        return None
+    return int(months) if months == int(months) else months
 
 
 def fact_columns(
@@ -49,6 +67,7 @@ def fact_columns(
     deal_type: str,
     attributes: Mapping[str, object] | None = None,
     city: str = "",
+    monthly_rent: int | None = None,
 ) -> FactColumns:
     """Всё, что пост говорит о лоте, поверх уже известных атрибутов.
 
@@ -56,6 +75,14 @@ def fact_columns(
     город карточки: справочник районов и схема зон («север/центр/юг/запад») есть только у
     Нячанга и Дананга, а «в центре города» в ханойском объявлении зоной Нячанга не стала бы
     ни при каком чтении. Пустой город — город чата по умолчанию, то есть Нячанг.
+
+    Город, который называет САМ пост (`FactColumns.city`), решение владельца 04.10.2026:
+    нячангский чат с лотом из Дананга — карточка Дананга. Голос «Дананг» складывается из
+    мест и слова в тексте (`facts_place._city`), а не из одного упоминания.
+
+    `monthly_rent` — месячная аренда в донгах: залог суммой («депозит 18 млн») без неё
+    остаётся суммой, а с ней становится и месяцами (`deposit_months`), которые умеет
+    спрашивать паспорт. Прочитанные в тексте месяцы главнее пересчёта.
     """
     prepared = fact_text(text)
     try:
@@ -72,8 +99,11 @@ def fact_columns(
         facts["zone"] = place.zone
     known = {key: value for key, value in (attributes or {}).items() if value not in _EMPTY}
     merged = {**facts, **known}
+    if "deposit_months" not in merged:
+        if months := deposit_in_months(merged.get("deposit_amount"), monthly_rent):
+            merged["deposit_months"] = months
     named = PLACE_BY_SLUG.get(place.district or "")
     title = listing_title(
         text, category, merged, place_name=named.name if named else None, zone=place.zone
     )
-    return FactColumns(title, place.district, detect_lang(text), merged)
+    return FactColumns(title, place.district, place.city, detect_lang(text), merged)

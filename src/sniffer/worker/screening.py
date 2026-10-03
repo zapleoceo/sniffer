@@ -32,6 +32,7 @@ from sniffer.db.engine import session_scope
 from sniffer.db.repositories.listings import ListingRepository
 from sniffer.domain.passport import Category
 from sniffer.domain.records import Listing
+from sniffer.pipeline.listing_facts import fact_columns
 from sniffer.search.intake_rules import parse_query
 from sniffer.search.motorbike_models import MOTORBIKE_BRANDS
 from sniffer.verifier.offer_screen import (
@@ -51,6 +52,13 @@ RETRY_AFTER_S = 600.0
 _HOUSING = {Category.APARTMENT.value, Category.ROOM.value, Category.HOUSE.value}
 
 
+def _monthly_rent(listing: Listing) -> int | None:
+    """Месячная аренда карточки в донгах — для пересчёта залога суммой в месяцы."""
+    if listing.price_amount is None or listing.price_currency != "VND":
+        return None
+    return int(listing.price_amount) if listing.price_period == "month" else None
+
+
 def screened_fields(listing: Listing, verdict: OfferVerdict) -> dict[str, Any]:
     """Вердикт → аргументы `ListingRepository.apply_screen`."""
     note = f"{verdict.kind}/{verdict.category}: {verdict.why}"
@@ -60,9 +68,22 @@ def screened_fields(listing: Listing, verdict: OfferVerdict) -> dict[str, Any]:
         attributes = dict(listing.attributes)
     else:
         # Предмет сменился — прежние свойства читались под другую категорию:
-        # у квартиры не бывает коробки передач.
+        # у квартиры не бывает коробки передач. Факты (площадь, залог, срок, год,
+        # пробег) тоже читались под старую и пропали бы вместе с ней, поэтому их
+        # читаем заново под новую: иначе карточка теряла всё, что воронка успела
+        # прочитать (A4a, «Отклонения и риски»).
         text = f"{listing.title}\n{listing.summary}"
-        attributes = dict(parse_query(text, default_city=listing.city).attributes)
+        parsed = parse_query(text, default_city=listing.city).attributes
+        attributes = dict(
+            fact_columns(
+                text,
+                category=verdict.category,
+                deal_type=verdict.deal,
+                attributes=parsed,
+                city=listing.city,
+                monthly_rent=_monthly_rent(listing),
+            ).attributes
+        )
     if verdict.category == Category.MOTORBIKE.value:
         if verdict.power != "unknown":
             attributes["power"] = verdict.power
