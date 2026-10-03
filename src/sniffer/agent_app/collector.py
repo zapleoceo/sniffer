@@ -7,6 +7,7 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
+from functools import partial
 
 import structlog
 
@@ -14,6 +15,8 @@ from sniffer.agent_app.collector_gateway import CollectorGateway, Sessions
 from sniffer.agent_app.extraction import extract
 from sniffer.agent_app.followup import queue_answers, queue_cap_answers, queue_failure_answers
 from sniffer.agent_app.mcp_server import connect
+from sniffer.bot.quota import QuotaService
+from sniffer.bot.quota_ledger import new_quota
 from sniffer.broker.client import BrokerCapError, BrokerClient
 from sniffer.broker.usage import default_usage_sink
 from sniffer.config import Settings, get_settings
@@ -85,10 +88,15 @@ class Collector:
         reply: Reply | None = None,
         failure_reply: Reply | None = None,
         cap_reply: Reply | None = None,
+        quota: QuotaService | None = None,
     ) -> None:
         self._sessions, self._work = sessions, work
-        self._reply = reply or queue_answers
-        self._failure_reply = failure_reply or queue_failure_answers
+        # With a quota every recipient is shown only what their allowance lets them see; the
+        # cap reply carries no cards, so there is nothing to meter there.
+        self._reply = reply or (partial(queue_answers, quota=quota) if quota else queue_answers)
+        self._failure_reply = failure_reply or (
+            partial(queue_failure_answers, quota=quota) if quota else queue_failure_answers
+        )
         self._cap_reply = cap_reply or queue_cap_answers
         self._capped_until: datetime | None = None
 
@@ -222,7 +230,7 @@ def missing_settings(settings: Settings) -> list[str]:
 
 
 async def run(stop: asyncio.Event) -> None:
-    collector = Collector()
+    collector = Collector(quota=new_quota())
     while not stop.is_set():
         started = time.monotonic()
         # Each hourly pass has a hard finite task budget; no hot-loop on retries.
@@ -240,7 +248,7 @@ def main() -> None:
     if args.once:
         if missing_settings(get_settings()):
             raise SystemExit("collector_disabled_or_unconfigured")
-        asyncio.run(Collector().tick())
+        asyncio.run(Collector(quota=new_quota()).tick())
     else:
         run_service(Service("agent-collector", missing_settings, run))
 

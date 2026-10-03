@@ -72,3 +72,20 @@ def budget_phrase(passport: Passport) -> str:
     currency = passport.budget.currency.value if passport.budget.currency else ""
     amount = f"{passport.budget.max:,.2f}".rstrip("0").rstrip(".").replace(",", " ")
     return f"до {amount} {currency}".strip()
+
+
+def plural(count: int, forms: tuple[str, str, str]) -> str:
+    """Форма слова по числу: «1 день», «2 дня», «5 дней», «11 дней», «21 день».
+
+    Правило склонения одно на весь бот: карточка («21 день назад»), остаток квоты
+    («ещё 3 подходящих варианта») и всё, что появится дальше, берут его отсюда.
+    Бот, который путает склонения, выглядит сломанным, а две копии правила
+    разошлись бы молча — обе выглядели бы правдой.
+    """
+    one, few, many = forms
+    if 11 <= count % 100 <= 14:
+        return many
+    last = count % 10
+    if last == 1:
+        return one
+    return few if last in (2, 3, 4) else many

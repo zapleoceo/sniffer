@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -61,6 +62,8 @@ class MemoryLedger:
         self.views: dict[tuple[int, int], View] = {}
         self.offered: dict[int, datetime] = {}
         self.counters: dict[int, Counters] = {}
+        # Карточки по паре «источник, внешний id» — то, что в базе лежит в `listings`.
+        self.known: dict[tuple[str, str], int] = {}
 
     def rows(self, user_id: int) -> list[View]:
         return [view for view in self.views.values() if view.user_id == user_id]
@@ -127,6 +130,9 @@ class MemoryLedger:
             if pid == period_id and view.channel is not Channel.MONITOR
         )
         return Usage(used=used, period_end=period.end)
+
+    async def identify(self, refs: Sequence[tuple[str, str]]) -> dict[tuple[str, str], int]:
+        return {ref: self.known[ref] for ref in refs if ref in self.known}
 
     async def claim_offer(self, user_id: int, now: datetime, cooldown: timedelta) -> bool:
         last = self.offered.get(user_id)

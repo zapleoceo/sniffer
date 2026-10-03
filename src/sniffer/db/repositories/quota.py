@@ -25,10 +25,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from collections.abc import Sequence
+from datetime import datetime
 from typing import cast
 
-from sqlalchemy import Table, delete, func, or_, select, update
+from sqlalchemy import Table, delete, func, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from sniffer.db import models
@@ -283,24 +284,21 @@ class QuotaRepository(Repository):
         )
         return Usage(used=int(used or 0), period_end=period.end)
 
-    async def claim_offer(self, user_id: int, *, now: datetime, cooldown: timedelta) -> bool:
-        """Занять право предложить подписку: не чаще, чем раз в `cooldown`.
+    async def identify(self, refs: Sequence[tuple[str, str]]) -> dict[tuple[str, str], int]:
+        """Карточки по паре «источник, внешний id» — так лот называет сам источник.
 
-        Условный `UPDATE`, а не «прочитал — решил — записал»: двойное нажатие
-        запускает два поиска сразу, и проверка без атомарности показала бы
-        предложение обоим.
+        Нужен тем, кто получил находки без `listing_id` (живой поиск, отложенный ответ из
+        каталога наблюдений): журнал считает по карточке, и сначала её надо найти.
         """
-        users = _table(models.User)
-        claimed = await self._session.scalar(
-            update(users)
-            .where(
-                users.c.id == user_id,
-                or_(
-                    users.c.paywall_offered_at.is_(None),
-                    users.c.paywall_offered_at <= now - cooldown,
-                ),
+        if not refs:
+            return {}
+        rows = await self._session.execute(
+            select(models.Listing.id, models.Listing.source, models.Listing.external_id).where(
+                tuple_(models.Listing.source, models.Listing.external_id).in_(list(refs))
             )
-            .values(paywall_offered_at=now)
-            .returning(users.c.id)
         )
-        return claimed is not None
+        return {
+            (source, external_id): int(listing_id)
+            for listing_id, source, external_id in rows.all()
+            if external_id is not None
+        }

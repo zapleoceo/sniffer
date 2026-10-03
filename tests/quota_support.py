@@ -45,6 +45,8 @@ class Kit(Protocol):
 
     async def new_request(self, user_id: int) -> int: ...
 
+    async def ref_of(self, listing_id: int) -> tuple[str, str]: ...
+
     async def rows(self, user_id: int) -> list[Row]: ...
 
     async def anchor(self, user_id: int) -> datetime | None: ...
@@ -80,7 +82,13 @@ class MemoryKit:
         return next(self._users)
 
     async def listings(self, count: int) -> list[int]:
-        return [next(self._listings) for _ in range(count)]
+        made = [next(self._listings) for _ in range(count)]
+        for listing_id in made:
+            self.memory.known[("memory", f"m{listing_id}")] = listing_id
+        return made
+
+    async def ref_of(self, listing_id: int) -> tuple[str, str]:
+        return ("memory", f"m{listing_id}")
 
     async def new_request(self, user_id: int) -> int:
         return next(self._requests)
@@ -139,6 +147,17 @@ class SqlKit:
             session.add_all(made)
             await session.flush()
             return [listing.id for listing in made]
+
+    async def ref_of(self, listing_id: int) -> tuple[str, str]:
+        async with self.sessions() as session:
+            row = (
+                await session.execute(
+                    select(models.Listing.source, models.Listing.external_id).where(
+                        models.Listing.id == listing_id
+                    )
+                )
+            ).one()
+            return str(row[0]), str(row[1])
 
     async def new_request(self, user_id: int) -> int:
         async with self.sessions() as session, session.begin():

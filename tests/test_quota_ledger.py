@@ -306,6 +306,19 @@ async def a_double_press_confirms_what_it_showed_while_the_first_send_is_in_flig
 
 
 @scenario
+async def identify_finds_listings_by_the_pair_the_source_uses(kit: Kit) -> None:
+    """Находка без `listing_id` опознаётся по паре «источник, внешний id»; чужой пары нет."""
+    ids = await kit.listings(3)
+    refs = [await kit.ref_of(listing_id) for listing_id in ids]
+    quota = service(kit)
+
+    found = await quota.identify([*refs, ("chotot", "no-such-card")])
+
+    assert found == dict(zip(refs, ids, strict=True))
+    assert await quota.identify([]) == {}
+
+
+@scenario
 async def a_hung_reservation_is_swept_but_a_confirmed_one_and_a_monitor_one_stay(kit: Kit) -> None:
     user, who = await started(kit)
     hung, kept, alerted = await kit.listings(3), await kit.listings(2), await kit.listings(2)

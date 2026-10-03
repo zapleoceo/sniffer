@@ -81,6 +81,8 @@ class Ledger(Protocol):
 
     async def usage(self, user_id: int, now: datetime) -> Usage: ...
 
+    async def identify(self, refs: Sequence[tuple[str, str]]) -> dict[tuple[str, str], int]: ...
+
     async def claim_offer(self, user_id: int, now: datetime, cooldown: timedelta) -> bool: ...
 
     async def sweep(self, older_than: datetime, limit: int) -> int: ...
@@ -188,6 +190,10 @@ class QuotaService:
 
     async def sweep(self, older_than: datetime, limit: int) -> int:
         return await self._ledger.sweep(older_than, limit)
+
+    async def identify(self, refs: Sequence[tuple[str, str]]) -> dict[tuple[str, str], int]:
+        """Карточки по паре «источник, внешний id»: для находок без `listing_id`."""
+        return await self._ledger.identify(refs)
 
     async def _limit(self, account: Account, channel: Channel, now: datetime) -> int | None:
         if self._owner_tg_id is not None and account.tg_user_id == self._owner_tg_id:

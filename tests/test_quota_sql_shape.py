@@ -20,6 +20,7 @@ import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from sniffer.db.repositories.quota import QuotaRepository
+from sniffer.db.repositories.users import UserRepository
 from sniffer.domain.quota import Channel, Claim, Ticket
 
 T0 = datetime(2026, 10, 3, 12, 0, tzinfo=UTC)
@@ -71,6 +72,8 @@ class Recorder:
         sql = self._text(statement)
         if sql.startswith("SELECT users.id, users.quota_anchor_at"):
             return Rows([(7, self.anchor)])
+        if sql.startswith("SELECT listings.id"):
+            return Rows([])
         return Rows([1])
 
     async def scalar(self, statement: Any) -> Any:
@@ -257,12 +260,29 @@ async def test_the_sweep_skips_locked_rows_and_spares_the_monitor() -> None:
 async def test_the_offer_claim_is_one_conditional_update() -> None:
     session = Recorder()
 
-    await QuotaRepository(session).claim_offer(  # type: ignore[arg-type]
+    await UserRepository(session).claim_paywall_offer(  # type: ignore[arg-type]
         7, now=T0, cooldown=timedelta(days=1)
     )
 
     sql = session.only("UPDATE users SET paywall_offered_at")
     assert "paywall_offered_at IS NULL OR" in sql and "2026-10-02 12:00:00" in sql
+
+
+async def test_identifying_cards_is_one_read_by_the_pair_the_source_uses() -> None:
+    session = Recorder()
+
+    await QuotaRepository(session).identify([("chotot", "1"), ("archive", "2")])  # type: ignore[arg-type]
+
+    sql = session.only("SELECT listings.id")
+    assert "(listings.source, listings.external_id) IN (" in sql
+    assert "'chotot', '1'" in sql and "'archive', '2'" in sql
+
+
+async def test_identifying_nothing_does_not_touch_the_database() -> None:
+    session = Recorder()
+
+    assert await QuotaRepository(session).identify([]) == {}  # type: ignore[arg-type]
+    assert session.sql == []
 
 
 async def test_reading_the_standing_writes_nothing() -> None:

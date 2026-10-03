@@ -25,7 +25,8 @@ from sniffer.bot import journal, wording
 # `Reply as Reply` — явный реэкспорт (strict mypy): хендлеры, клавиатуры и симулятор
 # импортируют `Reply` отсюда с первого дня, и переезд в presenter их не ломает.
 from sniffer.bot.presenter import Reply as Reply
-from sniffer.bot.presenter import present
+from sniffer.bot.quota import Account, QuotaService
+from sniffer.bot.showing import show
 from sniffer.bot.store import Client, Dialogue, DialogueStore
 from sniffer.bot.threads import open_thread
 from sniffer.broker.usage import request_scope
@@ -192,6 +193,8 @@ class _Turn:
     watch: journal.Stopwatch = field(default_factory=journal.Stopwatch)
     found: Found | None = None
     failed: str | None = None
+    # Кто пишет: по телеграмному id узнают владельца, которому квота не нужна.
+    client: Client | None = None
 
     def recording(self, send: Send) -> Send:
         """Тот же отправитель, но каждый ответ попадает и в журнал.
@@ -227,11 +230,14 @@ class Conversation:
         finder: Finder = find_live,
         scoped_finder: ScopedFinder | None = None,
         recorder: Recorder | None = None,
+        quota: QuotaService | None = None,
     ) -> None:
         self._store = store
         self._intake = intake
         self._finder = finder
         self._scoped_finder = scoped_finder
+        # Без квоты — прежнее поведение: симуляция и тесты диалога лимитов не знают.
+        self._quota = quota
         # По умолчанию — настоящий журнал: разговор создаётся хендлером без
         # аргументов, и всё, что не подставлено здесь, на боевом пути не
         # появится никогда.
@@ -259,7 +265,7 @@ class Conversation:
         opened = await self._recorder.open_request(
             client.tg_user_id, query, username=client.username
         )
-        turn = _Turn(recorder=self._recorder, opened=opened)
+        turn = _Turn(recorder=self._recorder, opened=opened, client=client)
         # Расходы на модель принадлежат ЭТОМУ запросу: contextvar доносит его id
         # до клиента брокера через слои, которым он не нужен, и не путается
         # между двумя клиентами, отвечающими одновременно.
@@ -597,7 +603,16 @@ class Conversation:
 
         if turn is not None:
             turn.found = found
-        await send(present(passport, found, root=dialogue.passport.root))
+        who = turn.client if turn is not None else None
+        await show(
+            send,
+            passport,
+            found,
+            root=dialogue.passport.root,
+            quota=self._quota,
+            account=Account(dialogue.user_id, who.tg_user_id) if who is not None else None,
+            request_id=turn.opened.request_id if turn is not None and turn.opened else None,
+        )
 
 
 def _lap(stage: str) -> None:

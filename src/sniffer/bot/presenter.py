@@ -26,12 +26,14 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from sniffer.bot import wording
+from sniffer.bot import wording, wording_plan
 from sniffer.bot.billing import OFFER
 from sniffer.bot.cards import render_cards
 from sniffer.config import get_settings
 from sniffer.domain.dialogue import Option, Question, feedback_buttons
 from sniffer.domain.passport import Passport
+from sniffer.domain.plans import FREE_CARDS_PER_PERIOD
+from sniffer.domain.quota import Admission
 from sniffer.sources.base import RawItem
 
 
@@ -46,6 +48,9 @@ class Reply:
     # домен решает «уместно ли», разметку рисует `keyboards`.
     offer_subscription: bool = False
     passport_root: int | None = None
+    # Предложить платный план («Подписка — 10 ⭐/мес»). Отдельно от `offer_subscription`:
+    # то про слежение за темой, это про лимит карточек, и кнопки у них разные.
+    offer_plan: bool = False
 
 
 class Results(Protocol):
@@ -66,14 +71,33 @@ class Results(Protocol):
     def deferred(self) -> bool: ...
 
 
-def present(passport: Passport, found: Results, *, root: int | None) -> Reply:
+@dataclass(frozen=True, slots=True)
+class Gate:
+    """Что решила квота по этой выдаче: что можно показать и можно ли предлагать подписку.
+
+    `shown` — карточки страницы, допущенные к показу, в порядке выдачи. К ним
+    относятся и те, которых в журнале опознать не удалось: их показываем, но не
+    считаем (источник без `listing_id`, см. `showing.py`). `offer` — право предложить
+    подписку занято этим показом: не чаще раза в сутки на человека.
+    """
+
+    admission: Admission
+    shown: tuple[RawItem, ...]
+    offer: bool = False
+
+
+def present(
+    passport: Passport, found: Results, *, root: int | None, gate: Gate | None = None
+) -> Reply:
     """Итог поиска одним сообщением: выдача, пустой ответ или «жду сбора».
 
     `root` — корень ветки: он едет в кнопках, чтобы старая выдача действовала на
     свой поиск, а не на тот, что выбран позже.
     """
     if found.items:
-        return _results(passport, found, root)
+        if gate is None:
+            return _results(passport, found, root)
+        return _gated(passport, found, root, gate)
     if found.deferred:
         # Сбор поставлен в очередь, ответ придёт отдельным сообщением. Слежение
         # здесь не предлагаем: человек ещё не увидел, что искать «больше негде».
@@ -95,5 +119,64 @@ def _results(passport: Passport, found: Results, root: int | None) -> Reply:
         f"{header}\n\n{render_cards(found.items, limit=shown)}",
         feedback=feedback_buttons(passport),
         offer_subscription=True,
+        passport_root=root,
+    )
+
+
+def _gated(passport: Passport, found: Results, root: int | None, gate: Gate) -> Reply:
+    """Выдача через квоту: остаток, допущенные карточки и честная строка про остальное."""
+    if not gate.shown:
+        return _exhausted(found, root, gate)
+    admission = gate.admission
+    shown = len(gate.shown)
+    parts = [found.status] if found.status else []
+    balance = wording_plan.balance_line(admission.limit, admission.remaining, admission.period_end)
+    if balance:
+        parts.append(balance)
+    parts.append(wording.result_header(passport, len(found.items), shown))
+    text = "\n\n".join(parts) + "\n\n" + render_cards(gate.shown, limit=shown)
+    if admission.withheld:
+        text += "\n\n" + wording_plan.more_line(
+            len(found.items) - shown, limit=admission.limit, renews=admission.period_end
+        )
+    return Reply(
+        text, feedback=feedback_buttons(passport), offer_subscription=True, passport_root=root
+    )
+
+
+def _exhausted(found: Results, root: int | None, gate: Gate) -> Reply:
+    """Ни одной карточки показать нельзя: само сообщение — предложение или короткий ответ."""
+    admission, total = gate.admission, len(found.items)
+    if admission.limit != FREE_CARDS_PER_PERIOD:
+        # Потолок подписчика: подписка ничего не добавит, поэтому ни кнопки, ни продажи.
+        return Reply(
+            wording_plan.exhausted_cap(total=total, renews=admission.period_end), passport_root=root
+        )
+    if gate.offer:
+        return Reply(
+            wording_plan.exhausted_offer(total=total, renews=admission.period_end),
+            offer_plan=True,
+            passport_root=root,
+        )
+    # Предложение сегодня уже было: второй раз тот же текст с кнопкой — давление.
+    return Reply(
+        wording_plan.exhausted_short(total=total, renews=admission.period_end), passport_root=root
+    )
+
+
+def present_offer(gate: Gate, *, root: int | None) -> Reply | None:
+    """Отдельное сообщение-предложение после выдачи, часть которой лимит не пустил.
+
+    Одно и без давления. Когда показать нечего, предложение — само основное сообщение
+    (`_exhausted`), и второго не бывает.
+    """
+    admission = gate.admission
+    if not (gate.offer and gate.shown and admission.withheld):
+        return None
+    if admission.limit != FREE_CARDS_PER_PERIOD:
+        return None
+    return Reply(
+        wording_plan.exhausted_offer(total=None, renews=admission.period_end),
+        offer_plan=True,
         passport_root=root,
     )
