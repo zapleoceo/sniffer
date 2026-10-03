@@ -44,5 +44,11 @@ def _item(row: Listing) -> RawItem:
         price_raw=str(row.price_amount or ""),
         price_vnd=int(row.price_amount) if row.price_amount is not None else None,
         posted_at=row.posted_at,
-        raw={"listing_id": row.id, "category": row.category, "attributes": row.attributes},
+        # Район лежит колонкой, а не в атрибутах: фасеты (domain/facets.py) читают его отсюда.
+        raw={
+            "listing_id": row.id,
+            "category": row.category,
+            "attributes": row.attributes,
+            "district": row.district,
+        },
     )

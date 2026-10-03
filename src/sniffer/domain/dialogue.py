@@ -17,6 +17,13 @@ from dataclasses import dataclass
 from enum import StrEnum
 from math import ceil
 
+from sniffer.domain.fields import (
+    QUESTIONS,
+    apply_answer,
+    parse_option,
+    question_by_code,
+    question_for,
+)
 from sniffer.domain.passport import (
     FIELD_INFORMATIVENESS,
     MAX_CLARIFYING_QUESTIONS,
@@ -25,16 +32,33 @@ from sniffer.domain.passport import (
     Category,
     Currency,
     Passport,
-    PassportStatus,
-    has_value,
     next_questions,
+)
+from sniffer.domain.questions import (
+    SHOW_ALL,
+    SKIP,
+    SKIP_LABEL,
+    AnswerValue,
+    Option,
+    Question,
 )
 from sniffer.domain.records import PassportEvent
 
-# Значение «не важно». Отдельное от пустого ответа: пустое поле означает «ещё
-# не спрашивали», а SKIP — «спросили, клиенту всё равно».
-SKIP = "skip"
-SKIP_LABEL = "не важно, показать что есть"
+# Прежние имена остаются отсюда: вопросы и применение ответов переехали в реестр
+# полей (`fields.py`, `questions.py`), а на эти имена ссылаются бот и тесты.
+__all__ = [
+    "QUESTIONS",
+    "SHOW_ALL",
+    "SKIP",
+    "SKIP_LABEL",
+    "AnswerValue",
+    "Option",
+    "Question",
+    "apply_answer",
+    "parse_option",
+    "question_by_code",
+    "question_for",
+]
 
 # Виды событий паспорта (passport.md, «Версионирование»). `question_asked` —
 # не правка паспорта, а след диалога: из него собирается счётчик заданных
@@ -48,17 +72,6 @@ EVENT_QUESTION_ASKED = "question_asked"
 # Насколько режем бюджет по кнопке «дорого». Не в ноль и не в половину:
 # клиент отбраковал показанное, а не отказался от покупки.
 PRICEY_FACTOR = 0.7
-
-# Готовые суммы бюджета. Валюта лежит в той же строке, что и подпись, и
-# значение кнопки строится из обеих — иначе они расходятся молча: подпись
-# говорила «до 300 $», а уезжала валюта ПАСПОРТА, и клиенту, сказавшему «за
-# донги», кнопка «до 300 $» отправляла 300 донгов — это 1.2 цента.
-_BUDGET_CHOICES: tuple[tuple[int, Currency], ...] = (
-    (300, Currency.USD),
-    (500, Currency.USD),
-    (800, Currency.USD),
-)
-_CURRENCY_SIGN: dict[Currency, str] = {Currency.USD: "$", Currency.VND: "₫"}
 
 # Когда два слова — одно и то же слово в разных падежах (`_same_stem`).
 # Падежное окончание просьбу не меняет: «нячанге» и «нячанг» — один город,
@@ -167,8 +180,6 @@ _FILLER_WORDS: frozenset[str] = frozenset(
     }
 )
 
-AnswerValue = str | float | Budget
-
 
 class Feedback(StrEnum):
     PRICEY = "pricey"
@@ -194,111 +205,6 @@ def feedback_label(kind: Feedback, passport: Passport | None = None) -> str:
         currency = passport.budget.currency or Currency.USD
         return f"показать до {amount} {currency.value}"
     return _FEEDBACK_LABELS[kind]
-
-
-@dataclass(frozen=True, slots=True)
-class Option:
-    """Кнопка ответа. `value` уезжает в callback_data, поэтому короткий."""
-
-    label: str
-    value: str
-
-
-@dataclass(frozen=True, slots=True)
-class Question:
-    """Вопрос про одно поле паспорта.
-
-    `code` — короткий ключ поля для callback_data: в неё влезает 64 байта, а
-    `attributes.transmission` съело бы треть бюджета кириллицей.
-    """
-
-    field: str
-    code: str
-    text: str
-    options: tuple[Option, ...] = ()
-    skippable: bool = True
-
-    @property
-    def buttons(self) -> tuple[Option, ...]:
-        """Варианты ответа и выход для полей, которые можно не ограничивать."""
-        if not self.skippable:
-            return self.options
-        return (*self.options, Option(SKIP_LABEL, SKIP))
-
-
-# Спрашиваем только про то, что умеем спросить кнопками. Поле без вопроса
-# (например `districts` — справочника районов пока нет) просто пропускается:
-# лучше не спросить, чем спросить так, что ответ нечем разобрать.
-QUESTIONS: tuple[Question, ...] = (
-    Question(
-        field="category",
-        code="cat",
-        text="Что ищем?",
-        options=(
-            Option("скутер", "scooter"),
-            Option("мотобайк", "motorbike"),
-            Option("квартиру", "apartment"),
-            Option("комнату", "room"),
-            Option("дом", "house"),
-        ),
-        skippable=False,
-    ),
-    Question(
-        field="city",
-        code="city",
-        text="В каком городе ищем?",
-        options=(Option("Нячанг", "nha_trang"), Option("Дананг", "da_nang")),
-        skippable=False,
-    ),
-    Question(
-        field="budget.max",
-        code="budget",
-        text="Какой бюджет? Можно написать словами — «до 400» или «до 10 млн».",
-        options=tuple(
-            Option(f"до {amount} {_CURRENCY_SIGN[currency]}", f"{amount} {currency.value}")
-            for amount, currency in _BUDGET_CHOICES
-        ),
-    ),
-    Question(
-        field="attributes.transmission",
-        code="trans",
-        text="Автомат или механика?",
-        options=(Option("автомат", "automatic"), Option("механика", "manual")),
-    ),
-    Question(
-        field="attributes.condition",
-        code="cond",
-        text="Состояние?",
-        options=(
-            Option("новый", "new"),
-            Option("хороший", "good"),
-            Option("любой, лишь бы ездил", "worn"),
-        ),
-    ),
-    Question(
-        field="attributes.brand",
-        code="brand",
-        text="Есть марка на примете?",
-        options=(Option("Honda", "honda"), Option("Yamaha", "yamaha")),
-    ),
-    Question(
-        field="attributes.rooms",
-        code="rooms",
-        text="Сколько комнат?",
-        options=(Option("студия", "1"), Option("две", "2"), Option("три и больше", "3")),
-    ),
-)
-
-_BY_FIELD: dict[str, Question] = {question.field: question for question in QUESTIONS}
-_BY_CODE: dict[str, Question] = {question.code: question for question in QUESTIONS}
-
-
-def question_for(field: str) -> Question | None:
-    return _BY_FIELD.get(field)
-
-
-def question_by_code(code: str) -> Question | None:
-    return _BY_CODE.get(code)
 
 
 def blocking_question(passport: Passport, asked: Sequence[str]) -> Question | None:
@@ -525,22 +431,6 @@ def _content_words(text: str) -> set[str]:
     return {word for word in _words(text) if len(word) > 1 and word not in _FILLER_WORDS}
 
 
-def parse_option(field: str, raw: str) -> AnswerValue:
-    """Значение кнопки → значение поля паспорта.
-
-    Бюджет приезжает вместе с валютой («300 USD»), потому что подпись кнопки
-    называет валюту, а значение обязано называть ту же: догадываться о ней по
-    паспорту нельзя — там могут быть донги, и тогда «до 300 $» превратилось бы
-    в 300 донгов.
-    """
-    if field == "budget.max":
-        amount, _, currency = raw.partition(" ")
-        return Budget(max=float(amount), currency=Currency(currency) if currency else None)
-    if field == "attributes.rooms":
-        return int(raw)
-    return raw
-
-
 # Клиент поправляет бота противопоставлением: «не 200000 VND, А обьем …»,
 # «не скутер, А мотоцикл». Обе формы — из журнала бота (03.09.2026). Ключ здесь
 # не отрицание само по себе («не важно» — это пропуск, а «недорого» вообще про
@@ -575,81 +465,6 @@ def corrects(text: str) -> bool:
     не должно. Здесь только распознавание.
     """
     return _CORRECTION_RE.search(text) is not None
-
-
-def apply_answer(passport: Passport, field: str, value: AnswerValue) -> Passport:
-    """Ответ клиента → новая версия паспорта.
-
-    Паспорт неизменяем (passport.md): здесь появляется новый объект, а версию
-    ему присваивает репозиторий. Пропуск («не важно») сюда не доходит вовсе —
-    он ничего не меняет и остаётся только событием.
-    """
-    update: dict[str, object] = {}
-    if field == "budget.max":
-        update["budget"] = _budget(passport, value)
-    elif field == "category":
-        update["category"] = Category.MOTORBIKE if value == "scooter" else Category(str(value))
-        if value == "scooter":
-            update["attributes"] = {
-                **passport.attributes,
-                "transmission": "automatic",
-                "body_type": "tay_ga",
-            }
-    elif field == "city":
-        update["city"] = str(value)
-    elif field.startswith("attributes."):
-        update["attributes"] = {**passport.attributes, field.removeprefix("attributes."): value}
-    else:  # pragma: no cover — поля вне каталога вопросов сюда не приходят
-        raise ValueError(f"поле {field!r} не заполняется ответом клиента")
-
-    revised = passport.model_copy(update=update)
-    return revised.model_copy(
-        update={
-            "missing_fields": [
-                name for name in ("category", "city", "budget.max") if not has_value(revised, name)
-            ],
-            "status": PassportStatus.READY if revised.is_ready() else revised.status,
-        }
-    )
-
-
-def _budget(passport: Passport, value: AnswerValue) -> Budget:
-    """Ответ про сумму → бюджет. Валюта берётся у ответа, если он её назвал.
-
-    Период не трогаем: его выбрал разбор запроса по намерению (аренда —
-    помесячно, покупка — разово), и ответ про сумму об этом ничего не говорит.
-
-    Нижняя граница сохраняется, но только пока она не спорит с новой верхней:
-    «от 3 млн донгов» плюс кнопка «до 300 $» давали `min=3000000, max=300` —
-    диапазон наизнанку, из которого никакой фильтр не соберётся. Проиграет
-    старая граница: клиент только что назвал верхнюю, о ней он и говорил.
-    """
-    if isinstance(value, Budget):
-        # Валюта ответа главнее паспортной: подпись кнопки её называет. Доллар
-        # остаётся последним доводом — голое «500» без валюты приходит и от
-        # клиента словами, и оно означает доллары, а не «валюта неизвестна».
-        currency = value.currency or passport.budget.currency or Currency.USD
-        top = value.max
-    else:
-        currency = passport.budget.currency or Currency.USD
-        top = float(value)
-    return Budget(
-        min=_keep_floor(passport.budget, top, currency),
-        max=top,
-        currency=currency,
-        period=passport.budget.period,
-    )
-
-
-def _keep_floor(current: Budget, top: float | None, currency: Currency | None) -> float | None:
-    """Прежняя нижняя граница — если она всё ещё ниже верхней и в той же валюте."""
-    floor = current.min
-    if floor is None or top is None:
-        return floor
-    if current.currency is not None and current.currency != currency:
-        # Границы в разных валютах — это не диапазон, а два разных числа.
-        return None
-    return floor if floor < top else None
 
 
 def feedback_buttons(passport: Passport) -> tuple[Option, ...]:
@@ -691,22 +506,29 @@ def feedback_question(passport: Passport, kind: Feedback, asked: Sequence[str]) 
 
 @dataclass(frozen=True, slots=True)
 class DialogueState:
-    """Сколько уже спросили и ждём ли ответ. Собирается из `passport_events`."""
+    """Сколько уже спросили и ждём ли ответ. Собирается из `passport_events`.
+
+    `show_all` — клиент отказался сужать («Показать все N»). Это след цепочки, а
+    не флаг в паспорте: служебное поле в атрибутах паспорта уехало бы в источники
+    и подписки как фильтр.
+    """
 
     asked: tuple[str, ...] = ()
     pending: str | None = None
+    show_all: bool = False
 
 
 def advance(state: DialogueState, kind: str, payload: dict[str, object]) -> DialogueState:
     """Одно событие двигает состояние диалога."""
+    show_all = state.show_all or bool(payload.get("show_all"))
     if kind != EVENT_QUESTION_ASKED:
         # Любое другое событие — это реакция клиента: вопрос закрыт.
-        return DialogueState(asked=state.asked, pending=None)
+        return DialogueState(asked=state.asked, pending=None, show_all=show_all)
     field = str(payload.get("field") or "")
     if not field:  # pragma: no cover — событие без поля мы не пишем
         return state
     asked = state.asked if field in state.asked else (*state.asked, field)
-    return DialogueState(asked=asked, pending=field)
+    return DialogueState(asked=asked, pending=field, show_all=show_all)
 
 
 def replay(events: Sequence[PassportEvent]) -> DialogueState:
