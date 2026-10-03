@@ -187,6 +187,25 @@ CATEGORY_ATTRIBUTES: dict[Category, tuple[str, ...]] = {
         "deposit_months",
         "utilities_included",
     ),
+    # Дом снимают по-своему: у него не этаж, а этажность, и 3 282 активных дома (замер
+    # 03.10.2026) до этого не имели в паспорте вовсе ни одного атрибута.
+    Category.HOUSE: (
+        "rooms",
+        "area_m2",
+        "floors_total",
+        "furnished",
+        "air_conditioner",
+        "washing_machine",
+        "pool",
+        "gym",
+        "elevator",
+        "balcony",
+        "sea_view",
+        "pets_allowed",
+        "min_term_months",
+        "deposit_months",
+        "utilities_included",
+    ),
     Category.ROOM: (
         "area_m2",
         "floor",
