@@ -47,6 +47,20 @@ class User(BigIdMixin, Base):
     active_passport_root: Mapped[int | None] = mapped_column(BigInteger)
     # Нажатие «изменить» переживает рестарт бота и следующий апдейт Telegram.
     editing_passport_root: Mapped[int | None] = mapped_column(BigInteger)
+    # `/new` без текста: следующее сообщение открывает ветку, а не уточняет
+    # активную. Переживает рестарт по той же причине, что и строка выше.
+    awaiting_new_request: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=FALSE
+    )
+    # Когда бот узнал, что писать клиенту нельзя (403 или апдейт my_chat_member).
+    # Пусто — можно. Момент, а не флаг: снятие блока возвращает пустое значение и
+    # слежение возобновляется само, а по самому моменту видно, с каких пор тишина.
+    bot_blocked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Якорь квоты: момент первого списания. Ставится один раз (010_quota_ledger.sql);
+    # после появления периодов его держит составной внешний ключ.
+    quota_anchor_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Когда человеку в последний раз предложили подписку: не чаще раза в сутки.
+    paywall_offered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Passport(BigIdMixin, Base):
@@ -104,6 +118,9 @@ class Passport(BigIdMixin, Base):
         DateTime(timezone=True), nullable=False, server_default=NOW
     )
     is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=TRUE)
+    # Когда поиск использовали в последний раз: порядок списка `/requests`. Пусто
+    # у тех, кого не трогали с появления колонки, — у них порядок по created_at.
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class PassportEvent(BigIdMixin, Base):

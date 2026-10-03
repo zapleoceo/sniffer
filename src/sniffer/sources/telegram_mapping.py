@@ -7,9 +7,11 @@ Telethon. Поводы разные, файлы тоже.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from sniffer.config import get_settings
+from sniffer.domain.passport import Intent, counterpart_deal_type
 from sniffer.domain.prices import price_hint
 from sniffer.sources.base import RawItem
 from sniffer.sources.telegram_reference import (
@@ -24,7 +26,40 @@ from sniffer.sources.telegram_reference import (
 )
 
 
-def to_item(chat: ChatLike, message: MessageLike) -> RawItem | None:
+@dataclass(frozen=True, slots=True)
+class PriceContext:
+    """Что план поиска знает о предложениях: от этого зависят границы цены и её срок.
+
+    Живой поиск видит только текст, и без стороны сделки «5 млн/ночь» неотличимо
+    от цены продажи, а «700 000 донгов в месяц» — от аренды. План знает и категорию,
+    и намерение клиента, поэтому отдаёт их сюда.
+    """
+
+    category: str | None = None
+    deal_type: str | None = None
+
+
+# Контекст «ничего не известно»: значение по умолчанию там, где задачи нет (тесты, разовый разбор).
+NO_CONTEXT = PriceContext()
+
+
+def price_context(params: dict[str, Any]) -> PriceContext:
+    """Категория и сторона предложений из параметров задачи.
+
+    Сторона предложений — обратная намерению клиента: ищущий аренду видит тех, кто
+    сдаёт. Намерение, у которого предложений нет («продаю»), стороны не даёт.
+    """
+    category = str(params.get("category") or "").strip() or None
+    try:
+        side = counterpart_deal_type(Intent(str(params.get("intent") or "")))
+    except ValueError:
+        side = None
+    return PriceContext(category, side if side in {"sell", "rent_out"} else None)
+
+
+def to_item(
+    chat: ChatLike, message: MessageLike, context: PriceContext = NO_CONTEXT
+) -> RawItem | None:
     """Находка из сообщения. Чего в сообщении нет — того нет и в находке.
 
     Пустые `title`, `price_raw`, `seller_name` — не недоделка. Заголовка у
@@ -36,7 +71,7 @@ def to_item(chat: ChatLike, message: MessageLike) -> RawItem | None:
     if not text:
         # Фото без подписи, вход участника, закрепление — не объявления.
         return None
-    price_raw, price_vnd = price_hint(text)
+    price_raw, price_vnd = price_hint(text, category=context.category, deal_type=context.deal_type)
     return RawItem(
         source=SOURCE_NAME,
         external_id=f"{chat.tg_id}:{message.id}",

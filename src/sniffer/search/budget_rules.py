@@ -10,20 +10,23 @@ from __future__ import annotations
 import re
 
 from sniffer.domain.passport import Budget, Currency, Intent, PricePeriod
+from sniffer.domain.price_numbers import factor
+from sniffer.domain.price_vocab import UNIT_FACTORS
 
-# Множители пишут цифрами, словом и по-вьетнамски: «400к», «10 млн», «10tr»,
-# «10 triệu».
-_MULTIPLIERS: dict[str, int] = {
-    "k": 1_000,
-    "к": 1_000,
-    "тыс": 1_000,
-    "m": 1_000_000,
-    "млн": 1_000_000,
-    "миллион": 1_000_000,
-    "лям": 1_000_000,
-    "tr": 1_000_000,
-    "triệu": 1_000_000,
-}
+# Единицы суммы клиента — те же слова, что в объявлениях (`price_vocab`): иначе «до
+# 15кк», «до 2 tỷ» и «до 20🍋» читались долларами (15, 2 и 20), а «цена 15кк» в
+# объявлении — миллионами. Без «м» и «ml»: клиент пишет «400 м от моря» и «500 мл», и
+# это не деньги. Длинные названия впереди, чтобы «млрд» не уступило «м».
+_NOT_A_BUDGET_UNIT = frozenset({"м", "ml", "мил", "mil"})
+# «мил» целиком не берём: «до 5 миль от моря» — не 5 миллионов; «миллион» пишем полностью.
+_UNITS = "|".join(
+    [
+        re.escape(name)
+        for name, _ in sorted(UNIT_FACTORS, key=lambda item: -len(item[0]))
+        if name not in _NOT_A_BUDGET_UNIT
+    ]
+    + ["миллион"]
+)
 
 # Пробел внутри числа только обычный и неразрывный: `\s` пустил бы перенос
 # строки и склеил два числа из соседних строк в одно. Хвост `\w*` живёт внутри
@@ -38,7 +41,7 @@ _MULTIPLIERS: dict[str, int] = {
 # обязателен: иначе из «cbr250» прочиталось бы «50» — хвост, стоящий за цифрой.
 _AMOUNT_RE = re.compile(
     r"(?<!\w)"
-    r"(?P<num>\d[\d\u00a0 .,]*\d|\d)\s*(?:(?P<mult>k|к|тыс|млн|миллион|лям|tr|triệu|m)\w*)?",
+    rf"(?P<num>\d[\d\u00a0 .,]*\d|\d)\s*(?:(?P<mult>{_UNITS})\w*)?",
     re.IGNORECASE,
 )
 
@@ -89,6 +92,28 @@ _PERIODS: tuple[tuple[PricePeriod, re.Pattern[str]], ...] = (
 # слово рядом, поэтому «2019 года» суммой не считаем.
 _YEAR_RE = re.compile(r"^\s*(?:год|г\.|г\b|year|гв)", re.IGNORECASE)
 _YEAR_RANGE = range(1990, 2036)
+
+# Голый год без слова «год» («скутер 2021») — тоже год, а не потолок цены: резерв при
+# молчащей модели читал его «до 2021 $» и молча резал выдачу. Бюджетом четыре цифры
+# становятся, только если человек сам это сказал: словом-маркером («до 2021»), валютой
+# рядом («2021$», «$2021», «2021 долларов») или вилкой («2000-2500»).
+_CURRENCY_AFTER_RE = re.compile(
+    r"\s*(?:[$€₫₽]|usd\b|vnd\b|eur\b|rub\b|долл|бакс|донг|евро|руб|у\.\s?е\b)",
+    re.IGNORECASE,
+)
+_CURRENCY_BEFORE_RE = re.compile(r"[$€₫₽]\s*$")
+_RANGE_DASHES = ("-", chr(0x2013), chr(0x2014))
+
+
+def _bare_year(text: str, start: int, end: int, marker: str | None) -> bool:
+    """Четыре цифры года без маркера, валюты и вилки — это не сумма."""
+    if marker is not None:
+        return False
+    before, after = text[:start], text[end:]
+    if _CURRENCY_AFTER_RE.match(after) or _CURRENCY_BEFORE_RE.search(before):
+        return False
+    return not (after.startswith(_RANGE_DASHES) or before.endswith(_RANGE_DASHES))
+
 
 # Число, за которым идёт СЧЁТНАЯ единица (комнаты, срок аренды), а не денежная,
 # — не сумма. «квартиру 2 спальни» → это две спальни, не «до 2 USD»; «на 3 дня»,
@@ -160,7 +185,7 @@ def _without_rejected(text: str) -> str:
 def _amounts(text: str) -> list[tuple[float, str | None]]:
     found: list[tuple[float, str | None]] = []
     for match in _AMOUNT_RE.finditer(text):
-        multiplier = _MULTIPLIERS.get((match.group("mult") or "").lower(), 1)
+        multiplier = factor(match.group("mult"))
         number = _to_number(match.group("num"))
         if number is None:
             continue
@@ -171,7 +196,14 @@ def _amounts(text: str) -> list[tuple[float, str | None]]:
             continue
         if multiplier == 1 and _NON_MONEY_AFTER_RE.match(text[match.end() :]):
             continue
-        found.append((value, _marker(text[: match.start()])))
+        marker = _marker(text[: match.start()])
+        if (
+            multiplier == 1
+            and int(value) in _YEAR_RANGE
+            and _bare_year(text, match.start(), match.end(), marker)
+        ):
+            continue
+        found.append((value, marker))
     return found
 
 

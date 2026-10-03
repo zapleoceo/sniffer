@@ -4,6 +4,7 @@
 # Из CI:   workflow копирует этот файл в /tmp и запускает `bash /tmp/... <path> <sha>`
 # Руками:  cd /var/www/sniffer && bash infra/deploy.sh
 # Проверка без изменений: bash infra/deploy.sh --check
+# Сводка логов без деплоя: bash infra/deploy.sh --summary (только счётчики)
 #
 # Идемпотентен: повторный запуск на том же коммите не пересобирает образ и не
 # трогает контейнеры сверх `up -d`.
@@ -18,6 +19,7 @@ set -euo pipefail
 DEPLOY_PATH_DEFAULT=/var/www/sniffer
 
 PREFLIGHT_ONLY=${PREFLIGHT_ONLY:-0}
+SUMMARY_ONLY=${SUMMARY_ONLY:-0}
 FORCE_BUILD=${FORCE_BUILD:-0}
 POS1=""
 POS2=""
@@ -26,12 +28,14 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --check|--preflight) PREFLIGHT_ONLY=1 ;;
     --force-build)       FORCE_BUILD=1 ;;
+    --summary)           SUMMARY_ONLY=1 ;;
     -h|--help)
       cat <<'USAGE'
-deploy.sh [--check] [--force-build] [DEPLOY_PATH] [TARGET_REF]
+deploy.sh [--check] [--force-build] [--summary] [DEPLOY_PATH] [TARGET_REF]
 
   --check        только проверки (диск, окружение), ничего не меняет
   --force-build  пересобрать образ, даже если исходники не менялись
+  --summary      только сводка логов контейнеров (счётчики, без строк), ничего не меняет
 
   DEPLOY_PATH    по умолчанию /var/www/sniffer
   TARGET_REF     коммит или ветка, по умолчанию origin/master
@@ -74,6 +78,213 @@ LOG_TAIL="${LOG_TAIL:-30}"
 log()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 info() { printf '   %s\n' "$*"; }
 die()  { printf '\n!! %s\n' "$*" >&2; exit "${2:-1}"; }
+
+# ── Сводка логов ────────────────────────────────────────────────────────────
+# Вывод этого скрипта попадает в журнал Actions ПУБЛИЧНОГО репозитория, а в логах
+# контейнеров лежат id и названия чатов, ключи кандидатов, параметры SQL (строка
+# воркера до 600 символов с текстом объявления) и тексты ошибок. Сырые строки
+# сюда не выводятся никогда: считаем уровни и названия событий и печатаем только
+# числа. Название события берётся лишь если оно похоже на идентификатор (a-z,
+# цифры, точка, подчёркивание, дефис, до 60 знаков): всё прочее считается
+# значением и не печатается. Подробности - по SSH, там доступ у владельца.
+log_summary() {
+  local service lines total errors events
+  for service in $(docker compose ps --services 2>/dev/null); do
+    lines="$(docker compose logs --tail "$LOG_TAIL" --no-color --no-log-prefix "$service" 2>&1 || true)"
+    total="$(printf '%s\n' "$lines" | grep -c . || true)"
+    errors="$(printf '%s\n' "$lines" \
+      | grep -cE '"level": ?"(error|critical)"|(^|[^A-Za-z])(ERROR|FATAL|CRITICAL)[: ]|Traceback' || true)"
+    events="$(printf '%s\n' "$lines" \
+      | { grep -oE '"event": ?"[^"]*"' || true; } \
+      | sed -E 's/^"event": ?"//; s/"$//' \
+      | { grep -E '^[a-z0-9_.-]{1,60}$' || true; } \
+      | sort | uniq -c | sort -rn | head -3 \
+      | awk '{printf "%s%s=%s", sep, $2, $1; sep=", "}')"
+    printf '   %-18s строк %-4s ошибок %-3s %s\n' "$service" "$total" "$errors" "${events:+события: $events}"
+  done
+  info "строки логов здесь не печатаются: подробности по SSH, docker compose logs --tail 100 <сервис>"
+}
+
+if [ "$SUMMARY_ONLY" = 1 ]; then
+  [ -d "$DEPLOY_PATH" ] || die "нет каталога $DEPLOY_PATH" 10
+  cd "$DEPLOY_PATH"
+  log "сводка логов (только счётчики)"
+  log_summary
+  exit 0
+fi
+
+# Часовой миграции: колонка или таблица ОБЯЗАНА быть в живой базе, иначе деплой
+# красный. Шаблон один на всё, а вызовы идут из таблицы `schema_sentinels`
+# ниже: копию проверки можно было ослабить в одном месте и забыть в другом, а
+# константу `HAS_NEW=1` на месте проверки никто бы не заметил. Контракт функции
+# держит tests/test_deploy_sentinel_run.py: он гоняет её на подставном `docker`
+# и убеждается, что отсутствие красит деплой, а присутствие — нет.
+#
+# Без колонки спрашивается таблица целиком: у таблицы всегда есть хотя бы одна
+# колонка, поэтому тот же запрос без фильтра отвечает «таблица есть».
+# Ответ, в котором не число, считается отсутствием: `[ x -lt 1 ]` на не-числе
+# не падает, а молча уходит в ветку «на месте».
+require_column() {
+  local table="$1" column="${2:-}" what filter="" found
+  what="таблица ${table}"
+  if [ -n "$column" ]; then
+    what="${table}.${column}"
+    filter=" and column_name='${column}'"
+  fi
+  found="$(docker exec "$PG_CID" psql -U sniffer -d sniffer -tAc "select count(*) from information_schema.columns where table_schema='public' and table_name='${table}'${filter}" 2>/dev/null || echo 0)"
+  case "$found" in ''|*[!0-9]*) found=0 ;; esac
+  if [ "$found" -lt 1 ]; then
+    echo "   миграции не применились: ${what} отсутствует — см. раздел «миграции схемы»" >&2
+    FAIL=1
+  else
+    info "миграции: ${what} на месте"
+  fi
+}
+
+# Таблица часовых схемы. ОДНА строка на каждую новую таблицу или колонку — и
+# больше ничего: ни новой функции, ни нового блока проверки.
+#
+#   таблица колонка   колонка из `ALTER TABLE … ADD COLUMN IF NOT EXISTS`: часовой
+#                     того, что ALTER доехал до ЖИВОЙ базы. `CREATE TABLE IF NOT
+#                     EXISTS` существующую таблицу не трогает, колонки там не
+#                     появится, а число таблиц этого не покажет (отказ 02.09.2026);
+#   таблица           новая таблица целиком (`CREATE TABLE IF NOT EXISTS`). Деньги
+#                     и права живут в новых таблицах, и забытая строка — это
+#                     таблица, о пропаже которой деплой не скажет.
+#
+# Хвост цепочки миграций охраняется теми же строками: файл, не доехавший в
+# `git pull`, не запустится и ошибки не даст, зато оставит без ответа часового
+# своей таблицы. Правило исполняет tests/test_deploy_sentinels.py: ALTER или
+# таблица без строки красят сборку, строка с опечаткой или про несуществующее —
+# тоже. Комментарий в конце строки и пустые строки допускаются.
+schema_sentinels() {
+  cat <<'SENTINELS'
+listings          source                 # миграция единого каталога, 02.09.2026
+users             awaiting_new_request   # `/new`: следующее сообщение открывает поиск
+passports         last_used_at           # порядок списка поисков: выбор возвращает поиск
+subscriptions     last_scanned_at        # монитор: ротация обхода, кого не смотрели дольше всех
+subscriptions     failed_streak          # монитор, карантин: сколько проходов подряд падала
+subscriptions     last_error             # монитор, карантин: чем
+subscriptions     quarantined_until      # монитор, карантин: до какого времени не трогать
+subscriptions     suppressed_total       # 015: сколько карточек отбросил суточный потолок слота
+subscriptions     overflow_day           # 015: сутки, к которым относится счёт «ещё N»
+subscriptions     overflow_count         # 015: сколько подошло сверх потолка в эти сутки
+subscriptions     overflow_notified      # 015: сводку «ещё N» за эти сутки уже поставили
+subscriptions     no_slot_since          # 015: с какого момента слот без права (пауза no_slot)
+users             bot_blocked_at         # клиент заблокировал бота: нотифаер не шлёт, матчер не ставит в очередь
+outbox            last_error             # причина отмены или отказа строки очереди
+users             quota_anchor_at        # 010_quota_ledger: якорь периода, он же часовой того, что файл доехал
+users             paywall_offered_at     # не чаще раза в сутки предлагаем подписку
+client_requests   shown_count            # сколько карточек показано по запросу
+client_requests   withheld_count         # сколько удержано лимитом квоты
+quota_periods                            # журнал показов: период квоты (010)
+offer_views                              # журнал показов: показанные карточки (010)
+user_consents                           # согласие с условиями (011)
+billing_events                           # журнал событий подписки (011)
+payments          tg_user_id             # 011_stars_billing: чей платёж, нужен для возврата по charge_id
+payments          invoice_payload        # по какому счёту: так различаются подписки
+payments          kind                   # first | renewal | unknown
+payments          is_first_recurring     # первый платёж подписки: его id отменяет подписку
+payments          period_end             # срок от Telegram, не наша арифметика
+payments          refunded_at            # когда вернули
+payments          raw                    # SuccessfulPayment как пришёл
+subscriptions     priority               # 016_stars_slots: порядок претензии на слот мониторинга
+payments          source                 # 016_stars_slots: апдейт или сверка
+payments          period_end_estimated   # 016_stars_slots: срок посчитан сверкой, а не взят у Telegram
+schema_proposals                         # хвост цепочки на момент введения таблицы (004)
+search_tabs                              # вкладки поиска и архив «Удалить поиск» (017)
+SENTINELS
+}
+
+check_schema_sentinels() {
+  local table column checked=0
+  while read -r table column _; do
+    [ -n "$table" ] || continue
+    require_column "$table" "$column"
+    checked=$((checked + 1))
+  done < <(schema_sentinels | sed 's/#.*//')
+  # Пустая таблица (стёрли строки, сломали heredoc) не должна быть зелёной: цикл
+  # без единого прохода не проверил ничего, а выглядит как «всё на месте».
+  if [ "$checked" -eq 0 ]; then
+    echo "   таблица часовых пуста — деплой ничего не проверил" >&2
+    FAIL=1
+  fi
+}
+
+# Расписание резервной копии БД. Копию делает infra/backup/sniffer-pg-backup.sh, а в
+# cron её ставит ЭТОТ шаг: сервер описывается репозиторием, а не ручной правкой
+# crontab (у БД sniffer резервной копии не было вовсе, хотя в неё ложатся платежи
+# и права). Файл целиком принадлежит деплою и перезаписывается, если отличается.
+#
+# Содержимое — одна функция и для записи, и для сверки после неё: ожидаемый текст
+# не должен существовать в двух копиях. Скрипт зовётся через `bash`, а не прямо:
+# git с Windows не хранит бит исполнения (docs/deploy.md, раздел 6). PATH задан
+# явно: у cron он урезан до /usr/bin:/bin, и `docker` в нём не найдётся. Вывод уходит
+# в файл журнала на сервере: там статусы и числа, содержимого дампа нет. Время —
+# 03:00 по часам сервера (он в UTC: 10:00 по Вьетнаму), пользователь root
+# (доступ к сокету docker и право chgrp на verabackup).
+backup_cron_content() {
+  cat <<CRON
+# Управляется infra/deploy.sh (шаг «резервная копия БД»): ручные правки перезапишет следующий деплой.
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+0 3 * * * root bash ${DEPLOY_PATH}/infra/backup/sniffer-pg-backup.sh >>/var/log/sniffer-backup.log 2>&1
+CRON
+}
+
+# Идемпотентная установка расписания. Возвращает 0 или 1 и называет причину отказа
+# строкой в stderr; сама ничего не обрывает: вызывающий решает, что делать с отказом
+# (шаг деплоя предупреждает, но не падает). FS_ROOT — корень файловой системы:
+# пусто на сервере, подставной каталог в тестах (настоящий /etc тесты не трогают).
+install_backup_cron() {
+  local script="${DEPLOY_PATH}/infra/backup/sniffer-pg-backup.sh"
+  local dir="${FS_ROOT:-}/etc/cron.d" target state
+  target="${dir}/sniffer-backup"
+
+  # Расписание на несуществующий скрипт тихо падало бы каждую ночь: без скрипта
+  # файл не пишется вовсе.
+  if [ ! -f "$script" ]; then
+    echo "   нет скрипта резервной копии: ${script}" >&2
+    return 1
+  fi
+  # Путь попадает в строку cron как есть: пробел или `;` изменили бы саму команду,
+  # а относительный путь указывал бы в никуда — cron стартует не из каталога деплоя.
+  case "$DEPLOY_PATH" in
+    /*) ;;
+    *)
+      echo "   путь деплоя должен быть абсолютным: cron стартует из другого каталога" >&2
+      return 1 ;;
+  esac
+  case "$DEPLOY_PATH" in
+    *[!A-Za-z0-9_./-]*)
+      echo "   путь деплоя содержит знаки, недопустимые в cron-файле" >&2
+      return 1 ;;
+  esac
+  # Каталог /etc/cron.d создаёт пакет cron, а не деплой: нет каталога — нет cron.
+  if [ ! -d "$dir" ] || [ ! -w "$dir" ]; then
+    echo "   cron недоступен: нет каталога ${dir} или права записи в него" >&2
+    return 1
+  fi
+  if [ -f "$target" ] && backup_cron_content | cmp -s - "$target"; then
+    info "cron резервной копии: актуален (${target})"
+    return 0
+  fi
+  state="установлен"
+  [ -e "$target" ] && state="обновлён"
+  # Сначала во временный файл рядом, потом rename: cron читает каталог раз в
+  # минуту и не должен увидеть половину файла. Имя с точкой cron пропускает.
+  if ! { backup_cron_content >"${target}.new" && chmod 0644 "${target}.new" &&
+         mv -f -T "${target}.new" "$target"; } 2>/dev/null; then
+    rm -f "${target}.new"
+    echo "   не удалось записать ${target}" >&2
+    return 1
+  fi
+  if ! backup_cron_content | cmp -s - "$target"; then
+    echo "   ${target} после записи не совпал с ожидаемым" >&2
+    return 1
+  fi
+  info "cron резервной копии: ${state} (ежедневно 03:00 UTC, ${target})"
+}
 
 # ── 0. Замок: два деплоя одновременно перетрут друг другу рабочее дерево ─────
 LOCK_FILE="/var/lock/sniffer-deploy.lock"
@@ -242,6 +453,13 @@ info "бот и agent-collector получили обязательные нас
 # инод с момента старта контейнера, а `git checkout` заменяет файл новым инодом,
 # и внутри контейнера остаётся старая версия без свежих ALTER. stdin это обходит.
 #
+# Применяется вся цепочка: каждый файл `infra/sql/NNN_*.sql` с ТРЁХЗНАЧНЫМ
+# номером, по алфавиту. Маска была двузначной («00» и звёздочка), и файл
+# `010_*.sql` не применился бы ни здесь, ни в CI, ни в тесте схемы — молча, при
+# зелёной сборке. Теперь маска одна на деплой, CI и тесты, а файл вне маски
+# красит tests/test_migration_mask.py. Правила имён и содержимого — docs/deploy.md,
+# «Миграции: имя файла и маска».
+#
 # Postgres поднимаем первым и ждём healthy: миграция в неподнятую базу — гонка,
 # а app-контейнеры обязаны стартовать уже на новой схеме.
 log "миграции схемы"
@@ -255,7 +473,7 @@ for _ in $(seq 1 30); do
   [ "$H" = "healthy" ] || [ "$H" = "none" ] && break
   sleep 2
 done
-for migration in infra/sql/00*.sql; do
+for migration in infra/sql/[0-9][0-9][0-9]_*.sql; do
   if docker compose exec -T postgres psql -U sniffer -d sniffer -v ON_ERROR_STOP=1 \
        < "$migration" >/dev/null; then
     info "схема применена из $migration"
@@ -263,6 +481,25 @@ for migration in infra/sql/00*.sql; do
     die "миграция $migration не применилась — см. ошибку psql выше" 40
   fi
 done
+
+# ── 4.75 Резервная копия БД ─────────────────────────────────────────────────
+# Шаг не имеет права ронять деплой: приложение к этому моменту уже обновлено, а
+# без cron нужно предупредить, а не откатывать. Но и промолчать он не вправе:
+# без копии БД существует в одном экземпляре. Поэтому предупреждение громкое —
+# stderr, аннотация Actions (`::warning::` в журнале попадает на страницу
+# прогона) и повтор последней строкой деплоя, — а код выхода не меняется.
+# `if !` обязателен: голый вызов под `set -e` оборвал бы деплой кодом, которого
+# нет в таблице кодов выхода.
+log "резервная копия БД"
+BACKUP_WARN=0
+if ! install_backup_cron; then
+  BACKUP_WARN=1
+  {
+    echo "   ВНИМАНИЕ: резервная копия БД НЕ стоит в расписании — причина строкой выше."
+    echo "   Деплой продолжается, код выхода не меняется. Чинить: docs/deploy.md, «Резервная копия БД sniffer»."
+  } >&2
+  echo "::warning::резервная копия БД sniffer не поставлена в расписание — docs/deploy.md, «Резервная копия БД sniffer»"
+fi
 
 # ── 5. Запуск ───────────────────────────────────────────────────────────────
 log "запуск"
@@ -340,28 +577,18 @@ if [ -n "${PG_CID:-}" ]; then
     info "схема БД: ${TABLES} таблиц"
   fi
   # Число таблиц не ловит непринятую МИГРАЦИЮ: 02.09.2026 таблицы были, а
-  # колонок source/external_id/scan_listing_id не было, и matcher падал. Колонка
-  # из миграции единого каталога — часовой того, что ALTER'ы доехали, а не только
-  # CREATE TABLE. Появится новая миграция — сюда добавляется её колонка-часовой.
-  HAS_COL="$(docker exec "$PG_CID" psql -U sniffer -d sniffer -tAc "select count(*) from information_schema.columns where table_name='listings' and column_name='source'" 2>/dev/null || echo 0)"
-  if [ "${HAS_COL:-0}" -lt 1 ]; then
-    echo "   миграции не применились: listings.source отсутствует — см. раздел «миграции схемы»" >&2
-    FAIL=1
-  else
-    info "миграции: listings.source на месте"
-  fi
-  # Часовой ПОСЛЕДНЕЙ миграции в цепочке. Цикл выше применяет их по порядку и
-  # падает на ошибке, но это доказывает только то, что psql не вернул ошибку на
-  # ЗАПУЩЕННОМ файле: новый файл, не попавший в `git pull`, не запустится вовсе
-  # и ошибки не даст. Поэтому проверяется наличие таблицы из хвоста цепочки —
-  # ровно тем же приёмом, что и колонка выше, и по той же причине.
-  HAS_TAIL="$(docker exec "$PG_CID" psql -U sniffer -d sniffer -tAc "select count(*) from information_schema.tables where table_schema='public' and table_name='schema_proposals'" 2>/dev/null || echo 0)"
-  if [ "${HAS_TAIL:-0}" -lt 1 ]; then
-    echo "   хвост цепочки миграций не доехал: таблицы schema_proposals нет (004_schema_proposals.sql)" >&2
-    FAIL=1
-  else
-    info "миграции: хвост цепочки (schema_proposals) на месте"
-  fi
+  # колонок source/external_id/scan_listing_id не было, и matcher падал. Поэтому
+  # деплой спрашивает базу о каждой строке таблицы `schema_sentinels` (вверху
+  # скрипта): колонка из свежего ALTER — часовой того, что ALTER'ы доехали, а не
+  # только CREATE TABLE; новая таблица — часовой того, что доехал её файл. ЛЮБАЯ
+  # новая колонка или таблица в infra/sql обязана получить там свою строку:
+  # tests/test_deploy_sentinels.py красит сборку, если строки нет и если она
+  # стоит на несуществующем. Бот читает `users` и `passports` на КАЖДОМ
+  # сообщении, и отсутствие колонки там означает не деградацию, а молчащий бот
+  # при зелёном деплое. Цикл миграций выше доказывает лишь то, что psql не
+  # вернул ошибку на ЗАПУЩЕННОМ файле: файл, не попавший в `git pull`, не
+  # запустится вовсе и ошибки не даст — его выдаёт только строка про его таблицу.
+  check_schema_sentinels
 fi
 
 # 3. Образ рабочий: код импортируется. Ловит битую сборку и сломанные
@@ -417,11 +644,16 @@ docker compose ps || true
 free -m | sed 's/^/   /' || true
 df -h "$DEPLOY_PATH" | sed 's/^/   /' || true
 
-log "последние $LOG_TAIL строк логов"
-docker compose logs --tail "$LOG_TAIL" --no-color --timestamps 2>&1 | tail -n 200 || true
+log "сводка логов (только счётчики)"
+log_summary
 
 if [ "$FAIL" -ne 0 ]; then
   die "деплой $NEW_SHA прошёл, но контейнеры не в порядке — см. логи выше" 40
+fi
+
+# Предупреждение шага 4.75 посреди журнала тонет: повторяем его перед последней строкой.
+if [ "${BACKUP_WARN:-0}" -ne 0 ]; then
+  echo "ВНИМАНИЕ: деплой прошёл, но резервная копия БД не в расписании (см. шаг «резервная копия БД») — БД остаётся в одном экземпляре" >&2
 fi
 
 log "готово: $NEW_SHA"

@@ -8,12 +8,12 @@ LLM не является обязательным для появления к�
 
 from __future__ import annotations
 
-from decimal import Decimal
-
 from sniffer.domain.passport import Category, Intent, default_deal_type
-from sniffer.domain.prices import price_hint
+from sniffer.domain.prices import parse_price
 from sniffer.domain.records import Chat, Listing, RawMessage
 from sniffer.pipeline.gate import CategoryDetector, GateResult, gate
+from sniffer.pipeline.listing_facts import fact_columns
+from sniffer.pipeline.listing_price import PriceColumns, price_columns
 
 STAGE_GATED = "gated"
 STAGE_EXTRACTED = "extracted"
@@ -74,36 +74,58 @@ def listing_from(
     Порядок «текст лота главнее чата» тот же, что у разбора запроса клиента:
     `parse_query` кладёт `city or default_city`. Заодно чинится случай, который
     был и раньше: продавец из нячангской группы, продающий байк в Дананге.
+
+    Город самого поста (`facts.city`) главнее и города чата, и умолчания разбора запроса:
+    `parse_query` отдаёт город чата, когда текст города не называет, и без этого лот из
+    Дананга в нячангской группе оставался нячангским (решение владельца 04.10.2026).
+    Читается город только у Нячанга и Дананга — у остальных справочника мест нет.
+
+    Район, язык, заголовок и факты (площадь, этаж, удобства, год, пробег…) читает
+    `listing_facts.fact_columns`; явные `attributes` разбора запроса главнее прочитанного.
+    Заголовок — первая содержательная строка поста, а не первая непустая: так «AN-HOME» и
+    «#нячанг #аренда» перестали быть названием 1900 карточек.
     """
     if raw.id is None:
         raise ValueError("raw message without database id")
     if not result.passed or not result.categories:
         raise ValueError("cannot build listing from rejected message")
-    price_raw, price_vnd = price_hint(raw.text)
+    category = result.categories[0].value
+    prices = price_columns(parse_price(raw.text, category=category, deal_type=deal_type), deal_type)
+    facts = fact_columns(
+        raw.text,
+        category=category,
+        deal_type=deal_type,
+        attributes=attributes,
+        city=city or chat.city,
+        monthly_rent=_monthly_rent_vnd(prices),
+    )
     return Listing(
         raw_message_id=raw.id,
         source="telegram_archive",
         external_id=f"{raw.chat_tg_id}:{raw.msg_id}",
         deal_type=deal_type,
-        category=result.categories[0].value,
-        city=city or chat.city,
-        title=_title(raw.text),
+        category=category,
+        city=facts.city or city or chat.city,
+        district=facts.district,
+        title=facts.title,
         summary=_summary(raw.text),
         tg_link=_link(chat.tg_id, chat.username, raw.msg_id),
         posted_at=raw.posted_at,
         seller_id=raw.seller_id,
-        price_amount=Decimal(price_vnd) if price_vnd is not None else None,
-        price_currency="VND" if price_vnd is not None else None,
-        # Период цены следует за стороной сделки: сдают помесячно, продают
-        # разово. Раньше «13 млн» у сдаваемой квартиры значились разовой
-        # ценой, и помесячный бюджет арендатора сравнивать было не с чем.
-        price_period=(
-            ("month" if deal_type == "rent_out" else "once") if price_vnd is not None else None
-        ),
-        attributes=dict(attributes or {}),
-        confidence=0.55 if price_raw else 0.4,
-        lang=None,
+        price_amount=prices.amount,
+        price_currency=prices.currency,
+        price_period=prices.period,
+        attributes={**facts.attributes, **prices.attributes},
+        confidence=0.55 if prices.amount is not None or prices.attributes else 0.4,
+        lang=facts.lang,
     )
+
+
+def _monthly_rent_vnd(prices: PriceColumns) -> int | None:
+    """Месячная аренда в донгах, если цена карточки — именно она."""
+    if prices.amount is None or prices.currency != "VND" or prices.period != "month":
+        return None
+    return int(prices.amount)
 
 
 def _link(tg_id: int, username: str | None, msg_id: int) -> str:
@@ -112,11 +134,6 @@ def _link(tg_id: int, username: str | None, msg_id: int) -> str:
     digits = str(abs(tg_id))
     internal = digits[3:] if tg_id < 0 and digits.startswith("100") else digits
     return f"https://t.me/c/{internal}/{msg_id}"
-
-
-def _title(text: str) -> str:
-    line = next((line.strip() for line in text.splitlines() if line.strip()), "объявление")
-    return line[:180]
 
 
 def _summary(text: str) -> str:

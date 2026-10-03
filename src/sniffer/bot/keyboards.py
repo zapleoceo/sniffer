@@ -14,19 +14,37 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from aiogram.filters.callback_data import CallbackData
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+)
 
+from sniffer.bot import wording, wording_plan
 from sniffer.bot.conversation import Reply
-from sniffer.bot.query_menu import title
+from sniffer.bot.paging import MoreOffer, all_label, more_label
+from sniffer.bot.slot_wording import FOLLOW_LABEL
+from sniffer.bot.threads import labels
+from sniffer.bot.watch_button import limit_markup
+from sniffer.config import get_settings
 from sniffer.domain.records import QueryOverview
 
 # Сколько кнопок в ряд. Три коротких («автомат», «механика», «не важно») в один
 # ряд ещё читаются, длинные подписи телефон обрежет.
 ROW = 2
 
-# Цена стоит прямо на кнопке. Кнопка «следить», ведущая к счёту без
-# предупреждения о деньгах, — это тёмный паттерн, даже если речь про звезду.
-SUBSCRIBE_LABEL = "🔔 Следить за новыми — 1 ⭐/мес"
+# «Следить» цены на кнопке не несёт (`slot_wording.FOLLOW_LABEL`): у подписчика со свободным
+# слотом оно ничего не стоит, а остальных кнопка ведёт на экран подтверждения с ценой, где
+# до согласия ничего не списывается. Кнопка с ценой, которая не списывает, врала бы так же,
+# как кнопка без цены, которая списывает.
+
+# Отдельная ветка на каждый поиск — то, из-за чего уточнение не уезжает в чужой
+# паспорт. Подпись говорит «новый», а не «сбросить»: прежний поиск остаётся.
+NEW_THREAD_LABEL = "➕ Новый поиск"
+# Человек видит одно слово — «поиски», — а не «запросы» и «ветки».
+SEARCHES_LABEL = "📂 Мои поиски"
+ALL_SEARCHES_LABEL = "← Все поиски"
 
 
 class AnswerCallback(CallbackData, prefix="ans"):
@@ -55,6 +73,66 @@ class RequestsCallback(CallbackData, prefix="req"):
     root: int = 0
 
 
+class PlanCallback(CallbackData, prefix="plan"):
+    """Кнопка платного плана под предложением подписки."""
+
+    action: str
+
+
+class PageCallback(CallbackData, prefix="pg"):
+    """«Ещё» / «Показать все»: ключ снимка выдачи, действие и с какого места продолжать."""
+
+    token: str
+    action: str
+    offset: int
+
+
+def _page_row(offer: MoreOffer) -> list[InlineKeyboardButton]:
+    """Кнопки продолжения; «все» не рисуем, когда оно то же, что и «Ещё»."""
+    step = get_settings().max_cards
+    row = [
+        InlineKeyboardButton(
+            text=more_label(min(step, offer.rest)),
+            callback_data=PageCallback(
+                token=offer.token, action="more", offset=offer.offset
+            ).pack(),
+        )
+    ]
+    if offer.rest > step:
+        row.append(
+            InlineKeyboardButton(
+                text=all_label(offer.rest),
+                callback_data=PageCallback(
+                    token=offer.token, action="all", offset=offer.offset
+                ).pack(),
+            )
+        )
+    return row
+
+
+def without_paging(keyboard: InlineKeyboardMarkup | None) -> InlineKeyboardMarkup | None:
+    """Та же клавиатура без кнопок продолжения: нажатая страница не должна звать второй раз."""
+    if keyboard is None:
+        return None
+    prefix = f"{PageCallback.__prefix__}{PageCallback.__separator__}"
+    rows = [
+        [button for button in row if not (button.callback_data or "").startswith(prefix)]
+        for row in keyboard.inline_keyboard
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=[row for row in rows if row])
+
+
+def main_menu() -> ReplyKeyboardMarkup:
+    """Постоянная клавиатура под полем ввода. Старые клиенты без неё работают командами."""
+    names = wording.MENU_BUTTONS
+    rows = [names[0:2], names[2:4], names[4:]]
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=name) for name in row] for row in rows],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
+
+
 def markup(reply: Reply) -> InlineKeyboardMarkup | None:
     """Разметка сообщения. Нет кнопок — нет и клавиатуры."""
     if reply.question is not None:
@@ -69,7 +147,7 @@ def markup(reply: Reply) -> InlineKeyboardMarkup | None:
             )
             for option in reply.question.buttons
         )
-    if reply.feedback or reply.offer_subscription:
+    if reply.feedback or reply.offer_subscription or reply.more:
         buttons = [
             InlineKeyboardButton(
                 text=option.label,
@@ -80,6 +158,9 @@ def markup(reply: Reply) -> InlineKeyboardMarkup | None:
             for option in reply.feedback
         ]
         rows = [buttons[start : start + ROW] for start in range(0, len(buttons), ROW)]
+        if reply.more is not None:
+            # Первой строкой: продолжить выдачу — главное действие под страницей.
+            rows.insert(0, _page_row(reply.more))
         if reply.offer_subscription:
             # Отдельной строкой и во всю ширину: это не ещё один вариант
             # обратной связи, а действие с деньгами. Рядом с «дешевле» и «не то»
@@ -87,39 +168,74 @@ def markup(reply: Reply) -> InlineKeyboardMarkup | None:
             rows.append(
                 [
                     InlineKeyboardButton(
-                        text=SUBSCRIBE_LABEL,
+                        text=FOLLOW_LABEL,
                         callback_data=SubscribeCallback(root=reply.passport_root or 0).pack(),
                     )
                 ]
             )
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="📂 Мои запросы", callback_data=RequestsCallback(action="list").pack()
-                )
+        if reply.feedback or reply.offer_subscription:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=SEARCHES_LABEL, callback_data=RequestsCallback(action="list").pack()
+                    )
+                ]
+            )
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+    if reply.offer_panel:
+        return limit_markup()
+    if reply.offer_plan:
+        # Цена на самой кнопке (R2 §3.5): кнопка, ведущая к деньгам без цифры, — тёмный
+        # паттерн. Рядом — выход без оплаты: «ваши поиски» остаются доступны.
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text=wording_plan.SUBSCRIBE_LABEL,
+                        callback_data=PlanCallback(action="subscribe").pack(),
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text=SEARCHES_LABEL, callback_data=RequestsCallback(action="list").pack()
+                    )
+                ],
             ]
         )
-        return InlineKeyboardMarkup(inline_keyboard=rows)
     return None
 
 
-def requests_markup(items: list[QueryOverview]) -> InlineKeyboardMarkup:
+def requests_markup(items: list[QueryOverview], *, marked: bool = True) -> InlineKeyboardMarkup:
+    """Список поисков кнопками. `marked=False` — без «✓» (пока взведён `/new`)."""
     icons = {"active": "🟢", "paused": "⏸", "expired": "⌛", "off": "▫️"}
+    # Подписи считаются по всему списку сразу: два поиска с одним названием
+    # различаются бюджетом, а увидеть это можно только рядом друг с другом.
+    names = labels([item.passport for item in items])
     rows = [
         [
             InlineKeyboardButton(
-                text=_request_label(item, icons),
+                text=_request_label(item, name, icons, marked=marked),
                 callback_data=RequestsCallback(action="open", root=item.root).pack(),
             )
         ]
-        for item in items
+        for item, name in zip(items, names, strict=True)
     ]
+    # Последней строкой, а не первой: человек пришёл сюда за своими поисками, и
+    # «новый поиск» над ними превращал бы список в развилку. Кнопка нужна тем,
+    # кто про `/new` не знает, — а список и так видно.
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=NEW_THREAD_LABEL, callback_data=RequestsCallback(action="new").pack()
+            )
+        ]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _request_label(item: QueryOverview, icons: dict[str, str]) -> str:
-    selected = "✓ " if item.is_active else ""
-    return f"{selected}{icons[item.monitoring]} {title(item.passport)}"
+def _request_label(item: QueryOverview, name: str, icons: dict[str, str], *, marked: bool) -> str:
+    selected = "✓ " if marked and item.is_active else ""
+    return f"{selected}{icons[item.monitoring]} {name}"
 
 
 def request_actions(item: QueryOverview) -> InlineKeyboardMarkup:
@@ -157,14 +273,14 @@ def request_actions(item: QueryOverview) -> InlineKeyboardMarkup:
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=SUBSCRIBE_LABEL, callback_data=SubscribeCallback(root=item.root).pack()
+                    text=FOLLOW_LABEL, callback_data=SubscribeCallback(root=item.root).pack()
                 )
             ]
         )
     rows.append(
         [
             InlineKeyboardButton(
-                text="← Все запросы", callback_data=RequestsCallback(action="list").pack()
+                text=ALL_SEARCHES_LABEL, callback_data=RequestsCallback(action="list").pack()
             )
         ]
     )

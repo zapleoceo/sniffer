@@ -8,60 +8,102 @@
 from __future__ import annotations
 
 import structlog
-from aiogram import F, Router
-from aiogram.filters import Command, CommandStart
-from aiogram.types import (
-    CallbackQuery,
-    LabeledPrice,
-    Message,
-    PreCheckoutQuery,
-)
+from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.filters import Command, CommandObject, CommandStart
+from aiogram.types import CallbackQuery, Message
 
-from sniffer.bot import billing, query_menu, subscription
+from sniffer.bot import (
+    billing_wording,
+    more_cards,
+    paging,
+    query_menu,
+    tab_flow,
+    threads,
+    topics,
+    watch_flow,
+    wording,
+    wording_plan,
+)
 from sniffer.bot import voice as voice_input
 from sniffer.bot.catalog_finder import CatalogFinder
-from sniffer.bot.conversation import NO_REQUEST_YET, Conversation, Reply, Send
+from sniffer.bot.commands import looks_like_command
+from sniffer.bot.conversation import Conversation, Reply, Send
+from sniffer.bot.handlers.billing import show_confirmation
 from sniffer.bot.keyboards import (
     AnswerCallback,
     FeedbackCallback,
+    PageCallback,
+    PlanCallback,
     RequestsCallback,
-    SubscribeCallback,
+    main_menu,
     markup,
     request_actions,
     requests_markup,
+    without_paging,
 )
+from sniffer.bot.quota import QuotaService
+from sniffer.bot.quota_ledger import account_of, new_quota
+from sniffer.bot.search_gate import Start, start_new_search
 from sniffer.bot.store import Client, PassportStore
+from sniffer.config import get_settings
+from sniffer.domain.clarify import ClarificationPlanner
 from sniffer.domain.dialogue import Feedback
-from sniffer.domain.records import QueryOverview
 
 log = structlog.get_logger(__name__)
 
 router = Router(name="search")
 
-GREETING = (
-    "Я ищу частные объявления по чатам и доскам Вьетнама и приношу ссылки на оригиналы.\n\n"
-    "Напишите словами, что нужно: <i>ищу скутер в Нячанге до 400 долларов</i> "
-    "или <i>сниму квартиру в Нячанге до 10 млн донгов</i>.\n\n"
-    "Если чего-то важного не хватает, уточню парой вопросов — отвечать можно кнопкой "
-    "или словами. Объявление не перепечатываю: даю ссылку на источник и честно помечаю, "
-    "если лот старый и мог быть продан.\n\n"
-    "Несколько поисков и их мониторинги: /requests"
-)
+# Текст приветствия — в `wording`: его правит владелец, и править его не должно требовать
+# хендлера. Имя осталось здесь, потому что на него ссылаются тесты и другие модули.
+GREETING = wording.GREETING
 
 _conversation: Conversation | None = None
+
+
+_quota: QuotaService | None = None
+
+
+def quota() -> QuotaService:
+    """Одна квота на процесс. Журнал в базе, а не в ней, как и состояние разговора."""
+    global _quota
+    if _quota is None:
+        _quota = new_quota()
+    return _quota
+
+
+def _planner() -> ClarificationPlanner | None:
+    """Вопросы по базе — только на собственном каталоге.
+
+    Каждый шаг сужения повторяет поиск, чтобы пересчитать счёт. Это дёшево на SQL
+    по `listings` и дорого на живом поиске (модель и обход источников на каждый
+    вопрос), поэтому на других режимах планировщика нет.
+    """
+    return ClarificationPlanner() if get_settings().catalog_mode == "listings" else None
 
 
 def conversation() -> Conversation:
     """Один разговор на процесс. Состояние всё равно в базе, а не в нём."""
     global _conversation
     if _conversation is None:
-        _conversation = Conversation(PassportStore(), scoped_finder=CatalogFinder())
+        _conversation = Conversation(
+            PassportStore(),
+            scoped_finder=CatalogFinder(),
+            quota=quota(),
+            planner=_planner(),
+            search_limit=watch_flow.DbSearchLimit(),
+        )
     return _conversation
 
 
 @router.message(CommandStart())
 async def start(message: Message) -> None:
-    await message.answer(GREETING)
+    await message.answer(GREETING, reply_markup=main_menu())
+
+
+@router.message(Command("help"))
+async def help_command(message: Message) -> None:
+    await message.answer(wording.HELP)
 
 
 @router.message(Command("requests"))
@@ -71,12 +113,58 @@ async def requests(message: Message) -> None:
         await _show_requests(message, client)
 
 
+@router.message(Command("new"))
+async def new_request(message: Message, command: CommandObject) -> None:
+    """Явный поиск. `/new скутер в Нячанге` — сразу, `/new` — следующим сообщением.
+
+    Текст в той же команде существует не для скорости: голосовой запрос в
+    команду не положишь, поэтому взведённый флаг нужен всё равно — и пусть у
+    одного и того же «начни новый поиск» будет один вход, а не два похожих.
+
+    Текст берётся у фильтра (`command.args`), а не режется здесь по пробелу:
+    фильтр читает и подпись к фото, и перевод строки после команды, а
+    `message.text.partition(" ")` терял и то и другое — «/new⏎квартира» уходила в
+    поиск без предмета, а «/new скутер» в подписи к фото не искала ничего.
+    """
+    client = _client(message)
+    if client is None:  # pragma: no cover — сообщение без автора
+        return
+    started = await start_new_search(
+        message, client, conversation(), prefer_tab=client.thread_id is not None
+    )
+    if started is not Start.ARMED:
+        return
+    query = (command.args or "").strip()
+    if not query:
+        await message.answer(threads.ASK_WHAT)
+        return
+    await conversation().on_text(client, query, _sender(message))
+    await _sync_title(message, client)
+
+
+@router.message(Command("plan"))
+async def plan(message: Message) -> None:
+    """Остаток карточек и дата обновления. Только чтение: ничего не списывает и не начинает."""
+    client = _client(message)
+    if client is None:  # pragma: no cover — сообщение без автора
+        return
+    standing = await quota().standing(await account_of(client))
+    await message.answer(wording_plan.plan_text(standing, selling=get_settings().selling))
+
+
 @router.message(F.text)
 async def search(message: Message) -> None:
     client = _client(message)
     if client is None:
         return
-    await conversation().on_text(client, message.text or "", _sender(message))
+    text = message.text or ""
+    if looks_like_command(text):
+        # Известные команды перехватили свои обработчики выше; сюда добралась неизвестная.
+        # Поиск по слову «terms» вместо ответа «такой команды нет» (FLOW-17) — это дефект.
+        await message.answer(wording_plan.UNKNOWN_COMMAND)
+        return
+    await conversation().on_text(client, text, _sender(message))
+    await _sync_title(message, client)
 
 
 @router.message(F.voice)
@@ -108,6 +196,7 @@ async def voice(message: Message) -> None:
 
     await message.answer(voice_input.HEARD.format(text=text))
     await conversation().on_text(client, text, _sender(message))
+    await _sync_title(message, client)
 
 
 @router.callback_query(AnswerCallback.filter())
@@ -118,7 +207,7 @@ async def answer(callback: CallbackQuery, callback_data: AnswerCallback) -> None
     if not isinstance(message, Message):
         # Сообщение старше 48 часов Telegram отдаёт недоступным — отвечать не в что.
         return
-    client = Client(callback.from_user.id, callback.from_user.username)
+    client = topics.client_of_callback(callback, message)
     if not await query_menu.select(client, callback_data.root):
         return
     await conversation().on_answer(
@@ -142,7 +231,7 @@ async def feedback(callback: CallbackQuery, callback_data: FeedbackCallback) -> 
         # Кнопка из старой версии бота: молча игнорировать честнее, чем падать.
         log.warning("bot.unknown_feedback", kind=callback_data.kind)
         return
-    client = Client(callback.from_user.id, callback.from_user.username)
+    client = topics.client_of_callback(callback, message)
     if not await query_menu.select(client, callback_data.root):
         return
     await conversation().on_feedback(client, kind, _sender(message))
@@ -152,7 +241,13 @@ def _client(message: Message) -> Client | None:
     if message.from_user is None:
         # Пост от имени канала: паспорт привязывать не к кому.
         return None
-    return Client(message.from_user.id, message.from_user.username)
+    return topics.client_of_message(message)
+
+
+async def _sync_title(message: Message, client: Client) -> None:
+    """В теме имя темы следует за названием поиска; без темы ничего не делает."""
+    if client.thread_id is not None and message.bot is not None:
+        await tab_flow.sync_title(message.bot, client)
 
 
 def _sender(message: Message) -> Send:
@@ -162,45 +257,17 @@ def _sender(message: Message) -> Send:
     return send
 
 
-# ── подписка за звёзды ──────────────────────────────────────────────────────
-
-
-@router.callback_query(SubscribeCallback.filter())
-async def subscribe(callback: CallbackQuery, callback_data: SubscribeCallback) -> None:
-    """«Следить за новыми» → счёт на одну звезду в месяц.
-
-    Корень едет в кнопке: при нескольких запросах старая карточка обязана
-    включать слежение именно за собой, а не за выбранным позже запросом.
-    """
+@router.callback_query(PlanCallback.filter())
+async def plan_action(callback: CallbackQuery, callback_data: PlanCallback, bot: Bot) -> None:
+    """Кнопка «Подписка» под предложением: экран с цифрами, согласие и ссылка — `/subscription`."""
     await callback.answer()
     message = callback.message
-    if not isinstance(message, Message):
-        # Сообщение старше 48 часов Telegram отдаёт недоступным.
+    if not isinstance(message, Message) or callback_data.action != "subscribe":
         return
-
-    tg_user_id = callback.from_user.id
-    root = callback_data.root
-    if root <= 0 or not await subscription.owns(tg_user_id, root):
-        await message.answer(NO_REQUEST_YET)
+    if not get_settings().selling:
+        await message.answer(billing_wording.SOON)
         return
-
-    active = await subscription.active_for(tg_user_id, root)
-    if active is not None and active.expires_at is not None:
-        # Второй раз одно и то же не продаём.
-        await message.answer(billing.ALREADY.format(until=active.expires_at.strftime("%d.%m.%Y")))
-        return
-
-    await message.answer_invoice(
-        title=billing.TITLE,
-        description=billing.DESCRIPTION,
-        payload=billing.payload_for(root),
-        currency=billing.SUBSCRIPTION_CURRENCY,
-        prices=[LabeledPrice(label=billing.LABEL, amount=billing.SUBSCRIPTION_STARS)],
-        subscription_period=billing.SUBSCRIPTION_PERIOD_S,
-        # Пустая строка — так Telegram требует для звёзд: внешнего провайдера
-        # нет, и токена у него взять негде.
-        provider_token="",
-    )
+    await show_confirmation(message, bot, callback.from_user.id)
 
 
 @router.callback_query(RequestsCallback.filter())
@@ -209,15 +276,26 @@ async def manage_request(callback: CallbackQuery, callback_data: RequestsCallbac
     message = callback.message
     if not isinstance(message, Message):
         return
-    client = Client(callback.from_user.id, callback.from_user.username)
+    client = topics.client_of_callback(callback, message)
     action, root = callback_data.action, callback_data.root
     if action == "list":
         await _show_requests(message, client)
         return
-    items = await query_menu.list_for(client)
-    item = next((row for row in items if row.root == root), None)
+    if action == "new":
+        # Кнопка делает ровно то же, что команда: поиск открывается следующим
+        # сообщением. Второй путь с собственным поведением рассыпался бы первым.
+        started = await start_new_search(
+            message, client, conversation(), prefer_tab=client.thread_id is not None
+        )
+        if started is Start.ARMED:
+            await message.answer(threads.ASK_WHAT)
+        return
+    # Принадлежность — по самому поиску, а не по вхождению в список из пяти:
+    # вытесненный из списка поиск остаётся поиском клиента, и его пауза, «Искать
+    # снова» и «Изменить» обязаны работать так же, как у видимого.
+    item = await query_menu.get_one(client, root)
     if item is None:
-        await message.answer("Этот запрос не найден. Откройте список заново.")
+        await message.answer(threads.NOT_FOUND)
         return
     if action == "open":
         await query_menu.select(client, root)
@@ -226,89 +304,63 @@ async def manage_request(callback: CallbackQuery, callback_data: RequestsCallbac
         return
     elif action == "edit":
         await query_menu.select(client, root, editing=True)
-        await message.answer(
-            f"Изменяем: <b>{query_menu.title(item.passport)}</b>\n\n"
-            "Напишите, что изменить, например «до 500», или новую формулировку целиком."
-        )
+        await message.answer(threads.edit_prompt(item.passport))
         return
     elif action in {"pause", "resume"}:
-        enabled = action == "resume"
-        if not await query_menu.toggle(client, root, active=enabled):
-            await message.answer("Мониторинг уже закончился. Его можно подключить заново.")
-        items = await query_menu.list_for(client)
-        item = next(row for row in items if row.root == root)
+        if not await query_menu.toggle(client, root, active=action == "resume"):
+            await message.answer(threads.MONITORING_ENDED)
+        item = await query_menu.get_one(client, root) or item
     else:
         return
-    await message.answer(_request_text(item), reply_markup=request_actions(item))
+    await message.answer(threads.card_text(item), reply_markup=request_actions(item))
 
 
 async def _show_requests(message: Message, client: Client) -> None:
-    items = await query_menu.list_for(client)
-    if not items:
-        await message.answer("Запросов пока нет. Напишите, что хотите найти.")
+    menu = await query_menu.list_for(client)
+    if not menu.items:
+        await message.answer(threads.NO_SEARCHES)
         return
     await message.answer(
-        "Ваши запросы\n\n🟢 мониторинг работает · ⏸ на паузе · ▫️ без мониторинга",
-        reply_markup=requests_markup(items),
+        threads.list_text(starting_new=menu.starting_new),
+        # «✓» значит «следующее сообщение уточнит этот поиск». Пока взведён
+        # `/new`, это неправда, и отметки нет.
+        reply_markup=requests_markup(menu.items, marked=not menu.starting_new),
     )
 
 
-def _request_text(item: QueryOverview) -> str:
-    states = {
-        "active": "мониторинг работает",
-        "paused": "мониторинг на паузе",
-        "expired": "мониторинг закончился",
-        "off": "мониторинг не подключён",
-    }
-    return f"<b>{query_menu.title(item.passport)}</b>\n{states[item.monitoring]}"
-
-
-@router.pre_checkout_query()
-async def pre_checkout(query: PreCheckoutQuery) -> None:
-    """Последняя точка, где отказ ничего не стоит клиенту.
-
-    Отвечать обязаны за 10 секунд, иначе Telegram отменяет платёж, — поэтому
-    здесь только разбор строки и одна проверка владельца. Ни поиска, ни модели,
-    ни сети к источникам.
-
-    Проверяем именно принадлежность цепочки: `payload` формируем мы, но
-    приходит он от Telegram и доверенным не является.
-    """
-    root = billing.passport_root_from(query.invoice_payload)
-    if root is None or not await subscription.owns(query.from_user.id, root):
-        log.warning("billing.foreign_payload", payload=query.invoice_payload[:64])
-        await query.answer(ok=False, error_message=billing.PAYLOAD_REFUSED)
+@router.callback_query(PageCallback.filter())
+async def more(callback: CallbackQuery, callback_data: PageCallback) -> None:
+    """«Ещё N» и «Показать все N»: следующая страница снимка выдачи."""
+    message = callback.message
+    if not isinstance(message, Message):
+        await callback.answer()
         return
-    await query.answer(ok=True)
-
-
-@router.message(F.successful_payment)
-async def paid(message: Message) -> None:
-    """Деньги сняты. Отказывать уже нельзя — можно только включить подписку.
-
-    Апдейт приходит ПОВТОРНО, если бот не ответил вовремя, поэтому зачисление
-    идемпотентно по `telegram_payment_charge_id`. Повтор молчит: второе
-    «подписка включена» на один платёж выглядит как двойное списание.
-    """
-    payment = message.successful_payment
-    if payment is None or message.from_user is None:  # pragma: no cover — фильтр выше
+    snapshot = paging.SNAPSHOTS.get(callback_data.token)
+    if snapshot is None or snapshot.owner != callback.from_user.id:
+        # Чужой снимок и просроченный неотличимы для клиента, и объяснять первое не нужно.
+        await callback.answer(paging.EXPIRED, show_alert=True)
         return
-    purchase = billing.purchase_from(
-        user_id=message.from_user.id,
-        payload=payment.invoice_payload,
-        charge_id=payment.telegram_payment_charge_id,
-        amount=payment.total_amount,
-        expiration=payment.subscription_expiration_date,
-        is_recurring=bool(payment.is_recurring),
+    client = Client(callback.from_user.id, callback.from_user.username)
+    outcome = await more_cards.show_more(
+        _sender(message),
+        callback_data.token,
+        snapshot,
+        callback_data.action,
+        callback_data.offset,
+        quota=quota(),
+        account=await account_of(client),
     )
-    if purchase is None:
-        # Оплатили счёт не нашего формата. Деньги уже сняты, поэтому молчать
-        # нельзя: пусть человек напишет владельцу, а не гадает.
-        log.error("billing.unknown_payload", payload=payment.invoice_payload[:64])
-        await message.answer(billing.PAYMENT_STRANDED)
+    if outcome is more_cards.Result.STALE:
+        await callback.answer(paging.ALREADY_SHOWN)
         return
-
-    state = await subscription.activate(message.from_user.id, purchase)
-    if state is None:
+    if outcome is more_cards.Result.FAILED:
+        await callback.answer(paging.TRY_AGAIN, show_alert=True)
         return
-    await message.answer(billing.THANKS.format(max_per_day=state.max_per_day))
+    await callback.answer()
+    # Кнопки продолжения под прежней страницей снимаем: новая страница несёт свои.
+    # Остальные кнопки (обратная связь, подписка) остаются.
+    try:
+        await message.edit_reply_markup(reply_markup=without_paging(message.reply_markup))
+    except TelegramBadRequest as exc:
+        # Разметка уже снята или сообщение не даёт править: карточки показаны, это косметика.
+        log.info("bot.page_markup_kept", error=str(exc))

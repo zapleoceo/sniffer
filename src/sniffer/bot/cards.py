@@ -12,15 +12,24 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from datetime import datetime
-from html import escape
+from html import escape, unescape
 
+from sniffer.bot.naming import plural
 from sniffer.config import get_settings
+from sniffer.domain.card_facts import facts_line
 from sniffer.sources.base import RawItem
 from sniffer.verifier.liveness import Liveness, as_utc, assess
 
 TITLE_LIMIT = 90
+PRICE_LIMIT = 60
+# Предел сообщения Telegram — 4096 знаков после разбора сущностей. Берём с запасом:
+# разметка и `&amp;` в нашей строке длиннее видимого текста, то есть оценка консервативна.
+MESSAGE_LIMIT = 4000
+SOURCE_LIMIT = 40
+_CHAT_SOURCES = ("telegram", "archive")
 
 
 def render_cards(
@@ -43,25 +52,72 @@ def render_cards(
 def render_card(item: RawItem, *, now: datetime | None = None) -> str:
     verdict = assess(item.posted_at, now=now)
     facts = " · ".join(part for part in (_price(item), _posted(item)) if part)
-    lines = [f"<b>{escape(_title(item))}</b>", facts]
+    title = _title(item)
+    lines = [f"<b>{escape(title)}</b>", facts]
+    attributes = item.raw.get("attributes")
+    if details := facts_line(attributes if isinstance(attributes, dict) else None, title=title):
+        lines.append(escape(details))
 
     if verdict.status is Liveness.STALE and verdict.age_days is not None:
         lines.append(f"объявлению {verdict.age_days} {_days(verdict.age_days)}, могло быть продано")
     elif verdict.status is Liveness.UNKNOWN:
         lines.append("дата публикации неизвестна, свежесть не проверить")
 
-    lines.append(f'<a href="{escape(item.url, quote=True)}">открыть оригинал</a> · {item.source}')
-    return "\n".join(lines)
+    link = f'<a href="{escape(item.url, quote=True)}">открыть оригинал</a>'
+    lines.append(f"{link} · {escape(source_label(item))}")
+    return "\n".join(line for line in lines if line)
+
+
+def source_label(item: RawItem) -> str:
+    """Откуда лот человеку: имя чата или «Chotot», а не служебное `archive`."""
+    chat = item.raw.get("chat_title")
+    if isinstance(chat, str) and chat.strip():
+        return " ".join(chat.split())[:SOURCE_LIMIT]
+    if item.source.startswith(_CHAT_SOURCES):
+        return "Telegram"
+    return item.source.capitalize()
+
+
+_TAG = re.compile(r"<[^>]*>")
+
+
+def visible_len(markup: str) -> int:
+    """Длина так, как её считает Telegram: после разбора разметки, `&amp;` — один знак."""
+    # Лимит Telegram считается в единицах UTF-16: эмодзи вне базовой плоскости — две.
+    return len(unescape(_TAG.sub("", markup)).encode("utf-16-le")) // 2
+
+
+def chunk(blocks: Sequence[str], *, head: str = "", limit: int = MESSAGE_LIMIT) -> list[str]:
+    """Карточки по сообщениям (см. `pack`), без счётчиков."""
+    return [text for text, _ in pack(blocks, head=head, limit=limit)]
+
+
+def pack(
+    blocks: Sequence[str], *, head: str = "", limit: int = MESSAGE_LIMIT
+) -> list[tuple[str, int]]:
+    """Карточки по сообщениям: режем по границе карточки, а не по знаку.
+
+    Лимит 4096 нельзя проверить глазами, а отказ Telegram бьёт по всему сообщению, а не по
+    лишней карточке. `head` едет только в первом сообщении. Одна карточка длиннее лимита
+    невозможна: заголовок, цена и факты обрезаны выше.
+    """
+    messages: list[tuple[str, int]] = []
+    current, count = head, 0
+    for block in blocks:
+        joined = f"{current}\n\n{block}" if current else block
+        if current and visible_len(joined) > limit:
+            messages.append((current, count))
+            joined, count = block, 0
+        current = joined
+        count += 1
+    if current:
+        messages.append((current, count))
+    return messages
 
 
 def _days(count: int) -> str:
-    """«21 день», «22 дня», «25 дней»: бот, который путает склонения, выглядит сломанным."""
-    if 11 <= count % 100 <= 14:
-        return "дней"
-    last = count % 10
-    if last == 1:
-        return "день"
-    return "дня" if last in (2, 3, 4) else "дней"
+    """«21 день», «22 дня», «25 дней»: склонение одно на весь бот (`naming.plural`)."""
+    return plural(count, ("день", "дня", "дней"))
 
 
 def _title(item: RawItem) -> str:
@@ -78,7 +134,7 @@ def _title(item: RawItem) -> str:
 def _price(item: RawItem) -> str:
     """Показываем то, что написал продавец: сверять распознанное число не с чем."""
     if item.price_raw.strip():
-        return escape(item.price_raw.strip())
+        return escape(item.price_raw.strip()[:PRICE_LIMIT])
     if item.price_vnd:
         return f"{item.price_vnd:,} ₫".replace(",", " ")
     return "цена не указана"

@@ -1882,7 +1882,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aioboto3", specifier = ">=13.2" },
-    { name = "aiogram", specifier = ">=3.13" },
+    { name = "aiogram", specifier = ">=3.30" },
     { name = "aiosqlite", marker = "extra == 'dev'", specifier = ">=0.20" },
     { name = "alembic", specifier = ">=1.13" },
     { name = "asyncpg", specifier = ">=0.30" },

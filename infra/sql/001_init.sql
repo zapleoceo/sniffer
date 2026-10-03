@@ -250,11 +250,26 @@ CREATE TABLE IF NOT EXISTS users (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     is_blocked  BOOLEAN     NOT NULL DEFAULT FALSE,
     active_passport_root  BIGINT,
-    editing_passport_root BIGINT
+    editing_passport_root BIGINT,
+    awaiting_new_request  BOOLEAN NOT NULL DEFAULT FALSE,
+    bot_blocked_at        TIMESTAMPTZ,  -- клиент заблокировал бота, см. 014_notifier_safety.sql
+    -- Якорь квоты и метка последнего предложения подписки: 010_quota_ledger.sql.
+    quota_anchor_at       TIMESTAMPTZ,
+    paywall_offered_at    TIMESTAMPTZ
 );
 
 ALTER TABLE users ADD COLUMN IF NOT EXISTS active_passport_root BIGINT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS editing_passport_root BIGINT;
+-- `/new` без текста: следующее сообщение открывает новую ветку, чем бы оно ни
+-- было похоже на прежнюю просьбу. В БД, а не в памяти процесса, по той же
+-- причине, по которой тут лежит editing_passport_root: между командой и
+-- сообщением (а при голосовом запросе — и расшифровкой) бот перезапускается, и
+-- тогда явное «начинаю новый поиск» снова решалось бы эвристикой.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS awaiting_new_request BOOLEAN NOT NULL DEFAULT FALSE;
+-- Клиент заблокировал бота: писать ему нельзя (HTTP 403 на sendMessage или апдейт
+-- my_chat_member). ALTER повторён в 014_notifier_safety.sql: колонку обязан получить
+-- любой, кто применил хотя бы один из двух файлов, иначе нотифаер падает на первом проходе.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS bot_blocked_at TIMESTAMPTZ;
 
 -- Паспорт неизменяем: правка поля создаёт новую версию с тем же root_id.
 CREATE TABLE IF NOT EXISTS passports (
@@ -277,8 +292,16 @@ CREATE TABLE IF NOT EXISTS passports (
     confidence   REAL        NOT NULL DEFAULT 0,
     missing_fields TEXT[]    NOT NULL DEFAULT '{}',
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    is_current   BOOLEAN     NOT NULL DEFAULT TRUE
+    is_current   BOOLEAN     NOT NULL DEFAULT TRUE,
+    last_used_at TIMESTAMPTZ
 );
+
+-- Когда поиск использовали в последний раз: выбрали в `/requests`, нажали
+-- кнопку под его выдачей, поправили. По этому времени, а не по времени правки,
+-- упорядочен список поисков: иначе выбор вытесненного поиска не возвращал бы его
+-- в список, хотя бот обещает именно это. NULL — с появления колонки поиск не
+-- трогали; тогда порядок даёт created_at, то есть прежний.
+ALTER TABLE passports ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS passports_user_idx ON passports (user_id, is_current);
 CREATE INDEX IF NOT EXISTS passports_root_idx ON passports (root_id, version DESC);
@@ -323,7 +346,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     is_active      BOOLEAN     NOT NULL DEFAULT TRUE,
     -- instant | digest — при digest даже высокий score копится до сводки
     mode           TEXT        NOT NULL DEFAULT 'instant',
-    max_per_day    INT         NOT NULL DEFAULT 5,
+    max_per_day    INT         NOT NULL DEFAULT 10,
     quiet_from     TIME,
     quiet_to       TIME,
     sent_today     INT         NOT NULL DEFAULT 0,
@@ -335,6 +358,20 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     scan_listing_id  BIGINT    NOT NULL DEFAULT 0,
     expires_at     TIMESTAMPTZ,
     charge_id      TEXT,
+    -- Состояние монитора (worker/matcher.py, docs/architecture.md 7.1): ротация обхода
+    -- и карантин сбойной подписки. Ниже те же колонки стоят отдельными ALTER.
+    last_scanned_at   TIMESTAMPTZ,
+    failed_streak     INT         NOT NULL DEFAULT 0,
+    last_error        TEXT,
+    quarantined_until TIMESTAMPTZ,
+    -- Монитор по слоту (015_monitor_agent.sql): сводка «ещё N» и пауза без слота.
+    suppressed_total  INT         NOT NULL DEFAULT 0,
+    overflow_day      DATE,
+    overflow_count    INT         NOT NULL DEFAULT 0,
+    overflow_notified BOOLEAN     NOT NULL DEFAULT FALSE,
+    no_slot_since     TIMESTAMPTZ,
+    -- Порядок претензии на слот мониторинга (016_stars_slots.sql).
+    priority       INT         NOT NULL DEFAULT 0,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (user_id, passport_root)
 );
@@ -357,6 +394,19 @@ ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS scan_listing_id BIGINT NOT NU
 ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
 ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS charge_id TEXT;
 
+-- Состояние монитора подписок. `last_scanned_at` — когда монитор последний раз брал
+-- подписку в обход: по нему обход идёт по кругу («кого не смотрели дольше всех —
+-- первым»), NULL = ещё ни разу, такие первыми. Это ключ ротации, а не «когда
+-- последний раз всё удалось»: подписка, пропущенная из-за недоступного курса, тоже
+-- считается обойдённой, иначе пропускаемые заняли бы всю порцию и заморили остальных.
+-- `failed_streak`/`last_error`/`quarantined_until` — карантин: сколько проходов подряд
+-- подписка падала, чем и до какого времени её не трогаем. Успешный проход всё это
+-- обнуляет. Данные не правим: DEFAULT 0 и NULL — состояние «не падала».
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS last_scanned_at TIMESTAMPTZ;
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS failed_streak INT NOT NULL DEFAULT 0;
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS last_error TEXT;
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS quarantined_until TIMESTAMPTZ;
+
 -- Деньги. Отдельной таблицей, а не колонкой в подписке: у одной подписки
 -- платежей столько, сколько месяцев её продлевали, и продление обязано
 -- оставлять след, даже если подписку потом выключили.
@@ -377,7 +427,19 @@ CREATE TABLE IF NOT EXISTS payments (
     -- telegram_payment_charge_id: уникален у Telegram, уникален и у нас
     external_id     TEXT        NOT NULL UNIQUE,
     is_recurring    BOOLEAN     NOT NULL DEFAULT FALSE,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- Оплата звёздами: что за платёж, чей, по какому счёту и до какого срока.
+    -- См. 011_stars_billing.sql — там же ALTER для живой базы.
+    tg_user_id      BIGINT,
+    invoice_payload TEXT,
+    kind            TEXT CHECK (kind IN ('first', 'renewal', 'one_off', 'duplicate', 'unknown')),
+    is_first_recurring BOOLEAN  NOT NULL DEFAULT FALSE,
+    period_end      TIMESTAMPTZ,
+    refunded_at     TIMESTAMPTZ,
+    raw             JSONB,
+    -- Слоты (016_stars_slots.sql): откуда запись и оценка ли срок.
+    source          TEXT        NOT NULL DEFAULT 'update',
+    period_end_estimated BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 CREATE INDEX IF NOT EXISTS payments_user_idx ON payments (user_id, created_at DESC);
@@ -398,10 +460,14 @@ CREATE TABLE IF NOT EXISTS outbox (
     subscription_id BIGINT   REFERENCES subscriptions(id) ON DELETE CASCADE,
     notification_id BIGINT   UNIQUE REFERENCES notifications(id) ON DELETE CASCADE,
     payload      JSONB       NOT NULL,
-    status       TEXT        NOT NULL DEFAULT 'pending',  -- pending|sent|failed
+    -- pending|sent|failed|cancelled. cancelled — право на сообщение кончилось раньше, чем оно
+    -- ушло (подписка истекла, льгота прошла): строку не удаляем, чтобы карточка повторно не
+    -- ставилась и причина молчания читалась по базе.
+    status       TEXT        NOT NULL DEFAULT 'pending',
     attempts     INT         NOT NULL DEFAULT 0,
     scheduled_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    sent_at      TIMESTAMPTZ
+    sent_at      TIMESTAMPTZ,
+    last_error   TEXT         -- почему строка не ушла: отмена, отказ Telegram, последний сбой
 );
 
 CREATE INDEX IF NOT EXISTS outbox_due_idx ON outbox (status, scheduled_at);
@@ -417,6 +483,8 @@ ALTER TABLE notifications ALTER COLUMN sent_at DROP NOT NULL;
 ALTER TABLE notifications ALTER COLUMN sent_at DROP DEFAULT;
 ALTER TABLE outbox ADD COLUMN IF NOT EXISTS subscription_id BIGINT REFERENCES subscriptions(id) ON DELETE CASCADE;
 ALTER TABLE outbox ADD COLUMN IF NOT EXISTS notification_id BIGINT UNIQUE REFERENCES notifications(id) ON DELETE CASCADE;
+-- Причина, по которой строка не ушла (ALTER повторён в 014_notifier_safety.sql).
+ALTER TABLE outbox ADD COLUMN IF NOT EXISTS last_error TEXT;
 
 -- ── внутренняя очередь ──────────────────────────────────────────────────────
 
@@ -460,7 +528,10 @@ CREATE TABLE IF NOT EXISTS client_requests (
     error         TEXT,
     started_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     finished_at   TIMESTAMPTZ,
-    duration_ms   INT
+    duration_ms   INT,
+    -- Показано и удержано лимитом квоты: 010_quota_ledger.sql.
+    shown_count   INT         NOT NULL DEFAULT 0,
+    withheld_count INT        NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS client_requests_user_idx   ON client_requests (user_id, started_at DESC);

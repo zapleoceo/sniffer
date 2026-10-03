@@ -21,6 +21,7 @@ from sniffer.domain.records import (
     RawMessage,
     SessionState,
     StoredPassport,
+    SubscriptionState,
     User,
 )
 
@@ -111,6 +112,7 @@ def to_user(row: models.User) -> User:
         is_blocked=row.is_blocked,
         active_passport_root=row.active_passport_root,
         editing_passport_root=row.editing_passport_root,
+        awaiting_new_request=row.awaiting_new_request,
         created_at=row.created_at,
     )
 
@@ -152,6 +154,33 @@ def to_stored_passport(row: models.Passport) -> StoredPassport:
             missing_fields=list(row.missing_fields),
             status=PassportStatus(row.status),
         ),
+    )
+
+
+def to_subscription_state(row: models.Subscription, passport: models.Passport) -> SubscriptionState:
+    """Подписка вместе с ТЕКУЩЕЙ версией паспорта её цепочки.
+
+    Незнакомое значение в паспорте падает здесь (см. `to_stored_passport`), поэтому тот,
+    кто читает подписки пачкой, обязан отвечать за каждую строку отдельно: одна больная
+    не должна уносить с собой остальные (`MonitorRepository.claim_due`).
+    """
+    return SubscriptionState(
+        id=row.id,
+        user_id=row.user_id,
+        passport_root=row.passport_root,
+        mode=row.mode,
+        max_per_day=row.max_per_day,
+        quiet_from=row.quiet_from,
+        quiet_to=row.quiet_to,
+        since_listing_id=row.since_listing_id,
+        scan_listing_id=row.scan_listing_id,
+        expires_at=row.expires_at,
+        failed_streak=row.failed_streak,
+        overflow_day=row.overflow_day,
+        overflow_count=row.overflow_count,
+        overflow_notified=row.overflow_notified,
+        no_slot_since=row.no_slot_since,
+        passport=to_stored_passport(passport),
     )
 
 

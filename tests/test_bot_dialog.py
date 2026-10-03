@@ -17,135 +17,37 @@ import pytest
 from aiogram.types import Message
 
 from sniffer.bot import app as bot_app
-from sniffer.bot import journal, query_menu, subscription
-from sniffer.bot.conversation import (
-    NO_REQUEST_YET,
-    NOTHING_FOUND,
-    NOTHING_TO_REFINE,
-    SEARCH_FAILED,
-    Conversation,
-    Found,
-    Reply,
-)
+from sniffer.bot import journal, query_menu, threads, watch_flow
+from sniffer.bot.conversation import Conversation, Found, Reply
 from sniffer.bot.handlers import search as handler
 from sniffer.bot.keyboards import (
+    NEW_THREAD_LABEL,
     AnswerCallback,
     FeedbackCallback,
     RequestsCallback,
-    SubscribeCallback,
     markup,
     request_actions,
     requests_markup,
 )
 from sniffer.bot.store import Client, Dialogue
+from sniffer.bot.wording import NO_REQUEST_YET, NOTHING_FOUND, NOTHING_TO_REFINE, SEARCH_FAILED
 from sniffer.broker import usage
+from sniffer.domain import plans
 from sniffer.domain.dialogue import (
-    EVENT_USER_MESSAGE,
     SKIP,
-    DialogueState,
     Feedback,
-    advance,
     feedback_buttons,
     question_for,
-    replay,
 )
 from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
-from sniffer.domain.records import PassportEvent, QueryOverview, StoredPassport
+from sniffer.domain.records import QueryOverview
 from sniffer.search.intake_rules import parse_query
 from sniffer.search.vocabulary import served_cities
+from sniffer.simulation.stubs import MemoryStore
 from sniffer.sources.base import RawItem
 
 NOW = datetime(2026, 8, 29, 12, 0, tzinfo=UTC)
 CLIENT = Client(tg_user_id=42, username="dima")
-
-
-class MemoryStore:
-    """`DialogueStore` на словарях: диалог без Postgres, но с версиями."""
-
-    def __init__(self) -> None:
-        self.rows: list[StoredPassport] = []
-        self.events: list[PassportEvent] = []
-        self._users: dict[int, int] = {}
-        self._active: dict[int, int] = {}
-        self._editing: set[int] = set()
-
-    async def load(self, client: Client) -> Dialogue:
-        user_id = self._users.setdefault(client.tg_user_id, len(self._users) + 1)
-        active = self._active.get(user_id)
-        current = next(
-            (
-                row
-                for row in reversed(self.rows)
-                if row.user_id == user_id
-                and row.is_current
-                and (active is None or row.root == active)
-            ),
-            None,
-        )
-        if current is None:
-            return Dialogue(user_id=user_id)
-        root = current.root
-        chain = {row.id for row in self.rows if row.id == root or row.root_id == root}
-        events = [event for event in self.events if event.passport_id in chain]
-        return Dialogue(
-            user_id=user_id,
-            passport=current,
-            state=replay(events),
-            editing=current.root in self._editing,
-        )
-
-    async def start(self, dialogue: Dialogue, passport: Passport) -> Dialogue:
-        stored = StoredPassport(
-            id=len(self.rows) + 1, user_id=dialogue.user_id, version=1, passport=passport
-        )
-        self.rows.append(stored)
-        self._active[dialogue.user_id] = stored.root
-        self._editing.discard(stored.root)
-        self._event(stored.id, EVENT_USER_MESSAGE, {"text": passport.raw_query})
-        return Dialogue(user_id=dialogue.user_id, passport=stored, state=DialogueState())
-
-    async def revise(
-        self, dialogue: Dialogue, passport: Passport, *, kind: str, payload: dict[str, Any]
-    ) -> Dialogue:
-        assert dialogue.passport is not None
-        root = dialogue.passport.root
-        self.rows = [
-            replace(row, is_current=False) if row.id == root or row.root_id == root else row
-            for row in self.rows
-        ]
-        stored = StoredPassport(
-            id=len(self.rows) + 1,
-            user_id=dialogue.user_id,
-            version=dialogue.passport.version + 1,
-            root_id=root,
-            passport=passport,
-        )
-        self.rows.append(stored)
-        self._active[dialogue.user_id] = root
-        self._editing.discard(root)
-        self._event(stored.id, kind, payload)
-        return Dialogue(
-            user_id=dialogue.user_id, passport=stored, state=advance(dialogue.state, kind, payload)
-        )
-
-    async def note(self, dialogue: Dialogue, *, kind: str, payload: dict[str, Any]) -> Dialogue:
-        assert dialogue.passport is not None
-        self._event(dialogue.passport.id, kind, payload)
-        return replace(dialogue, state=advance(dialogue.state, kind, payload))
-
-    async def select(self, dialogue: Dialogue, root: int, *, editing: bool = False) -> Dialogue:
-        owned = any(row.user_id == dialogue.user_id and row.root == root for row in self.rows)
-        if not owned:
-            return dialogue
-        self._active[dialogue.user_id] = root
-        if editing:
-            self._editing.add(root)
-        else:
-            self._editing.discard(root)
-        return await self.load(CLIENT)
-
-    def _event(self, passport_id: int, kind: str, payload: dict[str, Any]) -> None:
-        self.events.append(PassportEvent(passport_id=passport_id, kind=kind, payload=payload))
 
 
 class FakeIntake:
@@ -201,13 +103,9 @@ class FakeMessage:
         self.chat = FakeChat()
         self.from_user = from_user
         self.answers: list[tuple[str, Any]] = []
-        self.invoices: list[dict[str, Any]] = []
 
     async def answer(self, text: str, **kwargs: Any) -> None:
         self.answers.append((text, kwargs.get("reply_markup")))
-
-    async def answer_invoice(self, **kwargs: Any) -> None:
-        self.invoices.append(kwargs)
 
 
 class FakeCallback:
@@ -472,7 +370,9 @@ async def test_an_empty_answer_offers_to_keep_watching() -> None:
     await talk(MemoryStore(), filled(), items=[]).on_text(CLIENT, "ищу вертолёт", replies)
 
     assert replies.sent[-1].offer_subscription is True
-    assert "звезда в месяц" in replies.texts[-1], "цену называем до нажатия, а не после"
+    assert f"{plans.SUBSCRIPTION_STARS} ⭐ в месяц" in replies.texts[-1], (
+        "цену называем до нажатия, а не после"
+    )
 
 
 async def test_results_the_client_may_not_like_offer_to_keep_watching() -> None:
@@ -1054,9 +954,13 @@ async def test_request_menu_handler_covers_the_whole_navigation(
     items = [item]
     selected: list[tuple[int, bool]] = []
     repeated: list[int] = []
+    armed: list[bool] = []
 
-    async def list_for(_client: Client) -> list[QueryOverview]:
-        return items
+    async def list_for(_client: Client) -> query_menu.Menu:
+        return query_menu.Menu(items=items)
+
+    async def get_one(_client: Client, root: int) -> QueryOverview | None:
+        return next((row for row in items if row.root == root), None)
 
     async def select(_client: Client, root: int, *, editing: bool = False) -> bool:
         selected.append((root, editing))
@@ -1070,11 +974,20 @@ async def test_request_menu_handler_covers_the_whole_navigation(
         async def repeat(self, _client: Client, root: int, _send: Any) -> None:
             repeated.append(root)
 
+        async def start_new(self, _client: Client) -> None:
+            armed.append(True)
+
     monkeypatch.setattr(handler, "Message", FakeMessage)
     monkeypatch.setattr(query_menu, "list_for", list_for)
+    monkeypatch.setattr(query_menu, "get_one", get_one)
     monkeypatch.setattr(query_menu, "select", select)
     monkeypatch.setattr(query_menu, "toggle", toggle)
     monkeypatch.setattr(handler, "conversation", lambda: Talker())
+
+    async def room(_client: Client) -> tuple[bool, None]:
+        return True, None
+
+    monkeypatch.setattr(watch_flow, "can_open_new", room)
     message = FakeMessage("", from_user=FakeUser())
     callback = cast(Any, FakeCallback(message))
 
@@ -1084,54 +997,37 @@ async def test_request_menu_handler_covers_the_whole_navigation(
     await handler.manage_request(callback, RequestsCallback(action="edit", root=7))
     await handler.manage_request(callback, RequestsCallback(action="pause", root=7))
     await handler.manage_request(callback, RequestsCallback(action="resume", root=7))
+    await handler.manage_request(callback, RequestsCallback(action="new"))
 
     assert callback.answered
     assert repeated == [7]
     assert (7, True) in selected
-    assert any("Ваши запросы" in text for text, _keyboard in message.answers)
+    assert any("Ваши поиски" in text for text, _keyboard in message.answers)
     assert any("Изменяем" in text for text, _keyboard in message.answers)
+    assert armed == [True], "кнопка «новый поиск» взводит ветку, а не ищет сразу"
+    assert threads.ASK_WHAT in [text for text, _keyboard in message.answers]
 
 
 async def test_empty_and_stale_request_menus_answer_plainly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def nothing(_client: Client) -> list[QueryOverview]:
-        return []
+    async def nothing(_client: Client) -> query_menu.Menu:
+        return query_menu.Menu(items=[])
+
+    async def unknown(_client: Client, _root: int) -> None:
+        return None
 
     monkeypatch.setattr(handler, "Message", FakeMessage)
     monkeypatch.setattr(query_menu, "list_for", nothing)
+    monkeypatch.setattr(query_menu, "get_one", unknown)
     message = FakeMessage("", from_user=FakeUser())
     callback = cast(Any, FakeCallback(message))
 
     await handler.requests(cast(Message, message))
     await handler.manage_request(callback, RequestsCallback(action="open", root=999))
 
-    assert "Запросов пока нет" in message.answers[0][0]
+    assert "Поисков пока нет" in message.answers[0][0]
     assert "не найден" in message.answers[1][0]
-
-
-async def test_subscription_button_bills_its_own_request_not_the_newest_one(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    checked: list[tuple[int, int]] = []
-
-    async def owns(user_id: int, root: int) -> bool:
-        checked.append((user_id, root))
-        return True
-
-    async def inactive(_user_id: int, _root: int) -> None:
-        return None
-
-    monkeypatch.setattr(handler, "Message", FakeMessage)
-    monkeypatch.setattr(subscription, "owns", owns)
-    monkeypatch.setattr(subscription, "active_for", inactive)
-    message = FakeMessage("", from_user=FakeUser(user_id=42))
-    callback = cast(Any, FakeCallback(message))
-
-    await handler.subscribe(callback, SubscribeCallback(root=7))
-
-    assert checked == [(42, 7)]
-    assert message.invoices[0]["payload"].endswith(":7")
 
 
 def test_answer_and_feedback_fit_the_callback_limit() -> None:
@@ -1152,7 +1048,8 @@ def test_request_menu_is_compact_and_exposes_only_relevant_monitor_action() -> N
     actions = request_actions(active)
     labels = [button.text for row in actions.inline_keyboard for button in row]
 
-    assert len(listing.inline_keyboard) == 2
+    assert len(listing.inline_keyboard) == 3, "две ветки плюс «новый поиск»"
+    assert listing.inline_keyboard[-1][0].text == NEW_THREAD_LABEL, "вход в новую ветку последним"
     assert "⏸ Выключить мониторинг" in labels
     assert "▶️ Включить мониторинг" not in labels
     packed = RequestsCallback(action="search", root=active.root).pack()
@@ -1182,7 +1079,15 @@ def test_reply_without_buttons_has_no_keyboard() -> None:
 def test_dispatcher_knows_the_dialog() -> None:
     dispatcher = bot_app.build_dispatcher()
 
-    assert [router.name for router in dispatcher.sub_routers] == ["search"]
+    # Оплата ДО диалога: `F.text` диалога ловит всё, в том числе команды.
+    assert [router.name for router in dispatcher.sub_routers] == [
+        "billing",
+        "slots",
+        "menu",
+        "watch",
+        "search",
+        "membership",
+    ]
 
 
 async def test_appending_a_word_does_not_buy_three_more_questions() -> None:

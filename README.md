@@ -48,7 +48,8 @@ uv run pytest
 
 ```
 docs/            архитектура и доменные описания
-infra/sql/       DDL (применяется при первом старте postgres)
+infra/sql/       цепочка миграций NNN_*.sql (деплой применяет её на каждом запуске)
+infra/backup/    резервная копия БД: pg_dump -Fc в /var/backups/vera/sniffer, 03:00 UTC (ставит деплой)
 src/sniffer/
   config.py      настройки из окружения
   runtime/       каркас процесса: лог, сигналы, ожидание конфигурации

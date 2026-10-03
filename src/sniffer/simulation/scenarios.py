@@ -64,13 +64,20 @@
   тоже нет — лот честно доезжает до выдачи, и это поведение продукта, а не
   повод держать сценарий в противоречии с рынком.
 
+Поиски (ветки) — `StartsNew` и `Switches`, последний блок таблицы. До них
+симуляция не знала про `/new` вовсе: сценарии шли одним поиском, и вся механика
+веток (отдельный паспорт на `/new`, уточнение в выбранный поиск, вытеснение шестого)
+проверялась только юнит-тестами на подделке. Здесь она идёт тем же настоящим
+`Conversation`, что и остальное, и результат читается по `expect_threads`: что
+лежит в каждом поиске, а не только в последнем.
+
 Устройство сценария — в `script.py`.
 """
 
 from __future__ import annotations
 
 from sniffer.domain.dialogue import Feedback
-from sniffer.simulation.script import Reacts, Says, Scenario, Taps
+from sniffer.simulation.script import Reacts, Says, Scenario, StartsNew, Switches, Taps
 
 SCENARIOS: tuple[Scenario, ...] = (
     Scenario(
@@ -340,7 +347,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         # «что ищем?» здесь больше не спрашивают — предмет уже назван маркой, и
         # категория известна ДО первого (и единственного блокирующего) вопроса.
         # `expect_results=None`: показать выдачу сразу или сузить её приглашением
-        # над карточками (`_result_header`, широкий запрос) — обе формы
+        # над карточками (`wording.result_header`, широкий запрос) — обе формы
         # допустимы, лишь бы категория и марка распознались.
         expect_results=None,
         expect={"city": "nha_trang", "category": "motorbike", "attributes.brand": "honda"},
@@ -651,5 +658,94 @@ SCENARIOS: tuple[Scenario, ...] = (
             "budget.max": 14_000_000.0,
             "budget.currency": "VND",
         },
+    ),
+    # ── поиски: `/new` и переключение между ними ──────────────────────────────
+    Scenario(
+        key="new_search_leaves_the_old_one_alone",
+        title="/new: второй поиск не трогает первый",
+        steps=(
+            Says("ищу скутер в нячанге до 400 долларов"),
+            StartsNew(),
+            Says("сниму квартиру в нячанге до 10 млн"),
+        ),
+        # Бюджет скутера на месте, а квартира — отдельный поиск со своим бюджетом:
+        # раньше второй запрос мог молча стать версией первого.
+        expect_threads=(
+            {
+                "category": "motorbike",
+                "city": "nha_trang",
+                "budget.max": 400.0,
+                "budget.currency": "USD",
+            },
+            {
+                "category": "apartment",
+                "city": "nha_trang",
+                "intent": "rent",
+                "budget.max": 10_000_000.0,
+                "budget.currency": "VND",
+            },
+        ),
+    ),
+    Scenario(
+        key="refinement_follows_the_chosen_search",
+        title="выбрал первый поиск и написал «до 300» — бюджет первого",
+        steps=(
+            Says("ищу скутер в нячанге до 400 долларов"),
+            StartsNew(),
+            Says("сниму квартиру в нячанге до 10 млн"),
+            Switches(1),
+            Says("до 300"),
+        ),
+        # Главная жалоба владельца: уточнение бюджета уезжало в чужой паспорт.
+        # Теперь «до 300» уходит в поиск, который человек выбрал, и только в него.
+        expect_threads=(
+            {"category": "motorbike", "budget.max": 300.0},
+            {"category": "apartment", "budget.max": 10_000_000.0, "budget.currency": "VND"},
+        ),
+    ),
+    Scenario(
+        key="new_beats_a_word_for_word_repeat",
+        title="/new и та же фраза слово в слово — второй поиск, а не повтор",
+        steps=(Says("ищу скутер в нячанге"), StartsNew(), Says("ищу скутер в нячанге")),
+        # Без `/new` дословный повтор читался бы как «переспросил то же»: эвристика
+        # решает, что делать внутри поиска, и отменять явное решение человека не вправе.
+        expect_threads=(
+            {"category": "motorbike", "city": "nha_trang"},
+            {"category": "motorbike", "city": "nha_trang"},
+        ),
+    ),
+    Scenario(
+        key="a_choice_cancels_an_unfinished_new",
+        title="/new, затем выбор поиска: «до 500» уточняет выбранный",
+        steps=(Says("ищу скутер в нячанге"), StartsNew(), Switches(1), Says("до 500")),
+        # Выбор поиска снимает взведённый `/new`: иначе «до 500» открыло бы новый поиск.
+        expect_threads=({"category": "motorbike", "budget.max": 500.0},),
+    ),
+    Scenario(
+        key="sixth_search_is_announced",
+        title="шестой поиск вытесняет самый старый из списка и говорит об этом",
+        steps=(
+            Says("ищу скутер в нячанге"),
+            StartsNew(),
+            Says("сниму квартиру в нячанге"),
+            StartsNew(),
+            Says("сниму комнату в нячанге"),
+            StartsNew(),
+            Says("ищу велосипед в нячанге"),
+            StartsNew(),
+            Says("дом на длительный срок в нячанге"),
+            StartsNew(),
+            Says("ищу автомобиль в нячанге"),
+        ),
+        expect_text="из него убран",
+        # Вытесненный — не удалённый: все шесть поисков лежат на месте.
+        expect_threads=(
+            {"category": "motorbike"},
+            {"category": "apartment"},
+            {"category": "room"},
+            {"category": "bicycle"},
+            {"category": "house"},
+            {"category": "car"},
+        ),
     ),
 )

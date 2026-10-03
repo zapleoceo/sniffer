@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sniffer.agent_app import main, main_gateway
 from sniffer.agent_app.contracts import MainIdentity
 from sniffer.agent_app.main_gateway import MainGateway, collection_scope
-from sniffer.bot import cards, conversation
+from sniffer.bot import cards
 from sniffer.bot.catalog_finder import CatalogFinder
 from sniffer.bot.conversation import Conversation, Found, Reply
 from sniffer.bot.store import Client, PassportStore
@@ -195,7 +195,6 @@ async def test_exact_catalogue_request_reaches_postgres_without_redundant_llm_an
     monkeypatch.setattr(main, "MainGateway", lambda identity: TrackingGateway(identity))
     monkeypatch.setattr(main, "usd_vnd_rate", lambda: _rate())
     monkeypatch.setattr(main_gateway, "get_settings", lambda: settings)
-    monkeypatch.setattr(conversation, "get_settings", lambda: settings)
     monkeypatch.setattr(cards, "get_settings", lambda: settings)
 
     store = PassportStore(session_factory)

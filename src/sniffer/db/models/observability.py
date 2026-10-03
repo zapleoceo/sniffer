@@ -53,6 +53,9 @@ class ClientRequest(BigIdMixin, Base):
     )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     duration_ms: Mapped[int | None] = mapped_column(Integer)
+    # Сколько карточек реально показано и сколько удержано лимитом квоты.
+    shown_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=ZERO)
+    withheld_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=ZERO)
 
 
 class DialogMessage(BigIdMixin, Base):

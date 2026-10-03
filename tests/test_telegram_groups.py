@@ -27,7 +27,7 @@ from structlog.testing import capture_logs
 from telethon.errors import AuthKeyUnregisteredError, FloodWaitError, SessionRevokedError
 
 from sniffer.config import Settings
-from sniffer.sources import telegram_groups
+from sniffer.sources import telegram_groups, telegram_mapping
 from sniffer.sources.base import get_source, registered_sources
 from sniffer.sources.chat_directory import EmptyChatDirectory
 from sniffer.sources.telegram_groups import TelegramGroupsSource
@@ -233,9 +233,26 @@ async def test_fields_absent_in_telegram_stay_empty() -> None:
     items = await adapter(FakeTelegram(replies=fixture_replies())).search("байк", {})
     assert [item.seller_name for item in items] == [""] * 5
     assert [item.title for item in items] == [""] * 5
-    assert [item.price_raw for item in items] == [""] * 5
-    assert all(item.price_vnd is None for item in items)
     assert all(item.images == [] for item in items)
+
+
+async def test_the_price_is_read_from_the_text_the_group_gives() -> None:
+    """Отдельного поля цены у поста нет, она живёт в тексте — и читается оттуда.
+
+    Раньше цена бралась только после слова «цена», и все пять находок выдачи
+    приходили без цены при тексте «13 млн донгов». Шлем за 1,8 млн — цена шлема:
+    предмет объявления решает не извлечение цены, а отбор по запросу.
+    """
+    items = await adapter(FakeTelegram(replies=fixture_replies())).search("байк", {})
+
+    assert [item.price_vnd for item in items] == [
+        13_000_000,
+        9_500_000,
+        24_000_000,
+        1_200_000,
+        1_800_000,
+    ]
+    assert [item.price_raw for item in items][:3] == ["13 млн донгов", "9.5 млн", "24 млн."]
 
 
 async def test_empty_result_is_not_a_breakdown() -> None:
@@ -693,3 +710,49 @@ async def test_an_empty_registry_says_so_out_loud() -> None:
     assert any(entry["event"] == "telegram.no_chats" for entry in logs), (
         "пустой реестр остался незаметным в логе"
     )
+
+
+async def test_one_message_that_breaks_the_mapping_does_not_take_the_rest_with_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Разбор одного сообщения упал — остальные находки запроса целы.
+
+    Разбор цены уже ронял воронку на таб-разделителе внутри числа, а `_items` стоял
+    вне охраны: исключение из одного сообщения уносило находки всех чатов запроса.
+    """
+    real = telegram_mapping.to_item
+
+    def flaky(chat: Any, message: Any, context: Any) -> Any:
+        if message.id == 55120:
+            raise ValueError("кривое сообщение")
+        return real(chat, message, context)
+
+    monkeypatch.setattr(telegram_groups, "to_item", flaky)
+
+    with capture_logs() as logs:
+        items = await adapter(FakeTelegram(replies=fixture_replies())).search("байк", {})
+
+    assert "-1001657234891:55120" not in {item.external_id for item in items}
+    assert len(items) == 4
+    failed = [entry for entry in logs if entry["event"] == "telegram.item_failed"]
+    assert [(entry["chat"], entry["message"]) for entry in failed] == [(-1001657234891, 55120)]
+
+
+async def test_the_plan_context_reaches_every_message_of_every_chat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[Any] = []
+    real = telegram_mapping.to_item
+
+    def spy(chat: Any, message: Any, context: Any) -> Any:
+        seen.append(context)
+        return real(chat, message, context)
+
+    monkeypatch.setattr(telegram_groups, "to_item", spy)
+
+    await adapter(FakeTelegram(replies=fixture_replies())).search(
+        "байк", {"category": "motorbike", "intent": "buy"}
+    )
+
+    assert seen
+    assert {(context.category, context.deal_type) for context in seen} == {("motorbike", "sell")}

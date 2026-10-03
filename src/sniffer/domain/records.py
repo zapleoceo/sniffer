@@ -14,11 +14,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, time
+from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any
 
 from sniffer.domain.passport import Passport
+from sniffer.domain.plans import MONITOR_CARDS_PER_DAY
 
 STAGE_PENDING = "pending"
 
@@ -126,6 +127,7 @@ class User:
     is_blocked: bool = False
     active_passport_root: int | None = None
     editing_passport_root: int | None = None
+    awaiting_new_request: bool = False
     created_at: datetime | None = None
     id: int | None = None
 
@@ -345,7 +347,7 @@ class SubscriptionState:
     passport_root: int
     passport: StoredPassport
     mode: str = "instant"
-    max_per_day: int = 5
+    max_per_day: int = MONITOR_CARDS_PER_DAY
     quiet_from: time | None = None
     quiet_to: time | None = None
     # С какой карточки начинается слежение. Подписка обещает НОВЫЕ посты, а не
@@ -355,6 +357,16 @@ class SubscriptionState:
     # и по неподходящим карточкам, иначе первая страница вечна.
     scan_listing_id: int = 0
     expires_at: datetime | None = None
+    # Сколько проходов подряд эта подписка падала. Нужен самому проходу: от него растёт
+    # пауза карантина, и без него следующий сбой начинал бы счёт с единицы.
+    failed_streak: int = 0
+    # Сводка «ещё N» сверх суточного потолка (`domain.monitoring.Overflow`) и пауза без права:
+    # с какого момента слот не работал. Нужны агенту, чтобы продолжить счёт и решить, прыгать
+    # ли курсору к «сейчас» после долгой паузы.
+    overflow_day: date | None = None
+    overflow_count: int = 0
+    overflow_notified: bool = False
+    no_slot_since: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)

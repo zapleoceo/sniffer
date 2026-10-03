@@ -58,6 +58,9 @@ _RENTABLE_TRANSPORT = frozenset({Category.MOTORBIKE, Category.CAR, Category.BICY
 # старое показывается всё равно (`rank_items`). Живой повод: 02.09.2026 в
 # выдаче всплыл лот 59-дневной давности.
 LIVE_MAX_AGE_DAYS = 28
+# Кросспост с другим хвостом: доля общих содержательных слов и минимум слов в тексте.
+NEAR_DUPLICATE_SIMILARITY = 0.85
+NEAR_DUPLICATE_MIN_WORDS = 12
 
 
 def with_vnd_budget(plan: SearchPlan, passport: Passport, rate: float | None) -> SearchPlan:
@@ -98,7 +101,7 @@ def rank_items(
       предмете, прочитанные из его собственных слов, а не догадки: клиент назвал
       Lead — Airblade не «похуже», а не тот предмет (spec-v2, 3.2). Очередь НЕ
       отменяется: если подходящего на рынке нет, честнее пустой ответ, который
-      прямо советует «попробуйте без марки» (`NOTHING_FOUND`), чем пять чужих
+      прямо советует «попробуйте без марки» (`bot.wording.NOTHING_FOUND`), чем пять чужих
       карточек — ровно то, на что жаловался владелец. Неизвестное свойство
       противоречием не считается: лот, не назвавший марку/коробку, остаётся;
     * **совсем старое** (`_too_old`) — догадка о живости, а не факт о предмете, и
@@ -114,7 +117,15 @@ def rank_items(
     неизвестна» (spec-v2, 3.3).
     """
     moment = now or datetime.now(UTC)
-    ranked = sorted(items, key=lambda item: _score(item, passport, usd_vnd, moment), reverse=True)
+    # Запрос с бюджетом: карточка с названной ценой выше карточки «цена не указана» при любой
+    # свежести — известное совпадение с бюджетом сильнее неизвестного (живой диалог 04.10.2026:
+    # свежие лоты без цены стояли выше подтверждённых).
+    budgeted = _budget_ceiling_vnd(passport.budget, usd_vnd) is not None
+
+    def order(item: RawItem) -> tuple[bool, float]:
+        return (budgeted and item.price_vnd is not None, _score(item, passport, usd_vnd, moment))
+
+    ranked = sorted(items, key=order, reverse=True)
     # Дедуп ПОСЛЕ сортировки: у одинакового текста балл одинаков, а из равных
     # первым стоит свежайший — его и оставляем (spec-v2 2.7). До отсева, но это
     # безразлично: у кросспоста текст один, значит и вердикт `_contradicts` один.
@@ -173,6 +184,11 @@ def _contradicts(item: RawItem, passport: Passport, usd_vnd: float | None) -> bo
         (ceiling is not None and item.price_vnd > ceiling)
         or (floor is not None and item.price_vnd < floor)
     )
+
+
+def contradicts_request(item: RawItem, passport: Passport, usd_vnd: float | None) -> bool:
+    """Публичный вердикт отсева: им же проверяют кнопки сужения (`facet_check`)."""
+    return _contradicts(item, passport, usd_vnd)
 
 
 def _contrary_attribute(passport: Passport, field: str, text: str) -> bool:
@@ -375,16 +391,35 @@ def _dedup(items: list[RawItem]) -> list[RawItem]:
     seen_ids: set[tuple[str, str]] = set()
     seen_words: set[frozenset[str]] = set()
     kept: list[RawItem] = []
+    kept_words: list[tuple[frozenset[str], int | None]] = []
     for item in items:
         ident = (item.source, item.external_id)
         words = frozenset(normalized(item.text).split()) - _SERVICE_WORDS
         if ident in seen_ids or (words and words in seen_words):
             continue
+        if words and any(
+            price == item.price_vnd and _near_duplicate(words, other) for other, price in kept_words
+        ):
+            continue
         seen_ids.add(ident)
         if words:
             seen_words.add(words)
+            kept_words.append((words, item.price_vnd))
         kept.append(item)
     return kept
+
+
+def _near_duplicate(words: frozenset[str], other: frozenset[str]) -> bool:
+    """Тот же лот с другой подписью чата: слова почти те же (Жаккар не ниже порога).
+
+    Кросспост между чатами отличается хвостом — именем чата, контактом, строкой «фото».
+    Сходство считается только при ОДНОЙ цене (вызывающий сверяет её), и только у текстов, где
+    слов достаточно, чтобы совпадение не было случайным: два шаблонных лота одного агентства
+    с разной ценой остаются двумя.
+    """
+    if min(len(words), len(other)) < NEAR_DUPLICATE_MIN_WORDS:
+        return False
+    return len(words & other) / len(words | other) >= NEAR_DUPLICATE_SIMILARITY
 
 
 def _other_category(item: RawItem, passport: Passport) -> bool:

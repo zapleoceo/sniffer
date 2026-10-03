@@ -89,6 +89,22 @@ async def test_guard_uses_sales_lane_without_losing_structured_contract() -> Non
     assert options["schema"]["required"] == ["verdicts"]
 
 
+async def test_a_price_at_the_600th_char_is_inside_the_window() -> None:
+    from sniffer.verifier.guard import GUARD_TEXT_CHARS
+
+    text = "Honda Vision " + "x" * 580 + " Цена 40 triệu"
+    assert text.index("Цена") > 590
+    broker = FakeBroker()
+    await screen(WANTED, [item(1, text)], broker=broker)  # type: ignore[arg-type]
+    assert GUARD_TEXT_CHARS >= 700
+    assert "Цена 40 triệu" in broker.prompts[0]
+    long = item(1, "y" * (GUARD_TEXT_CHARS + 50))
+    broker = FakeBroker()
+    await screen(WANTED, [long], broker=broker)  # type: ignore[arg-type]
+    assert "y" * GUARD_TEXT_CHARS in broker.prompts[0]
+    assert "y" * (GUARD_TEXT_CHARS + 1) not in broker.prompts[0]
+
+
 @pytest.mark.parametrize("count, expected_tokens", [(1, 640), (6, 1280), (12, 2048), (30, 2048)])
 async def test_guard_budget_preserves_explanations_without_extra_calls(
     count: int,

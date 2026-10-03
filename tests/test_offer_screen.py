@@ -7,7 +7,9 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 from sniffer.broker.client import BrokerCapError, BrokerError
@@ -126,6 +128,43 @@ def test_a_new_category_rereads_attributes_for_it() -> None:
     assert fields["category"] == "apartment"
     assert "transmission" not in fields["attributes"] and "power" not in fields["attributes"]
     assert fields["attributes"]["rooms"] == 2
+
+
+def test_a_new_category_does_not_lose_the_facts_the_funnel_read() -> None:
+    """Перечитанное под новую категорию: площадь, залог и срок не пропадают вместе с коробкой."""
+    text = "Сдаётся квартира, 2 спальни, 55 м2, лифт\nДепозит 18 млн, контракт от 6 месяцев"
+    flat = replace(
+        listing(6, "motorbike", "Сдаётся квартира", text),
+        price_amount=Decimal(9_000_000),
+        price_currency="VND",
+        price_period="month",
+    )
+
+    fields = screened_fields(flat, OfferVerdict("offer", "apartment", "rent_out", "unknown"))
+
+    assert fields["attributes"] == {
+        "rooms": 2,
+        "area_m2": 55,
+        "elevator": True,
+        "min_term_months": 6,
+        "deposit_amount": 18_000_000,
+        "deposit_months": 2,
+    }
+
+
+def test_a_price_that_is_not_monthly_does_not_turn_the_deposit_into_months() -> None:
+    text = "Сдаётся квартира, 2 спальни. Депозит 18 млн"
+    flat = replace(
+        listing(7, "motorbike", "Сдаётся квартира", text),
+        price_amount=Decimal(9_000_000),
+        price_currency="VND",
+        price_period="day",
+    )
+
+    fields = screened_fields(flat, OfferVerdict("offer", "apartment", "rent_out", "unknown"))
+
+    assert fields["attributes"]["deposit_amount"] == 18_000_000
+    assert "deposit_months" not in fields["attributes"]
 
 
 async def test_screen_offers_maps_verdicts_by_number() -> None:

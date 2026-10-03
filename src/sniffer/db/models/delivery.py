@@ -32,7 +32,7 @@ class Subscription(BigIdMixin, Base):
     passport_root: Mapped[int] = mapped_column(BigInteger, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=TRUE)
     mode: Mapped[str] = mapped_column(Text, nullable=False, server_default=sa_text("'instant'"))
-    max_per_day: Mapped[int] = mapped_column(Integer, nullable=False, server_default=sa_text("5"))
+    max_per_day: Mapped[int] = mapped_column(Integer, nullable=False, server_default=sa_text("10"))
     quiet_from: Mapped[time | None] = mapped_column(Time)
     quiet_to: Mapped[time | None] = mapped_column(Time)
     sent_today: Mapped[int] = mapped_column(Integer, nullable=False, server_default=ZERO)
@@ -44,7 +44,23 @@ class Subscription(BigIdMixin, Base):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Ключ платежа Telegram: он же ключ отмены через `editUserStarSubscription`.
     charge_id: Mapped[str | None] = mapped_column(Text)
+    # Состояние монитора. `last_scanned_at` — ключ ротации обхода («кого не смотрели
+    # дольше всех»); остальное — карантин сбойной подписки (docs/architecture.md 7.1).
+    last_scanned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failed_streak: Mapped[int] = mapped_column(Integer, nullable=False, server_default=ZERO)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    quarantined_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Монитор по слоту (015_monitor_agent.sql): сводка «ещё N» сверх суточного потолка и
+    # пауза без права. Состояние «ничего не было» — ноль, ложь и пусто.
+    suppressed_total: Mapped[int] = mapped_column(Integer, nullable=False, server_default=ZERO)
+    overflow_day: Mapped[date | None] = mapped_column(Date)
+    overflow_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=ZERO)
+    overflow_notified: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=FALSE)
+    no_slot_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     day_bucket: Mapped[date | None] = mapped_column(Date)
+    # Порядок претензии на слот мониторинга (016_stars_slots.sql): слоты берут первые
+    # по (priority, id); перенос слота — смена порядка, а не удаление мониторинга.
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, server_default=ZERO)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=NOW
     )
@@ -77,6 +93,21 @@ class Payment(BigIdMixin, Base):
     is_recurring: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=FALSE)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=NOW
+    )
+    # Оплата звёздами (011_stars_billing.sql). Платёж пишется в журнал первым делом
+    # и целиком: по `raw` его можно разобрать и вернуть вручную, если что-то пошло не так.
+    tg_user_id: Mapped[int | None] = mapped_column(BigInteger)
+    invoice_payload: Mapped[str | None] = mapped_column(Text)
+    kind: Mapped[str | None] = mapped_column(Text)
+    is_first_recurring: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=FALSE)
+    # Срок от Telegram (`subscription_expiration_date`), а не наша арифметика.
+    period_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    refunded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    raw: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    # Откуда запись (016_stars_slots.sql): апдейт Telegram или сверка; срок сверки — оценка.
+    source: Mapped[str] = mapped_column(Text, nullable=False, server_default=sa_text("'update'"))
+    period_end_estimated: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=FALSE
     )
 
 
@@ -117,3 +148,7 @@ class Outbox(BigIdMixin, Base):
         DateTime(timezone=True), nullable=False, server_default=NOW
     )
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Почему строка не ушла: `cancelled` — наше решение не слать (просрочено,
+    # клиент заблокировал бота), `failed` — отказ Telegram или кончились попытки.
+    # Без причины их не различить, глядя в базу.
+    last_error: Mapped[str | None] = mapped_column(Text)

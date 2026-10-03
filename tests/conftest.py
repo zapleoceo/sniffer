@@ -114,3 +114,20 @@ async def db_session(db_engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
     sessions = async_sessionmaker(db_engine, expire_on_commit=False)
     async with sessions() as session:
         yield session
+
+
+def _sales(monkeypatch: pytest.MonkeyPatch, *, open_: bool) -> None:
+    """Состояние флага продажи для слов и кнопок: одна точка — `Settings.selling`."""
+    from sniffer.config import Settings
+
+    monkeypatch.setattr(Settings, "selling", property(lambda self: open_))
+
+
+@pytest.fixture
+def sales_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    _sales(monkeypatch, open_=True)
+
+
+@pytest.fixture
+def sales_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    _sales(monkeypatch, open_=False)
