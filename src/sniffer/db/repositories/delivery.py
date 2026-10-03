@@ -41,7 +41,6 @@ OUTBOX_FAILED = "failed"
 OUTBOX_CANCELLED = "cancelled"
 # Почему строка отменена: пишется в `outbox.last_error` и читается человеком.
 REASON_EXPIRED = "expired"
-REASON_RIGHT_LOST = "right_lost"
 
 
 def entitled(now: datetime) -> ColumnElement[bool]:
@@ -259,9 +258,7 @@ class DeliveryRepository(Repository):
         blocked = select(models.User.id).where(models.User.bot_blocked_at.is_not(None))
         return await self._cancel(models.Outbox.user_id.in_(blocked), reason=reason)
 
-    async def cancel_expired(
-        self, *, now: datetime, ttl: timedelta, lost_right_ttl: timedelta
-    ) -> int:
+    async def cancel_expired(self, *, now: datetime, ttl: timedelta) -> int:
         """Отменить строки, которые слать уже поздно. Возврат — сколько строк отменено.
 
         Возраст строки — от времени, на которое она назначена (`scheduled_at`), а
@@ -270,36 +267,27 @@ class DeliveryRepository(Repository):
         сбоя сдвигает `scheduled_at` вперёд, но попыток конечное число, так что
         застрявшая строка всё равно упрётся в потолок попыток.
 
-        Две причины, и они различаются в `last_error`. Если у подписки уже нет
-        права на слежение (срок вышел или она на паузе), строка живёт `lost_right_ttl`
-        — найденное, пока право было, ещё можно доставить, но недолго. Остальные —
-        `ttl`: у строки без подписки (отложенный ответ после сбора) права нет по
-        определению, и ждёт она так же, как все.
+        Одно правило срока годности. Отмену по окончании подписки (шесть часов
+        льготы) делает проход матчера — `MonitorRepository.cancel_lapsed`: правило
+        «шесть часов после срока» живёт в одном месте, а не в двух с разными числами.
         """
-        lost = select(models.Subscription.id).where(
-            or_(
-                models.Subscription.is_active.is_(False),
-                and_(
-                    models.Subscription.expires_at.is_not(None),
-                    models.Subscription.expires_at <= now,
-                ),
-            )
-        )
-        cancelled = await self._cancel(
-            models.Outbox.subscription_id.in_(lost),
-            models.Outbox.scheduled_at < now - lost_right_ttl,
-            reason=REASON_RIGHT_LOST,
-        )
-        return cancelled + await self._cancel(
-            models.Outbox.scheduled_at < now - ttl, reason=REASON_EXPIRED
-        )
+        return await self._cancel(models.Outbox.scheduled_at < now - ttl, reason=REASON_EXPIRED)
 
     async def _cancel(self, *conditions: Any, reason: str) -> int:
+        # `SKIP LOCKED`: строку, которую нотифаер уже взял в отправку, отмена не ждёт —
+        # судьба такой строки решена (отменять отправляемое поздно), а ожидание
+        # блокировки стояло бы на пути всего прохода.
+        pending = (
+            select(models.Outbox.id)
+            .where(models.Outbox.status == OUTBOX_PENDING, *conditions)
+            .with_for_update(skip_locked=True)
+        )
         done = await self._session.execute(
             update(models.Outbox)
-            .where(models.Outbox.status == OUTBOX_PENDING, *conditions)
+            .where(models.Outbox.id.in_(pending))
             .values(status=OUTBOX_CANCELLED, last_error=reason)
             .returning(models.Outbox.id)
+            .execution_options(synchronize_session=False)
         )
         return len(done.all())
 

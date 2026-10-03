@@ -374,7 +374,7 @@ async def test_a_403_on_a_real_database_blocks_the_client_and_cancels_their_queu
 async def test_expired_rows_are_cancelled_with_the_reason_each_term_gives(
     db_session: AsyncSession,
 ) -> None:
-    """Сутки для всех, шесть часов — когда у подписки нет права: срок вышел или пауза."""
+    """Одно правило срока годности — сутки для всех, независимо от права подписки."""
     hour = timedelta(hours=1)
     entitled_user, entitled = await _subscriber(db_session, 601, expires_at=NOW + 5 * hour)
     lapsed_user, lapsed = await _subscriber(db_session, 602, expires_at=NOW - hour)
@@ -383,9 +383,9 @@ async def test_expired_rows_are_cancelled_with_the_reason_each_term_gives(
     plan = {
         "active_7h": (entitled_user, entitled, 7 * hour, "pending", None),
         "active_25h": (entitled_user, entitled, 25 * hour, "cancelled", "expired"),
-        "lapsed_7h": (lapsed_user, lapsed, 7 * hour, "cancelled", "right_lost"),
+        "lapsed_7h": (lapsed_user, lapsed, 7 * hour, "pending", None),
         "lapsed_5h": (lapsed_user, lapsed, 5 * hour, "pending", None),
-        "paused_7h": (paused_user, paused, 7 * hour, "cancelled", "right_lost"),
+        "paused_7h": (paused_user, paused, 7 * hour, "pending", None),
         "plain_7h": (plain_user, None, 7 * hour, "pending", None),
         "plain_25h": (plain_user, None, 25 * hour, "cancelled", "expired"),
     }
@@ -404,12 +404,10 @@ async def test_expired_rows_are_cancelled_with_the_reason_each_term_gives(
     db_session.add_all([*rows.values(), delivered])
     await db_session.commit()
 
-    cancelled = await DeliveryRepository(db_session).cancel_expired(
-        now=NOW, ttl=24 * hour, lost_right_ttl=6 * hour
-    )
+    cancelled = await DeliveryRepository(db_session).cancel_expired(now=NOW, ttl=24 * hour)
     await db_session.commit()
 
-    assert cancelled == 4
+    assert cancelled == 2
     for name, row in rows.items():
         await db_session.refresh(row)
         _, _, _, status, reason = plan[name]
@@ -431,7 +429,7 @@ async def test_a_subscription_without_an_end_date_keeps_its_right(db_session: As
     await db_session.commit()
 
     cancelled = await DeliveryRepository(db_session).cancel_expired(
-        now=NOW, ttl=timedelta(hours=24), lost_right_ttl=timedelta(hours=6)
+        now=NOW, ttl=timedelta(hours=24)
     )
 
     assert cancelled == 0

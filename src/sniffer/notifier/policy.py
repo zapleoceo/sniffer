@@ -41,11 +41,10 @@ class Policy:
     backoff_cap: timedelta = BACKOFF_CAP
     system_pause: timedelta = SYSTEM_PAUSE
     # Срок годности строки очереди, от времени, на которое она назначена. Пока у
-    # подписки есть право на слежение — сутки; когда права нет (срок вышел или
-    # пауза) — шесть часов: найденное, пока право было, ещё можно доставить, но
-    # недолго. Числа повторены в настройках (`outbox_ttl_h`), равенство сторожит тест.
+    # подписки есть право на слежение — сутки. Отмену по окончании подписки (шесть
+    # часов) делает матчер (`MonitorRepository.cancel_lapsed`). Число повторено в
+    # настройках (`outbox_ttl_h`), равенство сторожит тест.
     ttl: timedelta = timedelta(hours=24)
-    lost_right_ttl: timedelta = timedelta(hours=6)
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,10 +56,7 @@ class Verdict:
 
 def policy_from(settings: Settings) -> Policy:
     """Политика с числами из окружения: срок годности меняется конфигом, а не правкой кода."""
-    return Policy(
-        ttl=timedelta(hours=settings.outbox_ttl_h),
-        lost_right_ttl=timedelta(hours=settings.outbox_lost_right_ttl_h),
-    )
+    return Policy(ttl=timedelta(hours=settings.outbox_ttl_h))
 
 
 def backoff(policy: Policy, attempts_made: int) -> timedelta:

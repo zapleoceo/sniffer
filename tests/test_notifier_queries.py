@@ -174,24 +174,18 @@ async def test_a_confirmed_send_stamps_the_moment_and_forgets_an_earlier_failure
     assert params(session.statements[1])["sent_at"] == NOW
 
 
-async def test_the_sweep_has_a_statement_for_each_term_and_names_the_reason() -> None:
+async def test_the_sweep_has_one_statement_for_the_ordinary_term_and_names_the_reason() -> None:
     repo, session = repository()
 
-    await repo.cancel_expired(now=NOW, ttl=timedelta(hours=24), lost_right_ttl=timedelta(hours=6))
+    await repo.cancel_expired(now=NOW, ttl=timedelta(hours=24))
 
-    lost, ordinary = session.statements
-    lost_sql = sql(lost)
-    assert "outbox.subscription_id IN (SELECT subscriptions.id FROM subscriptions" in lost_sql
-    assert "subscriptions.is_active IS false" in lost_sql, "пауза — тоже потеря права"
-    assert "subscriptions.expires_at IS NOT NULL" in lost_sql, "NULL — бессрочная, не просроченная"
-    assert "subscriptions.expires_at <=" in lost_sql
-    assert "right_lost" in params(lost).values()
-    assert NOW - timedelta(hours=6) in params(lost).values()
+    (ordinary,) = session.statements
     ordinary_sql = sql(ordinary)
     assert "subscriptions" not in ordinary_sql, "общий срок не зависит от подписки"
     assert "expired" in params(ordinary).values()
     assert NOW - timedelta(hours=24) in params(ordinary).values()
-    assert "outbox.status =" in lost_sql and "outbox.status =" in ordinary_sql
-    assert "outbox.scheduled_at < %(" in lost_sql and "outbox.scheduled_at < %(" in ordinary_sql, (
+    assert "outbox.status =" in ordinary_sql
+    assert "outbox.scheduled_at < %(" in ordinary_sql, (
         "ровно на границе строка ещё жива: сравнение строгое"
     )
+    assert "FOR UPDATE SKIP LOCKED" in ordinary_sql, "строку в отправке отмена не ждёт"

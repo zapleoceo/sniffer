@@ -46,9 +46,7 @@ class Queue(Protocol):
 
     async def cancel_for_blocked_users(self, *, reason: str) -> int: ...
 
-    async def cancel_expired(
-        self, *, now: datetime, ttl: timedelta, lost_right_ttl: timedelta
-    ) -> int: ...
+    async def cancel_expired(self, *, now: datetime, ttl: timedelta) -> int: ...
 
 
 class Users(Protocol):
