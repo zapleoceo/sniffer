@@ -75,7 +75,9 @@ def _sentinels() -> list[tuple[str, str]]:
 
 def _alters() -> set[tuple[str, str]]:
     """Пары «таблица — колонка» из всех `ALTER TABLE … ADD COLUMN IF NOT EXISTS`."""
-    text = "\n".join(path.read_text(encoding="utf-8") for path in sorted(SQL_DIR.glob("00*.sql")))
+    text = "\n".join(
+        path.read_text(encoding="utf-8") for path in sorted(SQL_DIR.glob("[0-9][0-9][0-9]_*.sql"))
+    )
     text = re.sub(r"--[^\n]*", "", text)
     return {
         (match.group(1), column)
