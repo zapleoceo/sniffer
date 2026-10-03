@@ -21,6 +21,7 @@ from math import exp
 
 from sniffer.domain.passport import Currency, Passport, counterpart_deal_type
 from sniffer.domain.records import Listing, MatchFilter
+from sniffer.matching.attribute_match import conflicts, matches
 
 # Насколько старая карточка ещё годится в подписку. Тот же порог, что у
 # `verifier/liveness.py`: объявление старше двух недель чаще продано, чем нет.
@@ -93,7 +94,7 @@ def _known_attribute_conflicts(listing: Listing, passport: Passport) -> bool:
     """Автоуведомление не шлёт известное противоречие явному требованию."""
     for field, wanted in passport.attributes.items():
         actual = listing.attributes.get(field)
-        if actual not in (None, "") and str(actual).casefold() != str(wanted).casefold():
+        if conflicts(field, actual, wanted, passport.attributes):
             return True
     return False
 
@@ -126,7 +127,11 @@ def _attribute_fit(listing: Listing, passport: Passport) -> float:
     if not wanted:
         return 0.5
     have = listing.attributes
-    matched = sum(1 for field, value in wanted.items() if str(have.get(field, "")) == str(value))
+    matched = sum(
+        1
+        for field, value in wanted.items()
+        if field in have and matches(field, have[field], value, wanted)
+    )
     # Отсутствующий атрибут не считаем несовпадением: минимальная карточка их
     # ещё не извлекает, и штрафовать за то, чего воронка не умеет, нечестно.
     known = sum(1 for field in wanted if field in have)

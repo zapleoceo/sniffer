@@ -6,8 +6,9 @@
 
 - залог — число сразу после «залог/депозит/deposit» («залог за один месяц», «депозит
   1+1», «Pay 3 month, deposti 2») либо перед ним («2 месяца залога»); «залог равен
-  месячной аренде» — это один месяц. Сумма («залог 18 млн») месяцами не является и не
-  читается, а «без залога» — это 0;
+  месячной аренде» — это один месяц. Сумма («залог 18 млн») месяцами не является:
+  `read_deposit_months` её не читает, а `read_deposit_amount` отдаёт донгами; «без
+  залога» — это 0;
 - срок — число с «мес/год» после «контракт/договор/срок аренды/lease»; из «3–6
   месяцев» берётся меньшее, год — это 12. Слова оплаты между меткой и числом
   отменяют чтение: «Условия договора: депозит 1 месяц» — это залог, а не срок.
@@ -25,6 +26,7 @@ from __future__ import annotations
 import re
 
 from sniffer.domain.facts_text import FactText
+from sniffer.domain.price_numbers import factor, number
 
 MAX_DEPOSIT_MONTHS, MAX_TERM_MONTHS = 24, 60
 _WORDS = {
@@ -59,6 +61,15 @@ _NO_DEPOSIT = re.compile(
     rf"(?:без|no|without|khong(?: co)?)[ \t]{{1,2}}{_DEPOSIT}|{_DEPOSIT}{_GAP}"
     r"(?:не\s+(?:нужен|нужна|нужно|требуется|надо)|нет\b|отсутствует|no\b|none\b)"
 )
+# «18M» — миллионы, но «1 m» отдельным словом — нет: поэтому `m` только вплотную к числу.
+_AMOUNT_UNIT = r"млн|миллион\w*|million\w*|mln|trieu|tr\b|тыс\w*|nghin|ngan|k\b|к\b|(?<=\d)m\b"
+_DEPOSIT_AMOUNT = re.compile(
+    rf"{_DEPOSIT}{_GAP}(?:{_FILL}[ \t]{{1,2}}){{0,4}}"
+    rf"(?P<n>\d{{1,3}}(?:[ .,]\d{{3}})+|\d{{1,3}}(?:[.,]\d{{1,2}})?)"
+    rf"(?:[ \t]{{0,2}}(?P<unit>{_AMOUNT_UNIT}))?"
+)
+# Залог дешевле 100 тысяч донгов или дороже 200 миллионов — не залог, а чужое число.
+DEPOSIT_AMOUNT_RANGE = (100_000, 200_000_000)
 _MONTH_NEXT = re.compile(rf"[ \t]{{0,2}}-?[ \t]{{0,2}}{_MONTH}")
 
 _NOT_TERM = r"(?!залог|депозит|депост|оплат|deposit|pay|coc)"
@@ -111,3 +122,21 @@ def read_min_term_months(text: FactText) -> int | float | None:
             found.append((match.start(), value))
     found += [(m.start(), 6) for m in _HALF_YEAR.finditer(text.folded)]
     return _whole(min(found)[1]) if found else None
+
+
+def read_deposit_amount(text: FactText) -> int | None:
+    """Залог суммой в донгах: «депозит 18 млн» → 18_000_000; `None` — суммой не назван.
+
+    Число без единицы читается только записанным группами («5 000 000»): голое «2» после
+    «залога» — месяцы, их читает `read_deposit_months`. Доллары не читаются: курс —
+    чужое знание, а залог в долларах в этих чатах называют редко.
+    """
+    for match in _DEPOSIT_AMOUNT.finditer(text.folded):
+        unit = match.group("unit")
+        raw = match.group("n")
+        if unit is None and re.fullmatch(r"\d{1,3}(?:[ .,]\d{3})+", raw) is None:
+            continue
+        amount = int(number(raw) * (factor(unit) if unit else 1))
+        if DEPOSIT_AMOUNT_RANGE[0] <= amount <= DEPOSIT_AMOUNT_RANGE[1]:
+            return amount
+    return None

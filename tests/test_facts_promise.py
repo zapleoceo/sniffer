@@ -28,7 +28,14 @@ RICH_BIKE = "Honda Vision, 2019 год\nПробег 15 000 км\nБлю кар�
 # Читает разбор запроса (`search.intake_rules`), а не факты: воронка кладёт их в атрибуты сама.
 FROM_THE_QUERY_PARSER = {"rooms", "furnished", "sea_view"}
 # Ключи, которые карточка несёт, а паспорт о них пока не спрашивает.
-LISTING_ONLY = {"zone", "kitchen", "sea_distance_min", "sea_distance_m", "floors_total"}
+LISTING_ONLY = {
+    "zone",
+    "kitchen",
+    "deposit_amount",
+    "sea_distance_min",
+    "sea_distance_m",
+    "floors_total",
+}
 # Обещано паспортом жильём, но из текста пока не читается — решение, а не недосмотр.
 NOT_READ_YET = {"utilities_included"}
 BIKE_LISTING_ONLY = {"year", "mileage_km", "no_license_claimed", "bargain"}

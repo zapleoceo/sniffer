@@ -10,7 +10,11 @@ from __future__ import annotations
 import pytest
 
 from sniffer.domain.facts_sea import read_sea_distance
-from sniffer.domain.facts_terms import read_deposit_months, read_min_term_months
+from sniffer.domain.facts_terms import (
+    read_deposit_amount,
+    read_deposit_months,
+    read_min_term_months,
+)
 from sniffer.domain.facts_text import fact_text
 
 
@@ -74,6 +78,41 @@ def test_the_deposit_is_read_in_months_or_left_unsaid(
     text: str, expected: int | float | None
 ) -> None:
     assert deposit(text) == expected
+
+
+def amount(text: str) -> int | None:
+    return read_deposit_amount(fact_text(text))
+
+
+AMOUNTS = [
+    case("millions", "♻️ Депозит: 18 млн", 18_000_000),
+    case("fraction_of_a_million", "Залог 1,5 млн", 1_500_000),
+    case("dots", "залог 5.000.000 VND", 5_000_000),
+    case("spaces", "Залог: 12 000 000 донг", 12_000_000),
+    case("thousands", "залог 500к", 500_000),
+    case("viet", "Tiền cọc 3 triệu", 3_000_000),
+    case("viet_with_word_deposit", "deposit 3tr", 3_000_000),
+    case("english", "Security deposit: 10 million VND", 10_000_000),
+    case("attached_m", "Deposit 18M", 18_000_000),
+    case("a_spaced_m_is_not_millions", "deposit 2 m", None),
+    case("for_the_amount", "залог в размере 20 млн", 20_000_000),
+    case("months_are_not_an_amount", "Депозит 1 месяц", None),
+    case("a_bare_number_is_not_an_amount", "депозит 10", None),
+    case("a_bare_small_number", "залог 2", None),
+    case("lower_bound_is_included", "залог 100 тыс", 100_000),
+    case("upper_bound_is_included", "залог 200 млн", 200_000_000),
+    case("a_word_starting_with_tr_is_not_a_unit", "deposit 3 trung tam", None),
+    case("too_little", "залог 5 тыс", None),
+    case("too_much", "залог 900 млн", None),
+    case("no_deposit", "Аренда без залога", None),
+    case("silence", "Квартира у моря, 10 млн", None),
+    case("first_one_wins", "Залог 10 млн" + chr(10) + "Deposit 12 млн", 10_000_000),
+]
+
+
+@pytest.mark.parametrize(("text", "expected"), AMOUNTS)
+def test_the_deposit_named_by_a_sum_is_read_in_dong(text: str, expected: int | None) -> None:
+    assert amount(text) == expected
 
 
 TERMS = [

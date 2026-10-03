@@ -13,7 +13,7 @@ from sniffer.domain.prices import parse_price
 from sniffer.domain.records import Chat, Listing, RawMessage
 from sniffer.pipeline.gate import CategoryDetector, GateResult, gate
 from sniffer.pipeline.listing_facts import fact_columns
-from sniffer.pipeline.listing_price import price_columns
+from sniffer.pipeline.listing_price import PriceColumns, price_columns
 
 STAGE_GATED = "gated"
 STAGE_EXTRACTED = "extracted"
@@ -75,6 +75,11 @@ def listing_from(
     `parse_query` кладёт `city or default_city`. Заодно чинится случай, который
     был и раньше: продавец из нячангской группы, продающий байк в Дананге.
 
+    Город самого поста (`facts.city`) главнее и города чата, и умолчания разбора запроса:
+    `parse_query` отдаёт город чата, когда текст города не называет, и без этого лот из
+    Дананга в нячангской группе оставался нячангским (решение владельца 04.10.2026).
+    Читается город только у Нячанга и Дананга — у остальных справочника мест нет.
+
     Район, язык, заголовок и факты (площадь, этаж, удобства, год, пробег…) читает
     `listing_facts.fact_columns`; явные `attributes` разбора запроса главнее прочитанного.
     Заголовок — первая содержательная строка поста, а не первая непустая: так «AN-HOME» и
@@ -92,6 +97,7 @@ def listing_from(
         deal_type=deal_type,
         attributes=attributes,
         city=city or chat.city,
+        monthly_rent=_monthly_rent_vnd(prices),
     )
     return Listing(
         raw_message_id=raw.id,
@@ -99,7 +105,7 @@ def listing_from(
         external_id=f"{raw.chat_tg_id}:{raw.msg_id}",
         deal_type=deal_type,
         category=category,
-        city=city or chat.city,
+        city=facts.city or city or chat.city,
         district=facts.district,
         title=facts.title,
         summary=_summary(raw.text),
@@ -113,6 +119,13 @@ def listing_from(
         confidence=0.55 if prices.amount is not None or prices.attributes else 0.4,
         lang=facts.lang,
     )
+
+
+def _monthly_rent_vnd(prices: PriceColumns) -> int | None:
+    """Месячная аренда в донгах, если цена карточки — именно она."""
+    if prices.amount is None or prices.currency != "VND" or prices.period != "month":
+        return None
+    return int(prices.amount)
 
 
 def _link(tg_id: int, username: str | None, msg_id: int) -> str:
