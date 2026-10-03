@@ -92,8 +92,8 @@ LEGACY_TABLES_WITHOUT_SENTINEL = frozenset(
         "passport_events",
         "payments",
         "raw_messages",
+        # subscriptions охраняется колонками монитора (часовые в deploy.sh)
         "sellers",
-        "subscriptions",
         "telegram_sessions",
     }
 )
