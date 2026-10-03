@@ -93,6 +93,8 @@ _FILLS_COLUMNS = frozenset({FILLED, REPLACED})
 _KEEPS_OLD_PRICE = frozenset({DISAGREED, LOST})
 
 ParsePrice = Callable[..., PriceFact | None]
+# Границы правдоподобия по паре «категория, сторона»; внедряются так же, как разбор.
+BoundsOf = Callable[[str | None, str | None], tuple[int, int] | None]
 
 
 def _outside(amount: Decimal, bounds: tuple[int, int] | None) -> bool:
@@ -162,16 +164,23 @@ def read_amount(
     return price_columns(parse(text, category=category, deal_type=deal_type), deal_type).amount
 
 
-def derive_price(listing: Listing, text: str, *, parse: ParsePrice = parse_price) -> ListingPatch:
-    """Патч цены по исходному тексту; разбор — тот же, что у новых сообщений.
+def derive_price(
+    listing: Listing,
+    text: str,
+    *,
+    parse: ParsePrice = parse_price,
+    bounds_of: BoundsOf = price_bounds,
+) -> ListingPatch:
+    """Патч цены по исходному тексту; разбор и границы — те же, что у новых сообщений.
 
-    `parse` подменяем в тестах: политика проверяется на заданных фактах, и
-    правки самого разбора её тесты не ломают.
+    `parse` и `bounds_of` подменяем в тестах: политика проверяется на заданных
+    фактах и заданных границах, и правки самого разбора или таблицы границ её
+    тесты не ломают.
     """
     fact = parse(text, category=listing.category, deal_type=listing.deal_type)
     new = price_columns(fact, listing.deal_type)
     outcome = judge(
-        listing.price_amount, new, bounds=price_bounds(listing.category, listing.deal_type)
+        listing.price_amount, new, bounds=bounds_of(listing.category, listing.deal_type)
     )
     write, remove = _attributes(listing, new, outcome)
     return ListingPatch(_columns(listing, new, outcome), write, (outcome,), remove)
@@ -182,8 +191,8 @@ class PriceDerivation:
 
     name = NAME
 
-    def __init__(self, parse: ParsePrice = parse_price) -> None:
-        self._parse = parse
+    def __init__(self, parse: ParsePrice = parse_price, bounds_of: BoundsOf = price_bounds) -> None:
+        self._parse, self._bounds_of = parse, bounds_of
 
     def derive(self, listing: Listing, text: str) -> ListingPatch:
-        return derive_price(listing, text, parse=self._parse)
+        return derive_price(listing, text, parse=self._parse, bounds_of=self._bounds_of)

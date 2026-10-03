@@ -89,3 +89,27 @@ class Parser:
     ) -> PriceFact | None:
         self.asked.append((category, deal_type))
         return self.found
+
+
+# Границы правдоподобия, заданные тестом, а не взятые из `domain/price_bounds.py`: таблицу
+# границ настраивают в ветке цены, и тесты политики не должны ломаться от её правки.
+# Числа по порядку величины те же, что в боевой таблице (аренда — миллионы в месяц,
+# продажа — сотни миллионов и миллиарды).
+RENT_BOUNDS = (2_000_000, 150_000_000)
+SELL_BOUNDS = (100_000_000, 10_000_000_000)
+BIKE_RENT_BOUNDS = (500_000, 30_000_000)
+BIKE_SELL_BOUNDS = (1_000_000, 700_000_000)
+
+_BOUNDS: dict[tuple[str | None, str | None], tuple[int, int]] = {
+    ("apartment", "rent_out"): RENT_BOUNDS,
+    ("house", "rent_out"): RENT_BOUNDS,
+    ("apartment", "sell"): SELL_BOUNDS,
+    ("house", "sell"): SELL_BOUNDS,
+    ("motorbike", "rent_out"): BIKE_RENT_BOUNDS,
+    ("motorbike", "sell"): BIKE_SELL_BOUNDS,
+}
+
+
+def bounds_of(category: str | None, deal_type: str | None) -> tuple[int, int] | None:
+    """Границы пары; для остальных (комната на продажу, велосипед…) их нет — как «неизвестно»."""
+    return _BOUNDS.get((category, deal_type))

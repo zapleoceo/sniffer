@@ -113,13 +113,3 @@ def test_the_text_is_read_under_the_pair_of_the_funnel_not_the_pair_of_the_card(
     verdict(card(category="apartment", deal_type="sell"), calls)
 
     assert calls.read_with == [("текст", "house", "rent_out")]
-
-
-def test_with_the_real_funnel_a_price_missed_under_rent_is_explained_by_the_flip_to_sale() -> None:
-    text = "Квартира в Нячанге.\nЦена: 4 390 000 000 VND"
-
-    flipped = card(category="apartment", deal_type="sell")
-    stable = card(category="apartment", deal_type="rent_out")
-
-    assert changed_by_verdict(flipped, text) is True, "под арендой 4,39 млрд — не цена"
-    assert changed_by_verdict(stable, text) is False, "пара та же, что дала бы воронка"

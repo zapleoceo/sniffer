@@ -36,7 +36,7 @@ from sniffer.pipeline.enrich_price import PriceDerivation
 from sniffer.worker import enrich as module
 from sniffer.worker.enrich import EnrichPass, write_each
 from sniffer.worker.enrich_report import END, EnrichReport
-from tests.enrich_support import fact
+from tests.enrich_support import bounds_of, fact
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("TEST_DATABASE_URL"),
@@ -67,7 +67,7 @@ def parse(
 
 
 def price_only(listing: Listing, text: str) -> ListingPatch:
-    return derive(listing, text, derivations=(PriceDerivation(parse=parse),))
+    return derive(listing, text, derivations=(PriceDerivation(parse=parse, bounds_of=bounds_of),))
 
 
 def never_by_verdict(listing: Listing, text: str) -> bool:

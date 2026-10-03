@@ -2,8 +2,9 @@
 
 Сегодня в реестре одно — цена. Факты жилья, район, заголовок и язык подключаются
 тем же способом: класс с `name` и `derive`, одна строка в `DERIVATIONS`. Тесты
-ниже держат именно этот договор, а не цену: цена проверена в
-`test_enrich_price.py`.
+ниже держат именно этот договор, а не цену: политика цены проверена в
+`test_enrich_price.py` на заданных фактах, а провод на живой разбор — в
+`test_enrich_wiring.py`. Здесь цена подставляется заглушкой там, где важны числа.
 """
 
 from __future__ import annotations
@@ -17,9 +18,14 @@ from sniffer.domain.records import Listing
 from sniffer.pipeline import enrich
 from sniffer.pipeline.enrich import DERIVATIONS, Derivation, DerivationFailed, derive
 from sniffer.pipeline.enrich_price import FILLED, PriceDerivation
-from tests.enrich_support import card
+from tests.enrich_support import Parser, bounds_of, card, fact
 
 RENT = "Oceanus, 2 спальни.\nАрендная плата: 12.5 млн VND / месяц"
+
+
+def priced() -> PriceDerivation:
+    """Вывод цены, которому разбор подсказывает 12,5 млн в месяц, а границы задаёт тест."""
+    return PriceDerivation(parse=Parser(fact(12_500_000, period="month")), bounds_of=bounds_of)
 
 
 class LangDerivation:
@@ -60,10 +66,10 @@ class Broken:
 
 
 def test_the_price_is_registered_and_the_registry_derives_it() -> None:
+    """Что именно найдено — не здесь: важно, что вывод цены в реестре и отвечает исходом."""
     patch = derive(card(), RENT)
 
-    assert patch.outcomes == (FILLED,)
-    assert patch.columns["price_amount"] == Decimal(12_500_000)
+    assert patch.outcomes and patch.outcomes[0].startswith("price.")
 
 
 def test_every_registered_derivation_has_its_own_name() -> None:
@@ -100,7 +106,7 @@ def test_a_new_derivation_joins_by_one_line_in_the_registry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Точка расширения: дописали в `DERIVATIONS` — и вывод работает, ничего не правя."""
-    monkeypatch.setattr(enrich, "DERIVATIONS", (*DERIVATIONS, LangDerivation(), AreaDerivation()))
+    monkeypatch.setattr(enrich, "DERIVATIONS", (priced(), LangDerivation(), AreaDerivation()))
 
     patch = derive(card(), RENT + "\nПлощадь 30 м²")
 
@@ -118,7 +124,7 @@ def test_the_registry_can_also_be_passed_explicitly() -> None:
 
 def test_a_derivation_cannot_take_what_another_one_already_claimed() -> None:
     with pytest.raises(DerivationFailed) as caught:
-        derive(card(), RENT, derivations=(PriceDerivation(), Greedy()))
+        derive(card(), RENT, derivations=(priced(), Greedy()))
 
     assert caught.value.derivation == "greedy"
     assert type(caught.value.__cause__).__name__ == "PatchClash"
@@ -126,7 +132,7 @@ def test_a_derivation_cannot_take_what_another_one_already_claimed() -> None:
 
 def test_a_failing_derivation_is_named_and_its_cause_is_kept() -> None:
     with pytest.raises(DerivationFailed) as caught:
-        derive(card(), RENT, derivations=(PriceDerivation(), Broken()))
+        derive(card(), RENT, derivations=(priced(), Broken()))
 
     assert caught.value.derivation == "broken"
     assert isinstance(caught.value.__cause__, ValueError)

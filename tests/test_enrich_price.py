@@ -2,19 +2,20 @@
 
 Политика записана в `pipeline/enrich_price.py` и в `docs/architecture.md`
 (5.0.4), и у каждой её строки здесь свой тест. Тесты проверяют ПОЛИТИКУ, а не
-разбор: разбор текста подменён заглушкой, которая отдаёт заданный факт, —
-поэтому правки самого разбора (ветка цены уточняется) их не ломают. Лишь пара
-тестов в конце берёт настоящий разбор, чтобы показать, что провод цел.
+разбор: разбор текста подменён заглушкой, которая отдаёт заданный факт, а границы
+правдоподобия заданы тестом (`enrich_support.bounds_of`), — поэтому правки самого
+разбора и таблицы границ (ветка цены уточняется) их не ломают. Провод на настоящий
+разбор и настоящие границы — в `test_enrich_wiring.py`, и только там.
 """
 
 from __future__ import annotations
 
 from decimal import Decimal
+from functools import partial
 
 import pytest
 
 from sniffer.domain.listing_patch import ListingPatch
-from sniffer.domain.price_bounds import price_bounds
 from sniffer.domain.prices import PriceFact
 from sniffer.pipeline.enrich_price import (
     ABSENT,
@@ -27,18 +28,15 @@ from sniffer.pipeline.enrich_price import (
     REPLACED,
     SAME,
     PriceDerivation,
-    derive_price,
     judge,
     read_amount,
 )
+from sniffer.pipeline.enrich_price import derive_price as real_derive_price
 from sniffer.pipeline.listing_price import PriceColumns, price_columns
-from tests.enrich_support import Parser, card, fact
+from tests.enrich_support import RENT_BOUNDS, Parser, bounds_of, card, fact
 
-# Квартира в аренду: границы здравого смысла, донги в месяц.
-RENT_BOUNDS = price_bounds("apartment", "rent_out")
-assert RENT_BOUNDS == (2_000_000, 150_000_000), "тесты ниже написаны под эти границы"
-SELL_BOUNDS = price_bounds("apartment", "sell")
-assert SELL_BOUNDS == (100_000_000, 10_000_000_000)
+# Вывод цены с границами теста: разбор подставляет каждый тест, границы — один раз здесь.
+derive_price = partial(real_derive_price, bounds_of=bounds_of)
 
 SOURCES = ["label", "weak", "money", "text", "footer"]
 DAILY = PriceColumns(attributes={"rate_amount": 250_000, "rate_currency": "VND", "rate_per": "day"})
@@ -109,7 +107,7 @@ def test_a_plausible_price_that_the_text_no_longer_shows_is_kept_and_counted() -
 
 def test_without_bounds_nothing_is_implausible_so_nothing_is_replaced_or_erased() -> None:
     """Для пары без границ «вне границ» не определено: старое значение остаётся."""
-    assert price_bounds("room", "sell") is None
+    assert bounds_of("room", "sell") is None
 
     assert judge(Decimal(5_500), monthly(5_500_000), bounds=None) == DISAGREED
     assert judge(Decimal(5_500), PriceColumns(), bounds=None) == LOST
@@ -261,6 +259,28 @@ def test_an_amount_outside_the_final_bounds_is_erased_when_the_text_gives_nothin
 
     assert patch.outcomes == (ERASED,)
     assert patch.columns["price_amount"] is None
+
+
+def narrow(category: str | None, deal_type: str | None) -> tuple[int, int]:
+    """Границы, при которых «5» вне, а «150» внутри: ни под какой боевой таблицей так не бывает."""
+    return 100, 200
+
+
+def test_the_derivation_judges_the_old_price_by_the_bounds_it_was_given() -> None:
+    """Границы приходят снаружи: тот же факт и та же карточка, а исход другой."""
+    listing, found = card(price=5), Parser(fact(150, period="month"))
+
+    under_narrow = real_derive_price(listing, "текст", parse=found, bounds_of=narrow)
+    under_none = real_derive_price(listing, "текст", parse=found, bounds_of=lambda c, d: None)
+
+    assert under_narrow.outcomes == (REPLACED,), "5 вне (100..200), 150 внутри"
+    assert under_none.outcomes == (DISAGREED,), "без границ «вне» не бывает"
+
+
+def test_the_registered_class_hands_its_bounds_on_to_the_derivation() -> None:
+    derivation = PriceDerivation(parse=Parser(fact(150, period="month")), bounds_of=narrow)
+
+    assert derivation.derive(card(price=5), "текст").outcomes == (REPLACED,)
 
 
 # ── атрибуты цены пересобираются из нового факта целиком ───────────────────
@@ -453,26 +473,6 @@ def test_the_patch_stays_inside_the_price_columns_and_the_price_family(
     assert (set(patch.attributes) | set(patch.remove)) <= PRICE_ATTRIBUTES
 
 
-# ── провод: настоящий разбор, настоящий текст ──────────────────────────────
-
-
-def test_the_registered_derivation_reads_the_text_with_the_real_parser() -> None:
-    patch = PriceDerivation().derive(card(), "Oceanus.\nАрендная плата: 12.5 млн VND / месяц")
-
-    assert patch.outcomes == (FILLED,)
-    assert patch.columns["price_amount"] == Decimal(12_500_000)
-
-
-def test_the_real_parser_is_asked_about_the_current_side_of_the_card() -> None:
-    text = "Квартира в Нячанге.\nЦена: 4 390 000 000 VND"
-
-    as_sale = PriceDerivation().derive(card(deal_type="sell"), text)
-    as_rent = PriceDerivation().derive(card(deal_type="rent_out"), text)
-
-    assert as_sale.outcomes == (FILLED,), "под продажей это цена"
-    assert as_rent.outcomes == (ABSENT,), "под арендой 4,39 млрд — не цена"
-
-
 # ── что дала бы колонка под другой парой ───────────────────────────────────
 
 
@@ -484,8 +484,7 @@ def test_the_amount_under_a_pair_is_what_the_price_column_would_hold() -> None:
 
 
 def test_a_rate_or_a_missing_price_leaves_the_column_empty_under_any_pair() -> None:
-    assert (
-        read_amount("текст", "motorbike", "rent_out", parse=Parser(fact(250_000, period="day")))
-        is None
-    )
+    daily = Parser(fact(250_000, period="day"))
+
+    assert read_amount("текст", "motorbike", "rent_out", parse=daily) is None
     assert read_amount("текст", "apartment", "rent_out", parse=Parser(None)) is None

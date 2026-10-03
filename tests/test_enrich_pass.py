@@ -24,7 +24,7 @@ from sniffer.pipeline.enrich import DerivationFailed, derive
 from sniffer.pipeline.enrich_price import PriceDerivation
 from sniffer.worker.enrich import MAX_ROW_WARNINGS, ByVerdict, Derive, EnrichPass, write_each
 from sniffer.worker.enrich_report import END, LIMIT, EnrichReport
-from tests.enrich_support import fact, row
+from tests.enrich_support import bounds_of, fact, row
 
 Item = tuple[ListingWithText, ListingPatch]
 
@@ -48,7 +48,7 @@ def parse(
 
 
 def price_only(listing: Listing, text: str) -> ListingPatch:
-    return derive(listing, text, derivations=(PriceDerivation(parse=parse),))
+    return derive(listing, text, derivations=(PriceDerivation(parse=parse, bounds_of=bounds_of),))
 
 
 def never_by_verdict(listing: Listing, text: str) -> bool:
