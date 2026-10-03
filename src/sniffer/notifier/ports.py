@@ -21,6 +21,7 @@ from typing import Protocol
 
 from sniffer.db.engine import session_scope
 from sniffer.db.repositories.delivery import DeliveryRepository
+from sniffer.db.repositories.users import UserRepository
 from sniffer.domain.records import OutboxMessage
 
 
@@ -35,9 +36,23 @@ class Queue(Protocol):
 
     async def mark_sent(self, message_id: int, *, now: datetime | None = None) -> None: ...
 
-    async def mark_failed(self, message_id: int, *, retry_at: datetime) -> None: ...
+    async def mark_failed(
+        self, message_id: int, *, retry_at: datetime, error: str | None = None
+    ) -> None: ...
 
-    async def give_up(self, message_id: int) -> None: ...
+    async def give_up(self, message_id: int, *, error: str | None = None) -> None: ...
+
+    async def cancel_pending_of(self, user_id: int, *, reason: str) -> int: ...
+
+    async def cancel_for_blocked_users(self, *, reason: str) -> int: ...
+
+
+class Users(Protocol):
+    """Клиенты: нотифаеру нужна одна запись — «писать этому клиенту нельзя»."""
+
+    async def set_bot_blocked(
+        self, tg_user_id: int, *, blocked: bool, at: datetime
+    ) -> int | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +60,7 @@ class Work:
     """Одна короткая транзакция: репозитории и её собственный `commit`."""
 
     queue: Queue
+    users: Users
     commit: Callable[[], Awaitable[None]]
 
 
@@ -55,4 +71,8 @@ Scope = Callable[[], AbstractAsyncContextManager[Work]]
 async def work_scope() -> AsyncIterator[Work]:
     """Боевая единица работы: своя сессия, коммит — за вызывающим."""
     async with session_scope() as session:
-        yield Work(queue=DeliveryRepository(session), commit=session.commit)
+        yield Work(
+            queue=DeliveryRepository(session),
+            users=UserRepository(session),
+            commit=session.commit,
+        )

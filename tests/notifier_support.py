@@ -19,6 +19,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sniffer.domain.records import OutboxMessage
+from sniffer.notifier.delivery import Delivery
+from sniffer.notifier.policy import Policy
 from sniffer.notifier.ports import Work
 
 START = datetime(2026, 10, 3, 12, 0, tzinfo=UTC)
@@ -64,9 +66,14 @@ class Row:
     subscription_id: int | None = None
 
 
+def tg_id(user_id: int) -> int:
+    """Telegram id клиента в тестах: 7 → 42, 8 → 43. Внутренний id и адрес — разные числа."""
+    return user_id + 35
+
+
 def digest_row(identifier: int, *, user_id: int = 7, **payload: Any) -> Row:
     body = {**PAYLOAD, "delivery_mode": "digest", "title": f"Карточка {identifier}", **payload}
-    return Row(id=identifier, user_id=user_id, recipient_id=40 + user_id, payload=body)
+    return Row(id=identifier, user_id=user_id, recipient_id=tg_id(user_id), payload=body)
 
 
 def _message(row: Row) -> OutboxMessage:
@@ -82,15 +89,23 @@ def _message(row: Row) -> OutboxMessage:
 
 
 class Store:
-    """Таблица `outbox` в памяти. `rows` — только закоммитенное."""
+    """Таблица `outbox` и метки блокировок в памяти. `rows` и `blocked` — только закоммитенное."""
 
     def __init__(self, rows: Sequence[Row] = ()) -> None:
         self.rows: dict[int, Row] = {row.id: copy.deepcopy(row) for row in rows}
+        # Кто заблокировал бота: Telegram id → когда. Это `users.bot_blocked_at`.
+        self.blocked: dict[int, datetime] = {}
         self.events: list[str] = []
         # Строки, запертые чужой транзакцией: `SKIP LOCKED` проходит мимо них.
         self.locked_elsewhere: set[int] = set()
         # Что успела сделать другая копия между планированием прохода и запиранием.
         self.before_lock: Callable[[Store], None] | None = None
+        # Отказ базы на шаге с этим именем (имя метода очереди или `commit`):
+        # исключение и сколько вызовов пропустить, прежде чем оно сработает.
+        self.failures: dict[str, tuple[BaseException, int]] = {}
+
+    def fail(self, step: str, error: BaseException, *, after: int = 0) -> None:
+        self.failures[step] = (error, after)
 
     def scope(self) -> AbstractAsyncContextManager[Work]:
         return self._scope()
@@ -99,7 +114,7 @@ class Store:
     async def _scope(self) -> AsyncIterator[Work]:
         unit = Txn(self)
         try:
-            yield Work(queue=unit, commit=unit.commit)
+            yield Work(queue=unit, users=unit, commit=unit.commit)
         finally:
             unit.close()
 
@@ -113,10 +128,23 @@ class Txn:
     def __init__(self, store: Store) -> None:
         self._store = store
         self._rows = copy.deepcopy(store.rows)
+        self._blocked = dict(store.blocked)
         self._dirty = False
 
+    def _step(self, name: str) -> None:
+        planned = self._store.failures.get(name)
+        if planned is None:
+            return
+        error, skip = planned
+        if skip > 0:
+            self._store.failures[name] = (error, skip - 1)
+            return
+        raise error
+
     async def commit(self) -> None:
+        self._step("commit")
         self._store.rows = copy.deepcopy(self._rows)
+        self._store.blocked = dict(self._blocked)
         self._store.events.append("commit")
         self._dirty = False
 
@@ -132,9 +160,11 @@ class Txn:
         return sorted(rows, key=lambda r: (r.scheduled_at, r.id))
 
     async def take_pending(self, *, limit: int, now: datetime | None = None) -> list[OutboxMessage]:
+        self._step("take_pending")
         return [_message(row) for row in self._due(now)[:limit]]
 
     async def lock_pending(self, ids: Sequence[int], *, now: datetime) -> list[OutboxMessage]:
+        self._step("lock_pending")
         if self._store.before_lock is not None:
             self._store.before_lock(self._store)
             self._rows = copy.deepcopy(self._store.rows)
@@ -145,21 +175,56 @@ class Txn:
         return [_message(row) for row in held]
 
     async def mark_sent(self, message_id: int, *, now: datetime | None = None) -> None:
+        self._step("mark_sent")
         row = self._rows[message_id]
-        row.status, row.sent_at = "sent", now
+        row.status, row.sent_at, row.last_error = "sent", now, None
         self._store.events.append(f"mark_sent:{message_id}")
         self._dirty = True
 
-    async def mark_failed(self, message_id: int, *, retry_at: datetime) -> None:
+    async def mark_failed(
+        self, message_id: int, *, retry_at: datetime, error: str | None = None
+    ) -> None:
+        self._step("mark_failed")
         row = self._rows[message_id]
-        row.attempts, row.scheduled_at = row.attempts + 1, retry_at
+        row.attempts, row.scheduled_at, row.last_error = row.attempts + 1, retry_at, error
         self._store.events.append(f"mark_failed:{message_id}")
         self._dirty = True
 
-    async def give_up(self, message_id: int) -> None:
-        self._rows[message_id].status = "failed"
+    async def give_up(self, message_id: int, *, error: str | None = None) -> None:
+        self._step("give_up")
+        row = self._rows[message_id]
+        row.status, row.attempts, row.last_error = "failed", row.attempts + 1, error
         self._store.events.append(f"give_up:{message_id}")
         self._dirty = True
+
+    async def cancel_pending_of(self, user_id: int, *, reason: str) -> int:
+        self._step("cancel_pending_of")
+        return self._cancel([r for r in self._rows.values() if r.user_id == user_id], reason)
+
+    async def cancel_for_blocked_users(self, *, reason: str) -> int:
+        self._step("cancel_for_blocked_users")
+        rows = [r for r in self._rows.values() if r.recipient_id in self._blocked]
+        return self._cancel(rows, reason)
+
+    def _cancel(self, rows: list[Row], reason: str) -> int:
+        pending = [row for row in rows if row.status == "pending"]
+        for row in pending:
+            row.status, row.last_error = "cancelled", reason
+        if pending:
+            self._store.events.append("cancel:" + ",".join(str(row.id) for row in pending))
+            self._dirty = True
+        return len(pending)
+
+    async def set_bot_blocked(self, tg_user_id: int, *, blocked: bool, at: datetime) -> int | None:
+        self._step("set_bot_blocked")
+        if blocked:
+            self._blocked.setdefault(tg_user_id, at)
+        else:
+            self._blocked.pop(tg_user_id, None)
+        self._store.events.append(f"{'block' if blocked else 'unblock'}:{tg_user_id}")
+        self._dirty = True
+        known = [row.user_id for row in self._rows.values() if row.recipient_id == tg_user_id]
+        return known[0] if known else None
 
 
 class Telegram:
@@ -191,3 +256,12 @@ class Telegram:
         if outcome is not None:
             raise outcome
         self._clock.advance(seconds=self._takes)
+
+
+def deliver(
+    store: Store, clock: Clock, *outcomes: BaseException | None, policy: Policy | None = None
+) -> tuple[Delivery, Telegram]:
+    """Нотифаер на очереди в памяти и подставном Bot API; паузы между сообщениями нет."""
+    telegram = Telegram(store, clock, *outcomes)
+    delivery = Delivery(telegram, pause_s=0.0, clock=clock, scope=store.scope, policy=policy)
+    return delivery, telegram

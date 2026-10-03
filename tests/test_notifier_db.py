@@ -29,6 +29,7 @@ from sniffer.domain.passport import Category, Intent, Passport
 from sniffer.domain.records import Listing, RawMessage
 from sniffer.notifier import ports
 from sniffer.notifier.delivery import Delivery
+from tests.bot_api_support import refusal, telegram_error
 from tests.notifier_support import PAYLOAD, Boom, Clock
 
 pytestmark = pytest.mark.skipif(
@@ -82,8 +83,8 @@ async def _rows(session: AsyncSession, user_ids: list[int], **overrides: object)
     return [row.id for row in rows]
 
 
-async def _queued(session: AsyncSession) -> tuple[int, int]:
-    """Одна карточка, поставленная в очередь настоящим `enqueue`: (outbox, notification)."""
+async def _subscriber(session: AsyncSession) -> tuple[int, int]:
+    """Клиент (Telegram id 555) с подпиской на свой паспорт: (users.id, subscriptions.id)."""
     user = await UserRepository(session).get_or_create(555, username="подписчик")
     assert user.id is not None
     passport = Passport(intent=Intent.BUY, category=Category.MOTORBIKE, city="nha_trang")
@@ -92,6 +93,13 @@ async def _queued(session: AsyncSession) -> tuple[int, int]:
     subscription = models.Subscription(user_id=user.id, passport_root=stored.id)
     session.add(subscription)
     await session.flush()
+    assert subscription.id is not None
+    return user.id, subscription.id
+
+
+async def _queued(session: AsyncSession) -> tuple[int, int]:
+    """Одна карточка, поставленная в очередь настоящим `enqueue`: (outbox, notification)."""
+    user_id, subscription_id = await _subscriber(session)
     raw = RawMessage(
         chat_tg_id=-100123, msg_id=1, text="Продам Honda Vision", text_hash="hash-1", posted_at=NOW
     )
@@ -108,10 +116,10 @@ async def _queued(session: AsyncSession) -> tuple[int, int]:
             posted_at=NOW,
         )
     )
-    assert card.id is not None and subscription.id is not None
+    assert card.id is not None
     await DeliveryRepository(session).enqueue(
-        subscription_id=subscription.id,
-        user_id=user.id,
+        subscription_id=subscription_id,
+        user_id=user_id,
         listing_id=card.id,
         score=0.9,
         payload=dict(PAYLOAD),
@@ -217,3 +225,131 @@ async def test_delivery_commits_each_message_on_a_real_database(
     assert second.attempts == 1
     assert first.sent_at == NOW + timedelta(seconds=1)
     assert third.sent_at == NOW + timedelta(seconds=2)
+
+
+# ── отказ Telegram, причина и блокировка ────────────────────────────────────
+
+
+async def test_give_up_and_mark_failed_keep_the_reason_and_count_the_attempt(
+    db_session: AsyncSession,
+) -> None:
+    first, second = await _rows(db_session, await _clients(db_session, 2))
+    repo = DeliveryRepository(db_session)
+
+    await repo.mark_failed(first, retry_at=NOW + timedelta(minutes=1), error="transient: сеть")
+    await repo.give_up(second, error="too_long: ...")
+    await db_session.commit()
+
+    retried = await db_session.get(models.Outbox, first)
+    refused = await db_session.get(models.Outbox, second)
+    assert retried is not None and refused is not None
+    assert (retried.status, retried.attempts, retried.last_error) == (
+        "pending",
+        1,
+        "transient: сеть",
+    )
+    assert (refused.status, refused.attempts, refused.last_error) == ("failed", 1, "too_long: ...")
+
+
+async def test_mark_sent_clears_the_reason_of_an_earlier_failure(db_session: AsyncSession) -> None:
+    (row_id,) = await _rows(db_session, await _clients(db_session, 1), last_error="transient: сеть")
+
+    await DeliveryRepository(db_session).mark_sent(row_id, now=NOW)
+    await db_session.commit()
+
+    row = await db_session.get(models.Outbox, row_id)
+    assert row is not None and (row.status, row.last_error) == ("sent", None)
+
+
+async def test_cancelling_a_clients_queue_leaves_everyone_elses_and_sent_rows_alone(
+    db_session: AsyncSession,
+) -> None:
+    mine, other = await _clients(db_session, 2)
+    (waiting,) = await _rows(db_session, [mine])
+    (delivered,) = await _rows(db_session, [mine], status="sent")
+    (strangers,) = await _rows(db_session, [other])
+
+    cancelled = await DeliveryRepository(db_session).cancel_pending_of(mine, reason="forbidden")
+    await db_session.commit()
+
+    assert cancelled == 1
+    rows = {row.id: row for row in await db_session.scalars(select(models.Outbox))}
+    assert (rows[waiting].status, rows[waiting].last_error) == ("cancelled", "forbidden")
+    assert rows[delivered].status == "sent" and rows[strangers].status == "pending"
+
+
+async def test_blocking_keeps_the_first_moment_and_unblocking_clears_it(
+    db_session: AsyncSession,
+) -> None:
+    users = UserRepository(db_session)
+    (user_id,) = await _clients(db_session, 1)
+    first, later = NOW, NOW + timedelta(hours=1)
+
+    assert await users.set_bot_blocked(900, blocked=True, at=first) == user_id
+    await users.set_bot_blocked(900, blocked=True, at=later)
+    await db_session.commit()
+    blocked = await db_session.get(models.User, user_id)
+    assert blocked is not None and blocked.bot_blocked_at == first, "повтор отказа сдвинул момент"
+
+    await users.set_bot_blocked(900, blocked=False, at=later)
+    await db_session.commit()
+    await db_session.refresh(blocked)
+    assert blocked.bot_blocked_at is None
+    assert await users.set_bot_blocked(123456, blocked=True, at=first) is None, "чужого не заводим"
+
+
+async def test_rows_queued_after_the_block_are_cancelled_by_the_sweep(
+    db_session: AsyncSession,
+) -> None:
+    blocked_id, fine_id = await _clients(db_session, 2)
+    await UserRepository(db_session).set_bot_blocked(900, blocked=True, at=NOW)
+    (stray,) = await _rows(db_session, [blocked_id])
+    (healthy,) = await _rows(db_session, [fine_id])
+
+    cancelled = await DeliveryRepository(db_session).cancel_for_blocked_users(reason="bot_blocked")
+    await db_session.commit()
+
+    assert cancelled == 1
+    rows = {row.id: row for row in await db_session.scalars(select(models.Outbox))}
+    assert (rows[stray].status, rows[stray].last_error) == ("cancelled", "bot_blocked")
+    assert rows[healthy].status == "pending"
+
+
+async def test_the_matcher_selection_skips_a_blocked_client_and_resumes_after_unblocking(
+    db_session: AsyncSession,
+) -> None:
+    """Пауза слежения выведена запросом: разблокировал — возобновилось само, подписка цела."""
+    _, subscription_id = await _subscriber(db_session)
+    await db_session.commit()
+    repo, users = DeliveryRepository(db_session), UserRepository(db_session)
+    assert [item.id for item in await repo.active_subscriptions()] == [subscription_id]
+
+    await users.set_bot_blocked(555, blocked=True, at=NOW)
+    await db_session.commit()
+    assert await repo.active_subscriptions() == []
+
+    await users.set_bot_blocked(555, blocked=False, at=NOW)
+    await db_session.commit()
+    assert [item.id for item in await repo.active_subscriptions()] == [subscription_id]
+
+
+async def test_a_403_on_a_real_database_blocks_the_client_and_cancels_their_queue(
+    db_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ports, "session_scope", lambda: _own_session(db_engine))
+    async with _own_session(db_engine) as setup:
+        mine, other = await _clients(setup, 2)
+        ids = await _rows(setup, [mine, mine, other])
+    clock = Clock(NOW)
+    forbidden = telegram_error(refusal(403, "Forbidden: bot was blocked by the user"))
+    telegram = Recorder(clock, forbidden)
+
+    assert await Delivery(telegram, pause_s=0.0, clock=clock).tick(now=NOW) == 1
+
+    async with _own_session(db_engine) as check:
+        rows = {row.id: row for row in await check.scalars(select(models.Outbox))}
+        user = await check.get(models.User, mine)
+    assert [rows[i].status for i in ids] == ["cancelled", "cancelled", "sent"]
+    assert (rows[ids[0]].last_error or "").startswith("forbidden")
+    assert user is not None and user.bot_blocked_at == NOW
+    assert telegram.recipients == [900, 901], "второе сообщение заблокировавшего не отправлялось"

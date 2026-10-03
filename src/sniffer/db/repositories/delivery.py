@@ -24,6 +24,7 @@ from sniffer.domain.records import OutboxMessage, Payment, SubscriptionState
 OUTBOX_PENDING = "pending"
 OUTBOX_SENT = "sent"
 OUTBOX_FAILED = "failed"
+OUTBOX_CANCELLED = "cancelled"
 
 
 class DeliveryRepository(Repository):
@@ -40,9 +41,15 @@ class DeliveryRepository(Repository):
         rows = await self._session.execute(
             select(models.Subscription, models.Passport)
             .join(models.Passport, chain == models.Subscription.passport_root)
+            .join(models.User, models.User.id == models.Subscription.user_id)
             .where(
                 models.Subscription.is_active.is_(True),
                 models.Passport.is_current.is_(True),
+                # Клиент заблокировал бота: слать ему нечем, и ставить в очередь
+                # незачем. Пауза выведена запросом, а не записана в подписку:
+                # разблокировал — слежение возобновилось само, ручная пауза
+                # (`is_active`) не затронута, срок и курсор целы.
+                models.User.bot_blocked_at.is_(None),
                 # Оплачена по сегодня. Проверка здесь, а не отдельным сторожем,
                 # который «должен» вовремя выключить подписку: пропущенный
                 # проход такого сторожа означал бы бесплатную рассылку, а
@@ -165,7 +172,7 @@ class DeliveryRepository(Repository):
         await self._session.execute(
             update(models.Outbox)
             .where(models.Outbox.id == message_id)
-            .values(status=OUTBOX_SENT, sent_at=moment)
+            .values(status=OUTBOX_SENT, sent_at=moment, last_error=None)
         )
         if notification_id is not None:
             await self._session.execute(
@@ -174,7 +181,9 @@ class DeliveryRepository(Repository):
                 .values(sent_at=moment)
             )
 
-    async def mark_failed(self, message_id: int, *, retry_at: datetime) -> None:
+    async def mark_failed(
+        self, message_id: int, *, retry_at: datetime, error: str | None = None
+    ) -> None:
         """Не ушло — вернуть в очередь позже, счётчик попыток вверх.
 
         Статус остаётся `pending`: `failed` означал бы «больше не пробуем», а
@@ -183,14 +192,57 @@ class DeliveryRepository(Repository):
         await self._session.execute(
             update(models.Outbox)
             .where(models.Outbox.id == message_id)
-            .values(attempts=models.Outbox.attempts + 1, scheduled_at=retry_at)
+            .values(
+                attempts=models.Outbox.attempts + 1,
+                scheduled_at=retry_at,
+                last_error=error,
+            )
         )
 
-    async def give_up(self, message_id: int) -> None:
-        """Попытки исчерпаны. Единственное место, где ставится `failed`."""
+    async def give_up(self, message_id: int, *, error: str | None = None) -> None:
+        """Больше не пробуем: Telegram отказал сообщению или попытки кончились.
+
+        Попытка засчитана и здесь: по `attempts` потом видно, сколько раз мы
+        стучались, а не «на одну меньше». Статус `failed` — это отказ, а решение
+        не слать (просрочено, клиент заблокировал бота) называется `cancelled`.
+        """
         await self._session.execute(
-            update(models.Outbox).where(models.Outbox.id == message_id).values(status=OUTBOX_FAILED)
+            update(models.Outbox)
+            .where(models.Outbox.id == message_id)
+            .values(
+                status=OUTBOX_FAILED,
+                attempts=models.Outbox.attempts + 1,
+                last_error=error,
+            )
         )
+
+    async def cancel_pending_of(self, user_id: int, *, reason: str) -> int:
+        """Отменить всё, что ждёт отправки этому клиенту. Возврат — сколько строк.
+
+        Вызывается, когда Telegram сказал, что писать клиенту нельзя: остальные
+        его строки отправятся с тем же отказом, и каждая такая попытка — лишний
+        запрос к Bot API. Отменяем, а не `failed`: это наше решение не слать.
+        """
+        return await self._cancel(models.Outbox.user_id == user_id, reason=reason)
+
+    async def cancel_for_blocked_users(self, *, reason: str) -> int:
+        """Отменить очередь тех, кто заблокировал бота, — в том числе строки, поставленные позже.
+
+        Метку ставит и нотифаер (по 403), и бот (по `my_chat_member`), а очередь
+        наполняют и матчер, и сборщик отложенных ответов: ни один из них не
+        обязан помнить про блокировку. Проход нотифаера подчищает за всеми.
+        """
+        blocked = select(models.User.id).where(models.User.bot_blocked_at.is_not(None))
+        return await self._cancel(models.Outbox.user_id.in_(blocked), reason=reason)
+
+    async def _cancel(self, *conditions: Any, reason: str) -> int:
+        done = await self._session.execute(
+            update(models.Outbox)
+            .where(models.Outbox.status == OUTBOX_PENDING, *conditions)
+            .values(status=OUTBOX_CANCELLED, last_error=reason)
+            .returning(models.Outbox.id)
+        )
+        return len(done.all())
 
     async def sent_since(self, subscription_id: int, *, since: datetime) -> int:
         """Сколько ушло по подписке с этого момента — суточный лимит.

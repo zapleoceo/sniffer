@@ -17,8 +17,10 @@ from typing import Any
 import pytest
 
 from sniffer.db.repositories.delivery import DeliveryRepository
-from sniffer.notifier.delivery import MAX_ATTEMPTS, RETRY_AFTER, Delivery, render
-from sniffer.notifier.ports import Queue
+from sniffer.db.repositories.users import UserRepository
+from sniffer.notifier.delivery import MAX_ATTEMPTS, Delivery, render
+from sniffer.notifier.policy import Policy, backoff
+from sniffer.notifier.ports import Queue, Users
 from tests.notifier_support import (
     PAYLOAD,
     START,
@@ -28,6 +30,7 @@ from tests.notifier_support import (
     Store,
     Telegram,
     Txn,
+    deliver,
     digest_row,
 )
 
@@ -40,13 +43,6 @@ def no_waiting(monkeypatch: pytest.MonkeyPatch) -> None:
         return None
 
     monkeypatch.setattr("asyncio.sleep", instantly)
-
-
-def deliver(
-    store: Store, clock: Clock, *outcomes: BaseException | None
-) -> tuple[Delivery, Telegram]:
-    telegram = Telegram(store, clock, *outcomes)
-    return Delivery(telegram, pause_s=0.0, clock=clock, scope=store.scope), telegram
 
 
 async def test_a_delivered_message_leaves_the_queue() -> None:
@@ -68,7 +64,7 @@ async def test_a_failed_send_comes_back_later_instead_of_vanishing() -> None:
 
     row = store.row(1)
     assert row.status == "pending" and row.attempts == 1
-    assert row.scheduled_at == START + RETRY_AFTER
+    assert row.scheduled_at == START + backoff(Policy(), 0)
 
 
 async def test_after_the_last_attempt_the_message_is_given_up() -> None:
@@ -115,6 +111,7 @@ async def test_every_message_is_committed_before_the_next_one_is_sent() -> None:
     await delivery.tick()
 
     assert store.events == [
+        "commit",  # уборка очереди перед выборкой — отдельная короткая транзакция
         "lock:1",
         "send:42",
         "mark_sent:1",
@@ -263,8 +260,8 @@ def test_collection_result_is_structured_and_escapes_every_field() -> None:
 # ── подмена очереди не врёт про настоящую ───────────────────────────────────
 
 
-def _queue_methods() -> list[str]:
-    return [name for name, member in vars(Queue).items() if inspect.iscoroutinefunction(member)]
+def _methods(protocol: type) -> list[str]:
+    return [name for name, member in vars(protocol).items() if inspect.iscoroutinefunction(member)]
 
 
 def _shape(function: Callable[..., Any]) -> list[tuple[str, object]]:
@@ -272,12 +269,17 @@ def _shape(function: Callable[..., Any]) -> list[tuple[str, object]]:
     return [(p.name, p.kind) for p in parameters if p.name != "self"]
 
 
-def test_the_fake_queue_has_the_same_methods_and_signatures_as_the_real_one() -> None:
+@pytest.mark.parametrize(
+    ("protocol", "real"), [(Queue, DeliveryRepository), (Users, UserRepository)], ids=str
+)
+def test_the_fake_has_the_same_methods_and_signatures_as_the_real_repository(
+    protocol: type, real: type
+) -> None:
     """Заглушка, принимающая что угодно, делает тест зелёным при любой ошибке вызова.
 
     Правило 5 из CLAUDE.md: ловится тем же способом, что и всё остальное — сверкой
     с настоящим. Репозиторий и подмена обязаны отвечать на одни и те же вызовы.
     """
-    assert _queue_methods(), "у протокола нет методов: сверять нечего"
-    for name in _queue_methods():
-        assert _shape(getattr(Txn, name)) == _shape(getattr(DeliveryRepository, name)), name
+    assert _methods(protocol), "у протокола нет методов: сверять нечего"
+    for name in _methods(protocol):
+        assert _shape(getattr(Txn, name)) == _shape(getattr(real, name)), name
