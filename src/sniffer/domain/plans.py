@@ -43,3 +43,17 @@ def card_cap(slots: int) -> int:
     if slots < 0:
         raise ValueError("число слотов не бывает отрицательным")
     return PAID_CARDS_PER_PERIOD if slots >= 1 else FREE_CARDS_PER_PERIOD
+
+
+# Сколько поисков (не убранных) держит аккаунт: решение владельца 03.10.2026. Предел
+# нужен, потому что каждый поиск стоит разбора и обхода базы, а у платного клиента слот
+# слежения не должен упираться в тесное число вкладок.
+FREE_SEARCHES = 5
+PAID_SEARCHES = 10
+
+
+def search_cap(slots: int) -> int:
+    """Предел поисков по числу живых подписок: хотя бы одна — 10, иначе 5."""
+    if slots < 0:
+        raise ValueError("число слотов не бывает отрицательным")
+    return PAID_SEARCHES if slots >= 1 else FREE_SEARCHES

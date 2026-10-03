@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import Select, and_, func, or_, select, update
+from sqlalchemy import ColumnElement, Select, and_, exists, func, or_, select, update
 
 from sniffer.db import models
 from sniffer.db.mappers import passport_values, to_passport_event, to_stored_passport
@@ -18,6 +18,20 @@ from sniffer.db.repositories.base import Repository
 from sniffer.domain.passport import Passport
 from sniffer.domain.records import PassportEvent, QueryOverview, StoredPassport
 from sniffer.domain.threads import MAX_LIVE_THREADS
+
+
+def not_archived() -> ColumnElement[bool]:
+    """Поиск не убран человеком («Удалить поиск» = пауза и архив, версии остаются).
+
+    Один предикат на список, выбор текущего и поиск по корню: убранный поиск не должен
+    вернуться ни как «текущий», ни как строка меню, ни как цель кнопки со старого сообщения.
+    """
+    chain = func.coalesce(models.Passport.root_id, models.Passport.id)
+    return ~exists().where(
+        models.SearchTab.user_id == models.Passport.user_id,
+        models.SearchTab.passport_root == chain,
+        models.SearchTab.state == models.tabs.ARCHIVED,
+    )
 
 
 class PassportRepository(Repository):
@@ -36,7 +50,11 @@ class PassportRepository(Repository):
             select(models.User.active_passport_root).where(models.User.id == user_id)
         )
         chain = func.coalesce(models.Passport.root_id, models.Passport.id)
-        conditions = [models.Passport.user_id == user_id, models.Passport.is_current.is_(True)]
+        conditions = [
+            models.Passport.user_id == user_id,
+            models.Passport.is_current.is_(True),
+            not_archived(),
+        ]
         if active is not None:
             conditions.append(chain == active)
         row = await self._session.scalar(
@@ -265,7 +283,11 @@ def _overviews(user_id: int) -> Select[tuple[models.Passport, models.Subscriptio
                 models.Subscription.user_id == user_id, models.Subscription.passport_root == chain
             ),
         )
-        .where(models.Passport.user_id == user_id, models.Passport.is_current.is_(True))
+        .where(
+            models.Passport.user_id == user_id,
+            models.Passport.is_current.is_(True),
+            not_archived(),
+        )
     )
 
 

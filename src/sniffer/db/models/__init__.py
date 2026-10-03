@@ -33,6 +33,7 @@ from sniffer.db.models.observability import (
 from sniffer.db.models.proposals import proposals
 from sniffer.db.models.quota import OfferView, QuotaPeriod
 from sniffer.db.models.sources import Chat, RawMessage, Seller
+from sniffer.db.models.tabs import SearchTab
 
 __all__ = [
     "EMBEDDING_DIM",
@@ -57,6 +58,7 @@ __all__ = [
     "Payment",
     "QuotaPeriod",
     "RawMessage",
+    "SearchTab",
     "Seller",
     "Subscription",
     "TelegramSession",

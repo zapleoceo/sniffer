@@ -14,7 +14,7 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.types import BotCommand
 
 from sniffer.bot.billing_wording import COMMANDS
-from sniffer.bot.handlers import billing, membership, search
+from sniffer.bot.handlers import billing, membership, search, watch
 from sniffer.bot.reachability import MarkReachable
 from sniffer.config import Settings, get_settings
 from sniffer.runtime.service import Service
@@ -44,6 +44,9 @@ def build_dispatcher() -> Dispatcher:
     # числе команды, и без этого порядка `/paysupport` — обязательная по ToS Telegram —
     # уходила бы в поиск как поисковая фраза.
     dispatcher.include_router(billing.router)
+    # Панель слежений - ДО диалога: текстовый обработчик диалога ловит всё, и `/watch`
+    # ушла бы в поиск как фраза.
+    dispatcher.include_router(watch.router)
     dispatcher.include_router(search.router)
     dispatcher.include_router(membership.router)
     return dispatcher

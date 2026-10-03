@@ -1077,6 +1077,7 @@ def test_dispatcher_knows_the_dialog() -> None:
     # Оплата ДО диалога: `F.text` диалога ловит всё, в том числе команды.
     assert [router.name for router in dispatcher.sub_routers] == [
         "billing",
+        "watch",
         "search",
         "membership",
     ]

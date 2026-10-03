@@ -184,6 +184,7 @@ payments          period_end             # срок от Telegram, не наша
 payments          refunded_at            # когда вернули
 payments          raw                    # SuccessfulPayment как пришёл
 schema_proposals                         # хвост цепочки на момент введения таблицы (004)
+search_tabs                              # вкладки поиска и архив «Удалить поиск» (015)
 SENTINELS
 }
 
