@@ -20,8 +20,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Collection, Sequence
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
@@ -176,6 +176,19 @@ class QuotaService:
             await self._ledger.release(admission.ticket)
         except Exception as exc:
             log.warning("quota.release_failed", kind=type(exc).__name__, error=str(exc))
+
+    async def settle_partial(self, admission: Admission, delivered: Collection[int]) -> None:
+        """Страница ушла не вся: ушедшие карточки остаются показом, остальные слоты возвращаются.
+
+        Целиком вернуть резерв здесь нельзя: клиент часть карточек уже видел, и снятое
+        списание дарило бы их бесплатно. Нельзя и подтвердить целиком — недоставленное
+        списалось бы за невиданное.
+        """
+        if admission.ticket is None:
+            return
+        done, rest = admission.ticket.split(delivered)
+        await self.confirm(replace(admission, ticket=done))
+        await self.release(replace(admission, ticket=rest))
 
     async def standing(self, account: Account, *, now: datetime | None = None) -> Standing:
         """Занято, потолок и дата обновления — для `/plan`. Только чтение."""

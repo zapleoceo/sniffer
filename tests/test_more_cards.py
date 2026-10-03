@@ -270,3 +270,68 @@ async def test_a_snapshot_keeps_the_order_the_client_saw() -> None:
     snapshot: Snapshot | None = shop.snapshots.get(token)
     assert snapshot is not None
     assert [item.external_id for item in snapshot.items][:4] == ["0", "1", "4", "5"]
+
+
+class FailsAfter(Sent):
+    """Первые `ok` сообщений уходят, следующее — отказ Telegram."""
+
+    def __init__(self, ok: int) -> None:
+        super().__init__()
+        self.ok = ok
+
+    async def __call__(self, reply: Reply) -> None:
+        if len(self.replies) >= self.ok:
+            raise ConnectionError("telegram недоступен")
+        self.replies.append(reply)
+
+
+def long_lots(count: int) -> list[RawItem]:
+    items = [lot(n) for n in range(count)]
+    for item in items:
+        item.title = "Очень длинное название лота " * 4
+    return items
+
+
+async def test_a_half_delivered_page_releases_only_the_undelivered_cards() -> None:
+    """Карточки уже ушедшего сообщения клиент видел — списание остаётся, остальное возвращается."""
+    shop = Shop(slots=1)
+    token = shop.token(await shop.first(long_lots(60)))
+    before = await shop.used()
+    out = FailsAfter(1)
+    with pytest.raises(ConnectionError):
+        await shop.press(token, "all", 5, out)
+    delivered = out.cards
+    assert 0 < delivered < SHOW_ALL_CAP
+    assert await shop.used() == before + delivered
+    snapshot = shop.snapshots.get(token)
+    assert snapshot is not None and snapshot.cursor == 5, (
+        "курсор вернулся: страницу можно повторить"
+    )
+
+
+async def test_a_presenter_failure_gives_the_reserved_slots_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shop = Shop(slots=1)
+    token = shop.token(await shop.first([lot(n) for n in range(12)]))
+    before = await shop.used()
+
+    def boom(*_args: object, **_kwargs: object) -> list[Reply]:
+        raise RuntimeError("презентер упал")
+
+    monkeypatch.setattr(more_cards, "present_page", boom)
+    with pytest.raises(RuntimeError):
+        await shop.press(token, "more", 5)
+    assert await shop.used() == before
+
+
+async def test_the_cursor_stops_in_front_of_the_cards_the_quota_held_back() -> None:
+    shop = Shop(slots=0)
+    token = shop.token(await shop.first([lot(n) for n in range(14)]))
+    outcome, page = await shop.press(token, "all", 5)
+    assert outcome is more_cards.Result.SHOWN and page.cards == 5
+    snapshot = shop.snapshots.get(token)
+    assert snapshot is not None
+    assert snapshot.cursor == FREE_CARDS_PER_PERIOD, (
+        "курсор на первой удержанной, а не в конце снимка"
+    )

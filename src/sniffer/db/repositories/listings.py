@@ -129,10 +129,14 @@ class ListingRepository(Repository):
         rows = await self._session.scalars(statement.order_by(models.Listing.id).limit(limit))
         return [to_listing(row) for row in rows]
 
-    async def first_unready_id(
-        self, spec: MatchFilter, *, after_id: int, verdict_before: datetime
-    ) -> int | None:
-        """Наименьший `id` подходящей по условиям карточки, которой ещё нельзя доверять.
+    async def first_unready_id(self, *, after_id: int, verdict_before: datetime) -> int | None:
+        """Наименьший `id` карточки, которой ещё нельзя доверять, — среди ВСЕХ карточек.
+
+        Условия подписки (категория, сделка, свойства) здесь нарочно не применяются:
+        ИИ-проверка и перекатегоризация меняют ровно эти поля, и карточка, пока
+        неподходящая, после смены категории стала бы подходящей — а курсор к тому
+        времени уже ушёл бы за неё, и она потерялась бы навсегда (ревью Opus, P5).
+        Цена — задержка не дольше `VERDICT_WAIT` у всех слотов сразу.
 
         Доверять можно карточке, о которой модель-проверяющая уже высказалась
         (`screened_at`), которую она не читает вовсе (не из архива Telegram), либо которая
@@ -140,16 +144,8 @@ class ListingRepository(Repository):
         слежение, не дожидаясь её, слало бы клиенту «обмен валют» (D9). Курсор встанет
         перед такой карточкой и вернётся к ней, когда вердикт появится или срок выйдет.
         """
-        listing = models.Listing
-        unready = and_(
-            listing.screened_at.is_(None),
-            listing.source == "telegram_archive",
-            listing.extracted_at > verdict_before,
-        )
         found = await self._session.scalar(
-            _filtered(spec)
-            .with_only_columns(func.min(listing.id))
-            .where(listing.id > after_id, unready)
+            unready_statement(after_id=after_id, verdict_before=verdict_before)
         )
         return int(found) if found is not None else None
 
@@ -350,6 +346,18 @@ class ListingRepository(Repository):
         await self._session.execute(
             update(models.Listing).where(models.Listing.id == listing_id).values(is_active=False)
         )
+
+
+def unready_statement(*, after_id: int, verdict_before: datetime) -> Select[Any]:
+    """Запрос первой карточки без вердикта; отдельно, чтобы тест видел его форму без базы."""
+    listing = models.Listing
+    return select(func.min(listing.id)).where(
+        listing.id > after_id,
+        listing.is_active.is_(True),
+        listing.screened_at.is_(None),
+        listing.source == "telegram_archive",
+        listing.extracted_at > verdict_before,
+    )
 
 
 def _filtered(spec: MatchFilter) -> Select[Any]:

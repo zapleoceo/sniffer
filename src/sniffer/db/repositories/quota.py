@@ -107,6 +107,22 @@ class QuotaRepository(Repository):
             )
         return Reserved(period_id=period_id, period=period, decision=decision)
 
+    async def reserve_if_started(self, claim: Claim) -> bool:
+        """Резерв слежения — только когда период клиента уже начат другим показом.
+
+        Слежение само период не начинает: его карточка может не дойти (тихие часы, отмена
+        очереди), а якорь, поставленный при постановке в очередь, сжёг бы клиенту
+        бесплатный период ни за что. Нет якоря — ничего не пишем: якорь поставит ДОСТАВКА
+        (`DeliveryRepository.mark_sent`), тем же `reserve`.
+        """
+        anchor = await self._session.scalar(
+            select(models.User.quota_anchor_at).where(models.User.id == claim.user_id)
+        )
+        if anchor is None:
+            return False
+        await self.reserve(claim)
+        return True
+
     async def _anchor(self, user_id: int, now: datetime) -> datetime:
         row = (
             await self._session.execute(

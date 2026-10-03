@@ -231,3 +231,12 @@ def test_the_planner_runs_only_on_the_cheap_local_catalog(
 
     monkeypatch.setattr(handler, "get_settings", lambda: SimpleNamespace(catalog_mode=mode))
     assert isinstance(handler._planner(), ClarificationPlanner) is enabled
+
+
+def test_editing_the_query_resets_show_all() -> None:
+    """Правка запроса — новый вопрос к базе: прежний отказ сужать к нему не относится."""
+    state = advance(DialogueState(), "manual_edit", {"field": "x", "show_all": True})
+    assert not advance(state, "manual_edit", {"field": "query", "value": "другое"}).show_all
+    assert not advance(state, "manual_edit", {"field": "budget.max", "text": "до 5 млн"}).show_all
+    assert not advance(state, "user_message", {"correction": "не X, а Y"}).show_all
+    assert advance(state, "manual_edit", {"field": "x", "skipped": True}).show_all

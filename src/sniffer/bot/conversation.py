@@ -54,6 +54,7 @@ from sniffer.domain.facets import facets_from
 from sniffer.domain.passport import Passport
 from sniffer.search.answers import interpret, is_skip
 from sniffer.search.currency import usd_vnd_rate
+from sniffer.search.facet_check import answer_survivor
 from sniffer.search.intake import QueryIntake
 from sniffer.search.intake_rules import parse_query
 from sniffer.search.live import run_plan
@@ -94,6 +95,8 @@ class Found:
     deferred: bool = False
     # Источник отдал ровно потолок своей выборки: найдено не меньше, чем items, а не ровно столько.
     capped: bool = False
+    # Курс, по которому отсеян бюджет в USD: им же проверяют кнопки сужения.
+    usd_vnd: float | None = None
 
 
 class Recorder(Protocol):
@@ -619,7 +622,12 @@ class Conversation:
         if turn is not None:
             turn.found = found
         if self._planner is not None and not found.deferred and found.items:
-            step = self._planner.decide(passport, facets_from(found.items), dialogue.state)
+            report = facets_from(
+                found.items,
+                survives=answer_survivor(passport, found.usd_vnd),
+                capped=found.capped,
+            )
+            step = self._planner.decide(passport, report, dialogue.state)
             if isinstance(step, Ask):
                 await self._ask(dialogue, step.question, send)
                 return

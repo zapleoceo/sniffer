@@ -58,3 +58,24 @@ def test_by_default_the_old_price_is_judged_by_the_real_bounds_table() -> None:
 
     assert by_class.outcomes == (REPLACED,)
     assert by_function.outcomes == (REPLACED,)
+
+
+AN_HOME_STUDIO = (
+    "AN-HOME | аренда начинается здесь…\n🌿 Студия в Центре Нячанга 🌴\n📍 Локация:\n"
+    "• Центр Нячанга\n• ЖК The Sanhome 1\n🟢 О квартире:\n• Студия\n• Площадь: 26,3 м²\n"
+    "🟡 Условия аренды:\n• Цена: 1.5 млн VND / месяц\n"
+)
+
+
+def test_a_studio_at_one_and_a_half_million_is_a_leftover_and_the_pass_erases_it() -> None:
+    """Живой диалог 04.10.2026: «1 500 000» у AN-HOME ниже пола аренды квартиры (2 млн).
+
+    Нынешний разбор такую цену из текста не отдаёт, значит в базе она осталась от прежнего
+    разбора, и проход догона (`enrich`) её стирает — а не оставляет как «известную цену».
+    """
+    from sniffer.pipeline.enrich_price import ERASED
+
+    patch = derive_price(card(price=1_500_000), AN_HOME_STUDIO)
+
+    assert patch.outcomes == (ERASED,)
+    assert patch.columns["price_amount"] is None

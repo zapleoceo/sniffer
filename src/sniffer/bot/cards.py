@@ -83,26 +83,35 @@ _TAG = re.compile(r"<[^>]*>")
 
 def visible_len(markup: str) -> int:
     """Длина так, как её считает Telegram: после разбора разметки, `&amp;` — один знак."""
-    return len(unescape(_TAG.sub("", markup)))
+    # Лимит Telegram считается в единицах UTF-16: эмодзи вне базовой плоскости — две.
+    return len(unescape(_TAG.sub("", markup)).encode("utf-16-le")) // 2
 
 
 def chunk(blocks: Sequence[str], *, head: str = "", limit: int = MESSAGE_LIMIT) -> list[str]:
+    """Карточки по сообщениям (см. `pack`), без счётчиков."""
+    return [text for text, _ in pack(blocks, head=head, limit=limit)]
+
+
+def pack(
+    blocks: Sequence[str], *, head: str = "", limit: int = MESSAGE_LIMIT
+) -> list[tuple[str, int]]:
     """Карточки по сообщениям: режем по границе карточки, а не по знаку.
 
     Лимит 4096 нельзя проверить глазами, а отказ Telegram бьёт по всему сообщению, а не по
     лишней карточке. `head` едет только в первом сообщении. Одна карточка длиннее лимита
     невозможна: заголовок, цена и факты обрезаны выше.
     """
-    messages: list[str] = []
-    current = head
+    messages: list[tuple[str, int]] = []
+    current, count = head, 0
     for block in blocks:
         joined = f"{current}\n\n{block}" if current else block
         if current and visible_len(joined) > limit:
-            messages.append(current)
-            joined = block
+            messages.append((current, count))
+            joined, count = block, 0
         current = joined
+        count += 1
     if current:
-        messages.append(current)
+        messages.append((current, count))
     return messages
 
 

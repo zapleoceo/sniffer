@@ -49,6 +49,8 @@ class Question:
     skippable: bool = True
     skip_label: str = SKIP_LABEL
     show_all: int | None = None
+    # Подходящих не меньше `show_all`: источник упёрся в потолок выборки.
+    capped: bool = False
 
     @property
     def buttons(self) -> tuple[Option, ...]:
@@ -57,5 +59,6 @@ class Question:
         if self.skippable:
             extra.append(Option(self.skip_label, SKIP))
         if self.show_all is not None:
-            extra.append(Option(f"Показать все {self.show_all}", SHOW_ALL))
+            count = f"не меньше {self.show_all}" if self.capped else str(self.show_all)
+            extra.append(Option(f"Показать все {count}", SHOW_ALL))
         return (*self.options, *extra)

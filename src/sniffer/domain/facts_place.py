@@ -17,8 +17,9 @@ Phước Hải. Названа улица («Trần Phú», «Hùng Vương») �
 расстояние до центра, а не положение лота («10 минут до центра города»).
 
 Город названного места не равен городу карточки, и это нарочно: так видно, что нячангская
-карточка называет Hải Châu. Менять `city` по нему здесь никто не вправе — это решение
-владельца (docs/architecture.md, 5.0.3).
+карточка называет Hải Châu. Менять `city` по нему вправе только явный перевес мест и слов
+(`_city`): одно упоминание «Дананг» рядом с нячангским местом города не меняет —
+решение владельца (docs/architecture.md, 5.0.3).
 """
 
 from __future__ import annotations
@@ -50,6 +51,7 @@ _LABEL = re.compile(
 _PIN = re.compile(r"^[^\w\n]{0,4}📍[^\w\n]*(?P<value>.*)$")
 _BULLET = re.compile(r"^\s*[•\-–—➖▪·*]")
 _DANANG = re.compile(r"\bda ?nang\b|дананг")
+_NHATRANG = re.compile(r"\bnha ?trang\b|нячанг")
 _SEGMENTS = re.compile(r"[,;|•·—–()\[\]/]|\s-\s")
 
 
@@ -142,8 +144,13 @@ def _city(found: list[Place], body: str) -> str | None:
     """Город, к которому относится пост: у кого больше доказательств, а не улиц."""
     # Голосует место, а не упоминание: «Mường Thanh» трижды — это одно доказательство.
     votes = Counter(place.city for place in set(found) if place.kind != "street")
-    if _DANANG.search(body):
-        votes["da_nang"] += 2
+    # Явное имя города — два голоса, для обоих городов справочника поровну: одно «Дананг»
+    # рядом с нячангским местом и словом «Нячанг» спорит на равных и города не меняет, а
+    # «Mường Thanh – Đà Nẵng» (сеть есть в обоих городах) решает названный город
+    # (ревью Opus волны 2, F1).
+    for pattern, city in ((_DANANG, "da_nang"), (_NHATRANG, "nha_trang")):
+        if pattern.search(body):
+            votes[city] += 2
     if not votes:
         return found[0].city if found else None
     leaders = {city for city, count in votes.items() if count == max(votes.values())}

@@ -28,7 +28,7 @@ from typing import Protocol
 
 from sniffer.bot import wording, wording_plan
 from sniffer.bot.billing_wording import OFFER
-from sniffer.bot.cards import chunk, render_card, render_cards
+from sniffer.bot.cards import pack, render_card, render_cards
 from sniffer.bot.paging import MoreOffer
 from sniffer.config import get_settings
 from sniffer.domain.dialogue import Option, Question, feedback_buttons
@@ -55,6 +55,9 @@ class Reply:
     # «Ещё N» / «Показать все N» под страницей. Признак со ссылкой на снимок, а не
     # готовые кнопки: разметку рисует `keyboards`, как и у остального.
     more: MoreOffer | None = None
+    # Сколько карточек страницы несёт именно это сообщение: по нему при сбое отправки
+    # посреди многосообщенческой страницы понятно, какие карточки клиент уже увидел.
+    cards: int = 0
 
 
 class Results(Protocol):
@@ -116,11 +119,18 @@ def present(
     return Reply(f"{text}\n\n{OFFER}", offer_subscription=True, passport_root=root)
 
 
+def _unpriced(found: Results) -> int:
+    """Сколько найденных без названной цены: заголовок скажет об этом, если был бюджет."""
+    return sum(1 for item in found.items if item.price_vnd is None)
+
+
 def _results(passport: Passport, found: Results, root: int | None) -> Reply:
     # Число считается здесь один раз и идёт и в заголовок, и в карточки: разное
     # число в двух местах дало бы «показываю 5» над четырьмя карточками.
     shown = min(len(found.items), get_settings().max_cards)
-    header = wording.result_header(passport, len(found.items), shown, capped=found.capped)
+    header = wording.result_header(
+        passport, len(found.items), shown, capped=found.capped, unpriced=_unpriced(found)
+    )
     if found.status:
         header = f"{found.status}\n\n{header}"
     return Reply(
@@ -141,7 +151,11 @@ def _gated(passport: Passport, found: Results, root: int | None, gate: Gate) -> 
     balance = wording_plan.balance_line(admission.limit, admission.remaining, admission.period_end)
     if balance:
         parts.append(balance)
-    parts.append(wording.result_header(passport, len(found.items), shown, capped=found.capped))
+    parts.append(
+        wording.result_header(
+            passport, len(found.items), shown, capped=found.capped, unpriced=_unpriced(found)
+        )
+    )
     text = "\n\n".join(parts) + "\n\n" + render_cards(gate.shown, limit=shown)
     rest = len(found.items) - shown
     if rest > 0 and gate.more is None:
@@ -216,8 +230,13 @@ def present_page(total: int, offset: int, gate: Gate, *, root: int | None) -> li
             wording_plan.more_line(rest, limit=admission.limit, renews=admission.period_end)
         )
     head = chr(10).join(part for part in parts if part)
-    messages = chunk(blocks, head=head)
-    replies = [Reply(text, passport_root=root) for text in messages]
+    messages = pack(blocks, head=head)
+    # Честная строка про остаток — не карточка: последний блок в счёт карточек не идёт.
+    trailing = len(blocks) - len(gate.shown)
+    replies = [
+        Reply(text, passport_root=root, cards=count - (trailing if i == len(messages) - 1 else 0))
+        for i, (text, count) in enumerate(messages)
+    ]
     last = replies[-1]
-    replies[-1] = Reply(last.text, passport_root=root, more=gate.more)
+    replies[-1] = Reply(last.text, passport_root=root, more=gate.more, cards=last.cards)
     return replies

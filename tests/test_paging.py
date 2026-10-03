@@ -132,3 +132,13 @@ def test_a_pressed_page_loses_only_its_paging_buttons() -> None:
     assert without_paging(None) is None
     empty = InlineKeyboardMarkup(inline_keyboard=[])
     assert without_paging(empty) == empty
+
+
+def test_snapshots_are_evicted_least_recently_used_first() -> None:
+    store = MemorySnapshots(capacity=2)
+    first = store.put(Snapshot(1, (), None))
+    second = store.put(Snapshot(1, (), None))
+    assert store.get(first) is not None  # прочитанный снимок стал самым свежим
+    store.put(Snapshot(1, (), None))
+    assert store.get(first) is not None
+    assert store.get(second) is None
