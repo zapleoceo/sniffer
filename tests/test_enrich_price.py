@@ -347,6 +347,14 @@ def test_a_kept_price_keeps_the_upper_bound_that_goes_with_it() -> None:
     assert patch.is_empty, "ни записи, ни удаления: вилка принадлежит старой цене"
 
 
+def test_a_lost_price_keeps_the_upper_bound_that_goes_with_it() -> None:
+    """Текст молчит, а правдоподобная цена осталась: её верх вилки тоже остаётся."""
+    patch = derived({"price": 7_000_000, "attributes": {"price_up_to": 8_000_000}}, None)
+
+    assert patch.outcomes == (LOST,)
+    assert patch.is_empty, "ни записи, ни удаления"
+
+
 def test_a_kept_price_still_has_its_rate_rebuilt() -> None:
     """Ставка от цены не зависит: чужая уходит, а найденная пишется."""
     patch = derived(
