@@ -725,11 +725,12 @@ FROM passports WHERE is_current GROUP BY 1 HAVING count(*) > 1;
 сам применяется к новым сообщениям, а накопленные карточки остаются прежними,
 пока их не пересчитают ([архитектура, 5.0.4](architecture.md#504-проход-догона-накопленные-карточки-пересчитанные-из-исходного-текста)).
 Проход меняет только цену — колонки `price_amount`, `price_currency`,
-`price_period` — и ключи `price_up_to` и `rate_*` в `attributes` (добавляет,
+`price_period` — и ключи `price_up_to`, `rate_*` и (только при стирании цены)
+`price_erased` в `attributes` (добавляет,
 переписывает и убирает те, которых новый разбор не выдал); `is_active`,
 `screened_at`, `posted_at`, `deal_type`, `category` и всё остальное не трогает.
 **Одно из изменений необратимо без копии: неправдоподобное значение цены
-стирается** (5 млрд за аренду дома, суточная ставка в месячной колонке), когда
+стирается** (старое значение остаётся в `attributes.price_erased`) (5 млрд за аренду дома, суточная ставка в месячной колонке), когда
 заменить его нечем. Идёт порядка двух минут (в основном разбор текстов) и воркер
 не останавливает: каждая строка пишется, только если не изменилась с момента
 чтения, а изменённую воркером проход пропускает и называет в отчёте.
@@ -744,19 +745,27 @@ FROM passports WHERE is_current GROUP BY 1 HAVING count(*) > 1;
 ```bash
 cd /var/www/sniffer
 df -h /
-docker exec sniffer-postgres pg_dump -U sniffer -d sniffer -t listings -Fc > /var/backups/listings-pre-enrich-$(date +%F).dump
-chmod 600 /var/backups/listings-pre-enrich-$(date +%F).dump
-ls -l /var/backups/listings-pre-enrich-$(date +%F).dump
+DUMP=/var/backups/vera/sniffer/listings-pre-enrich-$(date +%F).dump
+install -d -m 0750 -g verabackup /var/backups/vera/sniffer
+docker exec sniffer-postgres pg_dump -U sniffer -d sniffer -t listings -Fc > "$DUMP"
+chgrp verabackup "$DUMP" && chmod 0640 "$DUMP"
+ls -l "$DUMP"
 docker exec sniffer-postgres psql -U sniffer -d sniffer -c "SELECT pg_size_pretty(pg_table_size('listings')) AS table_size, count(*) AS cards FROM listings"
-docker exec -i sniffer-postgres pg_restore -l < /var/backups/listings-pre-enrich-$(date +%F).dump | head -5
+docker exec -i sniffer-postgres pg_restore -l < "$DUMP" | head -5
 ```
+
+Копия кладётся именно в `/var/backups/vera/sniffer/`: NAS забирает только
+`/var/backups/vera`, и дамп лежит там с группой `verabackup` и правами 0640. В
+`/var/backups` напрямую его никто не заберёт, а значит, по шагу 5 нельзя будет
+убедиться, что копия уехала.
 
 Что смотреть. **Диск:** занято меньше 80% (деплой отменяется на 85%), копия весит
 десятки мегабайт. **Размер файла:** порядка нескольких десятков МБ, в несколько
 раз меньше `table_size` (формат сжатый); ноль байт или килобайты — копия не
 снялась, дальше нельзя. **`pg_restore -l`** печатает оглавление — значит файл
-читается; ошибка здесь — тоже стоп. Файл лежит с правами 600: в колонке `summary`
-тексты объявлений с телефонами и @username. В `docker exec` нет ни `-i`, ни `-t`
+читается; ошибка здесь — тоже стоп. Права 0640 и группа `verabackup`: этого
+хватает NAS, посторонним файл не виден — в колонке `summary` тексты объявлений с
+телефонами и @username. В `docker exec` нет ни `-i`, ни `-t`
 при снятии копии: дамп бинарный, и терминал испортил бы поток.
 
 **2. Сухой прогон — в базу ничего не пишется.**
@@ -778,7 +787,7 @@ JSON-события `enrich.batch` (по одному на пачку) и `enric
 | `skip.*` | 0 (допустимы единицы `skip.no_text`) | `skip.derive_error.*` — баг вывода, не запускать; id в отчёте |
 | `price.filled` | порядка 10 тыс. (было 9 852) | в разы меньше — разбор не тот, не запускать |
 | `price.replaced` | десятки (было 21) | сотни — политика сработала шире задуманного, не запускать |
-| `price.erased` | десятки (было 34) | сотни — не запускать; **открыть id из отчёта и посмотреть, что именно стирается** (см. ниже) |
+| `price.erased` | десятки (было 34); печатаются «id → прежняя сумма» | сотни — не запускать; **открыть id из отчёта и посмотреть, что именно стирается** (см. ниже) |
 | `price.disagreed` | десятки (19); **не меняются** | это расхождения, проход их не правит |
 | `price.lost` | единицы (2); **не стирается** | значение в границах, которое разбор не нашёл |
 | `Из них объясняются сменой…` | десятки (51 заполнение, 1 стирание) | сотни — критерий сработал шире, разобрать до запуска |
@@ -801,8 +810,12 @@ JSON-события `enrich.batch` (по одному на пачку) и `enric
 открыть: `SELECT id, category, deal_type, price_amount, price_period, left(summary,
 200) FROM listings WHERE id IN (…)`.
 
-**Что проверить глазами до боевого прогона — id из `price.erased`.** Стирается
-значение, которое для итоговой категории и стороны вне границ. Это верно, пока
+**Что проверить глазами до боевого прогона — id из `price.erased`.** В конце
+отчёта печатается раздел «Цены, которые стёрли бы (id → прежняя сумма)»: все
+стираемые карточки (до 200, остаток считается) с суммой, которая в них лежит. При
+боевом прогоне то же старое значение остаётся в самой карточке: ключ
+`attributes.price_erased` = `{amount, currency, period}` пишется тем же UPDATE, что
+и стирание, так что вернуть можно и после удаления копии. Стирается значение, которое для итоговой категории и стороны вне границ. Это верно, пока
 итоговая сторона верна: если вердикт модели ошибся (аренда помечена продажей),
 правдоподобная цена аренды окажется «вне границ продажи» и будет стёрта. Открыть
 несколько id из отчёта и убедиться, что стираемое — действительно мусор (миллиарды
@@ -844,12 +857,15 @@ GROUP BY 1, 2 ORDER BY cards DESC;
 **5. Удалить копию — только после того, как NAS её забрал.**
 
 ```bash
-ls -l /var/backups/listings-pre-enrich-*.dump
-shred -u /var/backups/listings-pre-enrich-*.dump
+ls -l /var/backups/vera/sniffer/listings-pre-enrich-*.dump
+# убедиться на NAS, что файл есть и размер совпадает, и только потом:
+shred -u /var/backups/vera/sniffer/listings-pre-enrich-*.dump
+ls /var/backups/vera/sniffer/ | grep pre-enrich || echo "копий не осталось"
 ```
 
 Сначала убедиться, что файл на NAS и размер совпадает. Копия — тексты
-объявлений с контактами, и жить дольше необходимого ей незачем.
+объявлений с контактами, и жить дольше необходимого ей незачем; последняя
+строка подтверждает, что в `/var/backups/vera/sniffer/` она не осталась.
 
 **Откат.** Нужен при ошибке самого правила, и главное, что он возвращает, —
 стёртые значения цены. Из копии поднимается отдельная база, и из неё по id
@@ -861,7 +877,7 @@ shred -u /var/backups/listings-pre-enrich-*.dump
 ```bash
 docker exec sniffer-postgres psql -U sniffer -d postgres -c "CREATE DATABASE listings_restore"
 docker exec sniffer-postgres psql -U sniffer -d listings_restore -c "CREATE EXTENSION IF NOT EXISTS vector; CREATE EXTENSION IF NOT EXISTS pg_trgm"
-docker exec -i sniffer-postgres pg_restore -U sniffer -d listings_restore --no-owner < /var/backups/listings-pre-enrich-ДАТА.dump
+docker exec -i sniffer-postgres pg_restore -U sniffer -d listings_restore --no-owner < /var/backups/vera/sniffer/listings-pre-enrich-ДАТА.dump
 ```
 
 Ошибки про внешние ключи на `raw_messages` в этой базе ожидаемы: таблиц, на

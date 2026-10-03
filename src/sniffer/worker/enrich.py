@@ -60,6 +60,15 @@ Derive = Callable[[Listing, str], ListingPatch]
 ByVerdict = Callable[[Listing, str], bool]
 
 
+class CursorStalled(RuntimeError):
+    """Страница не сдвинула курсор: следующий круг прочёл бы то же самое.
+
+    Без этой остановки сбой источника страниц (id не по возрастанию, повтор
+    страницы) превращался в бесконечный проход, который перечитывает и
+    переписывает одни и те же карточки; зависание хуже ошибки, ошибку видно.
+    """
+
+
 class Applier(Protocol):
     async def apply(self, row: Listing, patch: ListingPatch) -> bool: ...
 
@@ -141,8 +150,11 @@ class EnrichPass:
                 if not rows:
                     report.stop_reason = END
                     return
+                last = _last_id(rows)
+                if last <= cursor:
+                    raise CursorStalled(f"страница после id {cursor} закончилась на id {last}")
                 await self._batch(rows, report, dry_run=dry_run)
-                cursor = report.last_id = _last_id(rows)
+                cursor = report.last_id = last
                 if remaining is not None:
                     remaining -= len(rows)
                 totals = report.totals()
@@ -203,6 +215,8 @@ class EnrichPass:
         на карточку, поэтому только для исходов, что меняют колонку.
         """
         report.outcomes(item.listing, patch.outcomes)
+        if price.ERASED in patch.outcomes:
+            report.erased_price(item.listing)
         changed = [o for o in patch.outcomes if o in VERDICT_TRACKED]
         if not changed or item.text is None:
             return

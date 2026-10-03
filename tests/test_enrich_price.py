@@ -21,6 +21,7 @@ from sniffer.pipeline.enrich_price import (
     ABSENT,
     DISAGREED,
     ERASED,
+    ERASED_KEY,
     FILLED,
     LOST,
     PRICE_ATTRIBUTES,
@@ -178,6 +179,39 @@ def test_an_erasure_does_not_rewrite_columns_that_are_already_empty() -> None:
     patch = derive_price(listing, "текст", parse=Parser(None))
 
     assert dict(patch.columns) == {"price_amount": None}
+
+
+def test_an_erasure_keeps_the_old_price_in_the_attributes_in_the_same_patch() -> None:
+    patch = derived({"price": 5_000_000_000}, None)
+
+    assert patch.attributes[ERASED_KEY] == {
+        "amount": "5000000000",
+        "currency": "VND",
+        "period": "month",
+    }
+    assert ERASED_KEY not in patch.remove
+
+
+def test_the_erased_price_is_not_part_of_the_family_the_text_rebuilds() -> None:
+    """Иначе следующий проход (цены уже нет, исход иной) убрал бы след стирания."""
+    assert ERASED_KEY not in PRICE_ATTRIBUTES
+
+
+@pytest.mark.parametrize(
+    ("old", "found"),
+    [(7_000_000, fact(9_000_000)), (7_000_000, None), (7_000_000, fact(7_000_000)), (None, None)],
+    ids=["disagreed", "lost", "same", "absent"],
+)
+def test_only_an_erasure_leaves_the_erased_trace(old: int | None, found: PriceFact | None) -> None:
+    patch = derived({"price": old} if old else {}, found)
+
+    assert ERASED_KEY not in patch.attributes
+
+
+def test_a_replacement_does_not_leave_the_erased_trace_either() -> None:
+    patch = derived({"price": 5_500}, fact(5_500_000, period="month"))
+
+    assert ERASED_KEY not in patch.attributes
 
 
 @pytest.mark.parametrize("stored", [DISAGREED, LOST, SAME], ids=["disagreed", "lost", "same"])
@@ -470,7 +504,7 @@ def test_the_patch_stays_inside_the_price_columns_and_the_price_family(
     patch = derive_price(card(**fields), "текст", parse=Parser(found))  # type: ignore[arg-type]
 
     assert set(patch.columns) <= {"price_amount", "price_currency", "price_period"}
-    assert (set(patch.attributes) | set(patch.remove)) <= PRICE_ATTRIBUTES
+    assert (set(patch.attributes) | set(patch.remove)) <= PRICE_ATTRIBUTES | {ERASED_KEY}
 
 
 # ── что дала бы колонка под другой парой ───────────────────────────────────

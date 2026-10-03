@@ -525,7 +525,10 @@ async def test_the_pass_erases_an_implausible_price_and_cleans_the_rate_of_the_f
     second = await _row(db_session, flipped.id or 0)
     assert report.totals()["price.erased"] == 1 and report.totals()["price.filled"] == 1
     assert (first.price_amount, first.price_currency, first.price_period) == (None, None, None)
-    assert first.attributes == {"rooms": 3}, "верх вилки ушёл вместе с ценой, чужое цело"
+    assert first.attributes == {
+        "rooms": 3,
+        "price_erased": {"amount": "5000000000.00", "currency": "VND", "period": "month"},
+    }, "верх вилки ушёл вместе с ценой, чужое цело, а стёртая цена осталась следом"
     assert second.price_amount == Decimal(21_000_000) and second.price_period == "once"
     assert second.attributes == {"brand": "honda"}, "ставка прежней стороны не пережила смену"
 

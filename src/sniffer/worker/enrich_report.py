@@ -49,6 +49,10 @@ SAMPLES_PER_KEY = 10
 REVIEW_UP_TO = 100
 
 AFTER_VERDICT = "after_verdict."
+# Стираемые цены печатаются все: это и есть то, что владелец смотрит глазами до
+# боевого прогона. Больше предела — первые и счёт остатка, отчёт не должен
+# превращаться в стену.
+ERASED_LISTED = 200
 
 END = "end"
 LIMIT = "limit"
@@ -65,6 +69,8 @@ class EnrichReport:
     stop_reason: str = ""
     scopes: dict[tuple[str, str], Counter[str]] = field(default_factory=dict)
     samples: dict[str, list[int]] = field(default_factory=dict)
+    # id -> старая сумма стёртой цены (строкой, как она ляжет в `price_erased`).
+    erased: dict[int, str] = field(default_factory=dict)
 
     def _scope(self, listing: Listing) -> Counter[str]:
         return self.scopes.setdefault((listing.category, listing.deal_type), Counter())
@@ -81,6 +87,11 @@ class EnrichReport:
         for name in names:
             self._scope(listing)[name] += 1
             self._note(listing, name)
+
+    def erased_price(self, listing: Listing) -> None:
+        """Запомнить, какая именно цена стирается: id и сумма, ничего больше."""
+        if listing.id is not None and listing.price_amount is not None:
+            self.erased[listing.id] = str(listing.price_amount)
 
     def skip(self, listing: Listing, reason: str) -> None:
         key = SKIP + reason
@@ -109,6 +120,7 @@ class EnrichReport:
             "totals": dict(self.totals()),
             "scopes": {f"{c}/{d}": dict(n) for (c, d), n in sorted(self.scopes.items())},
             "samples": self.samples,
+            "erased_prices": dict(list(self.erased.items())[:ERASED_LISTED]),
         }
 
     def render(self) -> str:
@@ -136,7 +148,23 @@ class EnrichReport:
         for (category, deal), counter in sorted(self.scopes.items()):
             lines += ["", f"{category} / {deal}: просмотрено {counter[SEEN]}"]
             lines += self._counts(counter, show_ids=False)
+        lines += self._erased_lines()
         return "\n".join(lines)
+
+    def _erased_lines(self) -> list[str]:
+        if not self.erased:
+            return []
+        title = (
+            "Цены, которые стёрли бы (id → прежняя сумма):"
+            if self.dry_run
+            else "Стёртые цены (id → прежняя сумма):"
+        )
+        lines = ["", title]
+        shown = sorted(self.erased.items())[:ERASED_LISTED]
+        lines += [f"  {listing_id} → {amount}" for listing_id, amount in shown]
+        if len(self.erased) > len(shown):
+            lines.append(f"  … и ещё {len(self.erased) - len(shown)}")
+        return lines
 
     def _stop_line(self) -> str:
         if self.stop_reason == END:

@@ -22,7 +22,14 @@ from sniffer.domain.prices import PriceFact
 from sniffer.domain.records import Listing
 from sniffer.pipeline.enrich import DerivationFailed, derive
 from sniffer.pipeline.enrich_price import PriceDerivation
-from sniffer.worker.enrich import MAX_ROW_WARNINGS, ByVerdict, Derive, EnrichPass, write_each
+from sniffer.worker.enrich import (
+    MAX_ROW_WARNINGS,
+    ByVerdict,
+    CursorStalled,
+    Derive,
+    EnrichPass,
+    write_each,
+)
 from sniffer.worker.enrich_report import END, LIMIT, EnrichReport
 from tests.enrich_support import bounds_of, fact, row
 
@@ -179,6 +186,28 @@ async def test_a_pass_over_nothing_is_an_empty_report_not_an_error() -> None:
     assert report.totals()["seen"] == 0 and report.stop_reason == END
 
 
+async def test_a_page_that_does_not_move_the_cursor_ends_the_pass_with_an_error() -> None:
+    """Повтор страницы без этого был бы вечным проходом, переписывающим одно и то же."""
+    rows = standard_rows()[:3]
+    served = 0
+
+    async def stuck(after_id: int, limit: int) -> list[ListingWithText]:
+        nonlocal served
+        served += 1
+        assert served < 5, "проход не остановился: крутится на одной странице"
+        return rows
+
+    report = EnrichReport()
+    enrich_pass = EnrichPass(page=stuck, write=Store(rows).write, derive_row=price_only, size=3)
+
+    with pytest.raises(CursorStalled):
+        await enrich_pass.run(report)
+
+    assert served == 2, "первая страница сдвинула курсор, вторая — нет"
+    assert report.stop_reason == "" and report.last_id == 3
+    assert report.totals()["seen"] == 3, "повторную страницу не обрабатывали"
+
+
 # ── сухой прогон и боевой ──────────────────────────────────────────────────
 
 
@@ -197,6 +226,39 @@ async def test_a_dry_run_never_writes_and_leaves_everything_as_it_was() -> None:
     assert store.snapshot() == before
     assert report.dry_run is True
     assert report.totals()["would_write"] == 5 and report.totals()["written"] == 0
+
+
+async def test_a_dry_run_prints_which_price_would_be_erased_and_writes_nothing() -> None:
+    store = Store(standard_rows())
+
+    report = await run(store, dry_run=True, size=10)
+
+    text = report.render()
+    assert "Цены, которые стёрли бы (id → прежняя сумма):" in text
+    assert "  9 → 5000000000" in text.splitlines()
+    assert store.writes == [], "печать ничего не пишет"
+    assert report.erased == {9: str(store.rows[9].listing.price_amount)}
+
+
+async def test_a_live_pass_keeps_the_erased_price_in_the_card_and_counts_only_written() -> None:
+    store = Store(standard_rows(), stale=(9,))
+
+    stale = await run(store, size=10)
+    assert stale.erased == {}, "строку не записали — стирание не состоялось, печатать нечего"
+
+    fresh = await run(Store(standard_rows()), size=10)
+    assert fresh.erased.keys() == {9}
+
+
+async def test_the_erased_price_lands_in_the_attributes_of_the_stored_card() -> None:
+    store = Store(standard_rows())
+
+    await run(store, size=10)
+
+    stored = store.rows[9].listing
+    assert stored.price_amount is None
+    assert stored.attributes["price_erased"]["amount"].startswith("5000000000")
+    assert store.rows[2].listing.attributes.get("price_erased") is None
 
 
 async def test_a_live_pass_writes_only_the_cards_that_have_something_to_write() -> None:

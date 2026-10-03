@@ -52,6 +52,13 @@
 старой цены, которую мы оставили, — не стирается. Ставки `rate_*` от колонки не
 зависят и пересобираются всегда.
 
+**Стёртое значение не исчезает бесследно.** При исходе `erased` старая цена
+уходит в атрибут `price_erased` (`{amount, currency, period}`) тем же UPDATE,
+что и стирание: копия таблицы живёт считанные дни, а вернуть значение, в
+правилах которого ошиблись, нужно и через месяц. Сумма — строкой, чтобы JSONB не
+округлил её. Ключ не входит в `PRICE_ATTRIBUTES`: его не пересобирают из нового
+факта и не убирают, он принадлежит стиранию, а не разбору.
+
 **В патч попадает только разница**, поэтому повторный проход пуст и в базу не
 ходит: идемпотентность держится на этом, а не на счастливом совпадении.
 """
@@ -86,6 +93,8 @@ PRICE_ATTRIBUTES = frozenset(
 )
 # Верх вилки принадлежит колонке цены, а не тексту сам по себе (см. docstring).
 _COLUMN_BOUND = frozenset({"price_up_to"})
+# Куда уходит стёртая цена; не в `PRICE_ATTRIBUTES`: это след стирания, а не факт текста.
+ERASED_KEY = "price_erased"
 
 # Исходы, при которых колонки цены пишутся; во всех остальных они не трогаются.
 _FILLS_COLUMNS = frozenset({FILLED, REPLACED})
@@ -145,6 +154,12 @@ def _attributes(
     if outcome in _KEEPS_OLD_PRICE:
         managed = managed - _COLUMN_BOUND
         wanted = {key: value for key, value in wanted.items() if key not in _COLUMN_BOUND}
+    if outcome == ERASED and listing.price_amount is not None:
+        wanted[ERASED_KEY] = {
+            "amount": str(listing.price_amount),
+            "currency": listing.price_currency,
+            "period": listing.price_period,
+        }
     current = listing.attributes
     write = {k: v for k, v in wanted.items() if k not in current or current[k] != v}
     remove = tuple(sorted(k for k in managed if k in current and k not in wanted))

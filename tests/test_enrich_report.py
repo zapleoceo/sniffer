@@ -13,6 +13,7 @@ from sniffer.domain.records import Listing
 from sniffer.pipeline import enrich_price as price
 from sniffer.worker.enrich_report import (
     AFTER_VERDICT,
+    ERASED_LISTED,
     REVIEW_UP_TO,
     SAMPLES_PER_KEY,
     EnrichReport,
@@ -169,3 +170,46 @@ def test_the_structured_fields_are_plain_json_with_no_text_in_them() -> None:
     assert payload["totals"][price.FILLED] == 1
     assert payload["scopes"]["apartment/rent_out"]["seen"] == 1
     assert payload["samples"][price.FILLED] == [1]
+
+
+def test_a_report_without_erased_prices_has_no_erased_section() -> None:
+    report = EnrichReport(dry_run=True)
+    report.seen(apartment())
+
+    assert "id → прежняя сумма" not in report.render()
+
+
+def test_the_erased_section_lists_id_and_old_amount_and_nothing_else() -> None:
+    report = EnrichReport(dry_run=True)
+    report.erased_price(card(7, price=5_000_000_000))
+
+    lines = report.render().splitlines()
+    at = lines.index("Цены, которые стёрли бы (id → прежняя сумма):")
+    assert lines[at + 1] == "  7 → 5000000000"
+    assert report.fields()["erased_prices"] == {7: "5000000000"}
+
+
+def test_a_live_report_speaks_in_the_past_tense() -> None:
+    report = EnrichReport(dry_run=False)
+    report.erased_price(card(7, price=5_000_000_000))
+
+    assert "Цены, которые стёрто (id → прежняя сумма):" not in report.render()
+    assert "Цены, которые стёрто" not in report.render()
+    assert "Стёртые цены (id → прежняя сумма):" in report.render()
+
+
+def test_a_long_erased_list_is_cut_and_the_rest_is_counted() -> None:
+    report = EnrichReport(dry_run=True)
+    for number in range(1, ERASED_LISTED + 6):
+        report.erased_price(card(number, price=5_000_000_000))
+
+    text = report.render()
+    assert f"  {ERASED_LISTED} → " in text and f"  {ERASED_LISTED + 1} → " not in text
+    assert "… и ещё 5" in text
+
+
+def test_a_card_without_a_price_or_id_is_not_listed_as_erased() -> None:
+    report = EnrichReport()
+    report.erased_price(card(8))
+
+    assert report.erased == {}
