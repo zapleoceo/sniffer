@@ -460,3 +460,186 @@ async def test_a_failure_after_the_enqueue_rolls_back_only_that_slots_rows(
     assert await queued_for(sick) == (0, 0), "записи больной подписки откатились целиком"
     streak, error, _until = await _failures(db_session, sick)
     assert streak == 1 and error is not None and "RuntimeError" in error
+
+
+# ── право на доставку (D7) ──────────────────────────────────────────────────
+
+
+async def test_enqueue_refuses_a_subscription_that_cannot_receive_at_that_moment(
+    db_session: AsyncSession,
+) -> None:
+    """Истёкшая, истекающая ровно сейчас и стоящая на паузе подписки ничего не получают."""
+    now = _now()
+    expired = await _slot(db_session, 9601, expires_at=now - timedelta(seconds=1))
+    boundary = await _slot(db_session, 9602, expires_at=now)
+    paused = await _slot(db_session, 9603, expires_at=now + timedelta(days=1))
+    live = await _slot(db_session, 9604, expires_at=now + timedelta(days=1))
+    await db_session.execute(
+        update(models.Subscription)
+        .where(models.Subscription.id == paused[1])
+        .values(is_active=False)
+    )
+    card = await _card(db_session, 30, posted_at=now)
+    await db_session.commit()
+    assert card.id is not None
+    repo = DeliveryRepository(db_session)
+
+    queued = {}
+    for name, (user_id, sub_id) in {
+        "expired": expired,
+        "boundary": boundary,
+        "paused": paused,
+        "live": live,
+    }.items():
+        queued[name] = await repo.enqueue(
+            subscription_id=sub_id,
+            user_id=user_id,
+            listing_id=card.id,
+            score=0.9,
+            payload={"a": 1},
+            now=now,
+        )
+    await db_session.commit()
+
+    assert queued == {"expired": False, "boundary": False, "paused": False, "live": True}
+    assert set(await db_session.scalars(select(models.Notification.subscription_id))) == {live[1]}
+    assert set(await db_session.scalars(select(models.Outbox.subscription_id))) == {live[1]}
+
+
+async def _outbox_status(session: AsyncSession) -> str | None:
+    return await session.scalar(select(models.Outbox.status))
+
+
+async def test_what_was_found_in_the_paid_period_is_delivered_inside_the_grace(
+    db_session: AsyncSession,
+) -> None:
+    """Найденное за минуту до окончания доходит ещё 6 часов, дальше — `cancelled`."""
+    expiry = _now()
+    grace = timedelta(hours=6)
+    user_id, sub_id = await _slot(db_session, 9610, expires_at=expiry)
+    card = await _card(db_session, 31, posted_at=expiry - timedelta(hours=1))
+    await db_session.commit()
+    assert card.id is not None
+    repo = DeliveryRepository(db_session)
+    found_at = expiry - timedelta(minutes=1)
+    assert await repo.enqueue(
+        subscription_id=sub_id,
+        user_id=user_id,
+        listing_id=card.id,
+        score=0.9,
+        payload={"a": 1},
+        now=found_at,
+    )
+    await db_session.commit()
+    monitors = MonitorRepository(db_session)
+
+    assert await monitors.cancel_lapsed(now=expiry + grace, grace=grace) == 0
+    assert await _outbox_status(db_session) == "pending", "ровно в границу льготы ещё доходит"
+
+    after = expiry + grace + timedelta(seconds=1)
+    assert await monitors.cancel_lapsed(now=after, grace=grace) == 1
+    assert await _outbox_status(db_session) == "cancelled"
+    assert await repo.take_pending(now=after + timedelta(days=1)) == [], "отменённое не берут"
+    assert await monitors.cancel_lapsed(now=after, grace=grace) == 0, "повторный проход тихий"
+
+
+async def test_cancel_lapsed_leaves_alone_everything_but_a_lapsed_pending_message(
+    db_session: AsyncSession,
+) -> None:
+    """Ответ сбора без подписки, бессрочная и живая подписки, уже отправленное — не трогаем."""
+    now = _now()
+    grace = timedelta(hours=6)
+    lapsed_user, lapsed = await _slot(db_session, 9620, expires_at=now - timedelta(days=2))
+    never_user, never = await _slot(db_session, 9621, expires_at=None)
+    alive_user, alive = await _slot(db_session, 9622, expires_at=now + timedelta(days=1))
+    plan = {
+        "lapsed-pending": (lapsed_user, lapsed, "pending"),
+        "lapsed-sent": (lapsed_user, lapsed, "sent"),
+        "never-pending": (never_user, never, "pending"),
+        "alive-pending": (alive_user, alive, "pending"),
+        "no-subscription": (alive_user, None, "pending"),
+    }
+    ids: dict[str, int] = {}
+    for name, (user_id, sub_id, status) in plan.items():
+        row = models.Outbox(
+            user_id=user_id,
+            subscription_id=sub_id,
+            payload={"name": name},
+            status=status,
+            scheduled_at=now,
+        )
+        db_session.add(row)
+        await db_session.flush()
+        ids[name] = row.id
+    await db_session.commit()
+
+    cancelled = await MonitorRepository(db_session).cancel_lapsed(now=now, grace=grace)
+
+    rows = (await db_session.execute(select(models.Outbox.id, models.Outbox.status))).all()
+    by_id: dict[int, str] = {row.id: row.status for row in rows}
+    statuses = {name: by_id[row_id] for name, row_id in ids.items()}
+    assert cancelled == 1
+    assert statuses == {
+        "lapsed-pending": "cancelled",
+        "lapsed-sent": "sent",
+        "never-pending": "pending",
+        "alive-pending": "pending",
+        "no-subscription": "pending",
+    }
+
+
+async def test_a_renewal_inside_the_grace_keeps_the_queue(db_session: AsyncSession) -> None:
+    expiry = _now()
+    grace = timedelta(hours=6)
+    user_id, sub_id = await _slot(db_session, 9630, expires_at=expiry)
+    card = await _card(db_session, 32, posted_at=expiry - timedelta(hours=1))
+    await db_session.commit()
+    assert card.id is not None
+    assert await DeliveryRepository(db_session).enqueue(
+        subscription_id=sub_id,
+        user_id=user_id,
+        listing_id=card.id,
+        score=0.9,
+        payload={"a": 1},
+        now=expiry - timedelta(minutes=1),
+    )
+    await db_session.execute(
+        update(models.Subscription)
+        .where(models.Subscription.id == sub_id)
+        .values(expires_at=expiry + timedelta(days=30))
+    )
+    await db_session.commit()
+
+    cancelled = await MonitorRepository(db_session).cancel_lapsed(
+        now=expiry + timedelta(hours=7), grace=grace
+    )
+
+    assert cancelled == 0 and await _outbox_status(db_session) == "pending"
+
+
+async def test_the_matcher_cancels_the_lapsed_queue_on_its_pass(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sniffer.worker import matcher as module
+
+    expiry = _now()
+    user_id, sub_id = await _slot(db_session, 9640, expires_at=expiry)
+    card = await _card(db_session, 33, posted_at=expiry - timedelta(hours=1))
+    await db_session.commit()
+    assert card.id is not None
+    assert await DeliveryRepository(db_session).enqueue(
+        subscription_id=sub_id,
+        user_id=user_id,
+        listing_id=card.id,
+        score=0.9,
+        payload={"a": 1},
+        now=expiry - timedelta(minutes=1),
+    )
+    await db_session.commit()
+    monkeypatch.setattr(module, "session_scope", lambda: _borrowed(db_session))
+    matcher = module.Matcher()
+
+    await matcher.tick(now=expiry + timedelta(hours=7))
+
+    assert await _outbox_status(db_session) == "cancelled"
+    assert matcher.counters.cancelled_lapsed == 1

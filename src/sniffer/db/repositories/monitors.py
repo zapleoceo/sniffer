@@ -18,14 +18,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from sqlalchemy import Select, func, or_, select, update
+from sqlalchemy import Select, Update, func, or_, select, update
 
 from sniffer.db import models
 from sniffer.db.mappers import to_subscription_state
 from sniffer.db.repositories.base import Repository
-from sniffer.db.repositories.delivery import entitled
+from sniffer.db.repositories.delivery import OUTBOX_CANCELLED, OUTBOX_PENDING, entitled
 from sniffer.domain.records import SubscriptionState
 
 # Причина сбоя в базе — строка для человека, а не журнал: длинный разбор остаётся в логе
@@ -84,6 +84,20 @@ def _due_statement(
     )
 
 
+def _cancel_statement(*, cutoff: datetime) -> Update:
+    # Просроченной считается подписка с ограниченным сроком, вышедшим РАНЬШЕ границы:
+    # `NULL < …` — это NULL, то есть «бессрочная» сюда не попадает. Строки без подписки
+    # (ответы сбора каталога) не попадают тоже: у них нет соединения с подписками.
+    lapsed = select(models.Subscription.id).where(models.Subscription.expires_at < cutoff)
+    return (
+        update(models.Outbox)
+        .where(models.Outbox.status == OUTBOX_PENDING, models.Outbox.subscription_id.in_(lapsed))
+        .values(status=OUTBOX_CANCELLED)
+        .returning(models.Outbox.id)
+        .execution_options(synchronize_session=False)
+    )
+
+
 class MonitorRepository(Repository):
     async def claim_due(self, *, limit: int, now: datetime) -> DueSubscriptions:
         """Порция подписок на этот проход, заблокированная до конца транзакции.
@@ -116,6 +130,19 @@ class MonitorRepository(Repository):
                     )
                 )
         return DueSubscriptions(ready=ready, broken=broken)
+
+    async def cancel_lapsed(self, *, now: datetime, grace: timedelta) -> int:
+        """Отменить то, что стоит в очереди дольше льготы после окончания срока подписки.
+
+        Найденное в оплаченный период доходит до клиента ещё `grace` после срока: он
+        платил за находки, а не за момент, когда нотифаер до них добрался. Дальше строка
+        становится `cancelled` — отменённой, а не потерянной: строка и запись
+        `notifications` остаются, и карточка повторно не поставится. Продление срока
+        внутри льготы возвращает подписку в право, и очередь доходит как ни в чём не
+        бывало. Возвращает, сколько строк отменено.
+        """
+        cancelled = await self._session.execute(_cancel_statement(cutoff=now - grace))
+        return len(cancelled.all())
 
     async def touch(self, subscription_id: int, *, now: datetime) -> None:
         """Отметить, что подписку брали в обход, не трогая состояние сбоев.

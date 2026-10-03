@@ -12,7 +12,20 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from sqlalchemy import ColumnElement, Table, and_, func, or_, select, update
+from sqlalchemy import (
+    BigInteger,
+    ColumnElement,
+    DateTime,
+    Table,
+    and_,
+    exists,
+    func,
+    literal,
+    or_,
+    select,
+    update,
+)
+from sqlalchemy.dialects.postgresql import REAL
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from sniffer.db import models
@@ -23,6 +36,8 @@ from sniffer.domain.records import OutboxMessage, Payment, SubscriptionState
 OUTBOX_PENDING = "pending"
 OUTBOX_SENT = "sent"
 OUTBOX_FAILED = "failed"
+# Сообщение отменено, а не потеряно: право на него кончилось раньше, чем оно ушло.
+OUTBOX_CANCELLED = "cancelled"
 
 
 def entitled(now: datetime) -> ColumnElement[bool]:
@@ -70,6 +85,10 @@ class DeliveryRepository(Repository):
     ) -> bool:
         """Поставить карточку в очередь и запомнить, что она отправлена.
 
+        `False` — карточка не поставлена: либо она уже была в очереди этой подписки, либо
+        подписка в момент `now` не вправе получать (истекла, на паузе). В обоих случаях
+        в базе не появляется ни строки.
+
         Обе записи одной транзакцией и в этом порядке. `ON CONFLICT DO NOTHING`
         по `(subscription_id, listing_id)` — не перестраховка: воркер идёт
         пачками и встретит ту же карточку снова, а `False` в ответе честно
@@ -88,14 +107,20 @@ class DeliveryRepository(Repository):
         """
         moment = now or datetime.now(UTC)
         table = cast(Table, models.Notification.__table__)
+        # Право проверяется в самой вставке, а не запросом перед ней: между «проверил» и
+        # «вставил» подписка успела бы истечь или встать на паузу. Выбор подписок на проход
+        # уже спрашивал тот же предикат, и здесь он не лишний: постановка — единственное
+        # место, где карточка становится обязательством перед клиентом, и она не вправе
+        # доверять тому, что вызывающий когда-то проверил (D7).
+        still_entitled = select(
+            literal(subscription_id, BigInteger),
+            literal(listing_id, BigInteger),
+            literal(score, REAL),
+            literal(moment, DateTime(timezone=True)),
+        ).where(exists().where(models.Subscription.id == subscription_id, entitled(moment)))
         noted = await self._session.execute(
             pg_insert(table)
-            .values(
-                subscription_id=subscription_id,
-                listing_id=listing_id,
-                score=score,
-                created_at=moment,
-            )
+            .from_select(["subscription_id", "listing_id", "score", "created_at"], still_entitled)
             .on_conflict_do_nothing(index_elements=["subscription_id", "listing_id"])
             .returning(table.c.id)
         )

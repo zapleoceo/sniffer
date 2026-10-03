@@ -144,11 +144,20 @@ class FakeMonitors:
     broken: list[BrokenSubscription] = field(default_factory=list)
     claims: list[dict[str, Any]] = field(default_factory=list)
     claim_error: BaseException | None = None
+    cancellations: list[dict[str, Any]] = field(default_factory=list)
+    lapsed: int = 0
+    order: list[str] = field(default_factory=list)
     touched: list[int] = field(default_factory=list)
     scanned: list[int] = field(default_factory=list)
     quarantined: list[dict[str, Any]] = field(default_factory=list)
 
+    async def cancel_lapsed(self, *, now: datetime, grace: timedelta) -> int:
+        self.order.append("cancel")
+        self.cancellations.append({"now": now, "grace": grace})
+        return self.lapsed
+
     async def claim_due(self, *, limit: int, now: datetime) -> DueSubscriptions:
+        self.order.append("claim")
         self.claims.append({"limit": limit, "now": now})
         if self.claim_error is not None:
             raise self.claim_error

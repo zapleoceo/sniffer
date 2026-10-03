@@ -464,3 +464,65 @@ def test_a_nonsense_streak_gets_the_first_pause(streak: int) -> None:
 def test_a_huge_streak_does_not_overflow() -> None:
     """`timedelta * 2**1000` — OverflowError: счёт сбоев не вправе ронять карантин."""
     assert quarantine_delay(10**6) == QUARANTINE_MAX
+
+
+# ── право и льгота (D7) ─────────────────────────────────────────────────────
+
+
+async def test_the_pass_cancels_the_lapsed_queue_before_it_takes_new_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Проход, который ставит новое, не оставляет за собой просроченное старое."""
+    world = install(monkeypatch, subscriptions=[subscription()], page=[listing()])
+    world.monitors.lapsed = 3
+    matcher = Matcher()
+
+    await matcher.tick(now=NOW)
+
+    assert world.monitors.order[:2] == ["cancel", "claim"]
+    assert world.monitors.cancellations == [{"now": NOW, "grace": timedelta(hours=6)}]
+    assert matcher.counters.cancelled_lapsed == 3
+
+
+async def test_the_cancellation_is_logged_only_when_something_was_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = install(monkeypatch)
+    matcher = Matcher()
+
+    with capture_logs() as quiet:
+        await matcher.tick(now=NOW)
+    world.monitors.lapsed = 2
+    with capture_logs() as loud:
+        await matcher.tick(now=NOW)
+
+    assert not [entry for entry in quiet if entry["event"] == "matcher.lapsed_cancelled"]
+    (entry,) = [entry for entry in loud if entry["event"] == "matcher.lapsed_cancelled"]
+    assert entry["cancelled"] == 2
+    assert matcher.counters.cancelled_lapsed == 2
+
+
+async def test_the_grace_period_is_an_explicit_argument(monkeypatch: pytest.MonkeyPatch) -> None:
+    world = install(monkeypatch)
+
+    await Matcher(lapse_grace=timedelta(minutes=30)).tick(now=NOW)
+
+    assert world.monitors.cancellations[0]["grace"] == timedelta(minutes=30)
+
+
+async def test_the_default_grace_period_comes_from_the_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Льгота — константа в конфиге (D7), а не число, зашитое в проход."""
+    from sniffer.config import reload_settings
+
+    world = install(monkeypatch)
+    try:
+        monkeypatch.setenv("MONITOR_LAPSE_GRACE_HOURS", "2")
+        reload_settings()
+        await Matcher().tick(now=NOW)
+    finally:
+        monkeypatch.delenv("MONITOR_LAPSE_GRACE_HOURS")
+        reload_settings()
+
+    assert world.monitors.cancellations[0]["grace"] == timedelta(hours=2)

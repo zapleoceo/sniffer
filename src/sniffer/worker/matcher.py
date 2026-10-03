@@ -77,6 +77,7 @@ class MatcherCounters:
 
     skipped_no_rate: int = 0
     quarantined: int = 0
+    cancelled_lapsed: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +98,7 @@ class Matcher:
         rate: RateSource | None = None,
         clock: Clock = _utc_now,
         batch: int | None = None,
+        lapse_grace: timedelta | None = None,
     ) -> None:
         # Курс нужен, чтобы долларовый бюджет стал потолком в донгах. Источник не задан
         # или не ответил — курса нет, и такая подписка ждёт (см. `tick`). Выдуманный курс
@@ -104,7 +106,13 @@ class Matcher:
         # и дорогое объявление ушло бы клиенту как «идеально в бюджете».
         self._rate = UsdRate(rate)
         self._clock = clock
-        self._batch = get_settings().monitor_batch if batch is None else batch
+        settings = get_settings()
+        self._batch = settings.monitor_batch if batch is None else batch
+        self._grace = (
+            timedelta(hours=settings.monitor_lapse_grace_hours)
+            if lapse_grace is None
+            else lapse_grace
+        )
         self.counters = MatcherCounters()
 
     async def tick(self, *, now: datetime | None = None) -> int:
@@ -114,6 +122,12 @@ class Matcher:
             stores = _Stores(
                 MonitorRepository(session), DeliveryRepository(session), ListingRepository(session)
             )
+            # Первым делом — отмена того, что стоит в очереди после льготы: проход, который
+            # ставит новое, не вправе оставлять за собой просроченное старое (D7).
+            lapsed = await stores.monitors.cancel_lapsed(now=moment, grace=self._grace)
+            if lapsed:
+                self.counters.cancelled_lapsed += lapsed
+                log.info("matcher.lapsed_cancelled", cancelled=lapsed)
             due = await stores.monitors.claim_due(limit=self._batch, now=moment)
             for sick in due.broken:
                 # Паспорт не разобрался: до подписки дело не дошло, но молчать о ней нельзя.

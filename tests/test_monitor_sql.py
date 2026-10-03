@@ -33,7 +33,8 @@ async def test_enqueue_puts_the_given_moment_into_both_rows() -> None:
 
     assert queued is True
     (insert,) = session.statements
-    assert params_of(insert)["created_at"] == MOMENT
+    # Момент прохода — и слот суток (`created_at`), и срок для проверки права: два параметра.
+    assert list(params_of(insert).values()).count(MOMENT) == 2
     (outbox,) = session.added
     assert outbox.scheduled_at == MOMENT
 
@@ -53,7 +54,9 @@ async def test_an_explicit_delivery_time_is_kept_apart_from_the_moment() -> None
         now=MOMENT,
     )
 
-    assert params_of(session.statements[0])["created_at"] == MOMENT
+    values = list(params_of(session.statements[0]).values())
+    assert values.count(MOMENT) == 2, "слот суток занят в момент прохода"
+    assert evening not in values, "вечернее время — только у письма, а не у записи о слоте"
     assert session.added[0].scheduled_at == evening
 
 
@@ -268,3 +271,85 @@ async def test_quarantine_cuts_an_overlong_reason() -> None:
     )
 
     assert len(params_of(session.statements[0])["last_error"]) == ERROR_LIMIT
+
+
+# ── право на доставку: постановка и отмена (D7) ─────────────────────────────
+
+ENTITLED = (
+    "subscriptions.is_active IS true AND "
+    "(subscriptions.expires_at IS NULL OR subscriptions.expires_at > "
+)
+
+
+async def test_enqueue_checks_the_right_to_receive_inside_the_insert() -> None:
+    """Проверка в самой вставке: между «проверил» и «вставил» подписка успела бы истечь."""
+    session = Recorder(scalar=17)
+
+    await DeliveryRepository(session).enqueue(  # type: ignore[arg-type]
+        subscription_id=1, user_id=2, listing_id=3, score=0.9, payload={}, now=MOMENT
+    )
+
+    (insert,) = session.statements
+    sql = _flat(insert)
+    assert sql.startswith(
+        "INSERT INTO notifications (subscription_id, listing_id, score, created_at) SELECT "
+    )
+    assert "WHERE EXISTS (SELECT * FROM subscriptions WHERE subscriptions.id = " in sql
+    assert ENTITLED in sql
+    assert "ON CONFLICT (subscription_id, listing_id) DO NOTHING RETURNING notifications.id" in sql
+    assert params_of(insert)["expires_at_1"] == MOMENT, "срок судят по моменту прохода"
+    # Что именно вставляется и в каком порядке: подписка, карточка, оценка, слот суток — и
+    # те же подписка и момент в проверке права. Перепутанные идентификаторы лежали бы в
+    # чужой строке, а не падали бы ошибкой.
+    assert list(params_of(insert).values()) == [1, 3, 0.9, MOMENT, 1, MOMENT]
+
+
+async def test_the_claim_and_the_enqueue_ask_one_and_the_same_predicate() -> None:
+    """Копия условия разъезжается тихо: выбор отсёк просроченную, а постановка поставила бы."""
+    session = Recorder(scalar=17)
+    await DeliveryRepository(session).enqueue(  # type: ignore[arg-type]
+        subscription_id=1, user_id=2, listing_id=3, score=0.9, payload={}, now=MOMENT
+    )
+
+    assert ENTITLED in _flat(_due_statement(limit=1, now=MOMENT))
+    assert ENTITLED in _flat(session.statements[0])
+
+
+async def test_a_lapsed_subscription_adds_nothing_to_the_outbox() -> None:
+    """Вставка не вернула строку — ни записи, ни письма в очереди."""
+    session = Recorder(scalar=None)
+
+    queued = await DeliveryRepository(session).enqueue(  # type: ignore[arg-type]
+        subscription_id=1, user_id=2, listing_id=3, score=0.9, payload={}, now=MOMENT
+    )
+
+    assert queued is False and session.added == []
+
+
+async def test_cancel_lapsed_cancels_pending_rows_of_subscriptions_expired_before_cutoff() -> None:
+    session = Recorder(rows=[(1,), (2,)])
+
+    cancelled = await MonitorRepository(session).cancel_lapsed(  # type: ignore[arg-type]
+        now=MOMENT, grace=timedelta(hours=6)
+    )
+
+    assert cancelled == 2
+    (statement,) = session.statements
+    sql = _flat(statement)
+    assert sql.startswith("UPDATE outbox SET status=")
+    assert "outbox.subscription_id IN (SELECT subscriptions.id FROM subscriptions WHERE " in sql
+    assert "subscriptions.expires_at < " in sql, "ровно в границу льготы доставка ещё идёт"
+    params = params_of(statement)
+    assert params["status"] == "cancelled"
+    assert params["status_1"] == "pending", "отменяем только ждущее: отправленное не трогаем"
+    assert params["expires_at_1"] == MOMENT - timedelta(hours=6)
+
+
+async def test_the_grace_moves_the_cutoff_back_by_exactly_its_length() -> None:
+    session = Recorder()
+
+    await MonitorRepository(session).cancel_lapsed(  # type: ignore[arg-type]
+        now=MOMENT, grace=timedelta(minutes=90)
+    )
+
+    assert params_of(session.statements[0])["expires_at_1"] == MOMENT - timedelta(minutes=90)

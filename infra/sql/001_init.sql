@@ -432,7 +432,10 @@ CREATE TABLE IF NOT EXISTS outbox (
     subscription_id BIGINT   REFERENCES subscriptions(id) ON DELETE CASCADE,
     notification_id BIGINT   UNIQUE REFERENCES notifications(id) ON DELETE CASCADE,
     payload      JSONB       NOT NULL,
-    status       TEXT        NOT NULL DEFAULT 'pending',  -- pending|sent|failed
+    -- pending|sent|failed|cancelled. cancelled — право на сообщение кончилось раньше, чем оно
+    -- ушло (подписка истекла, льгота прошла): строку не удаляем, чтобы карточка повторно не
+    -- ставилась и причина молчания читалась по базе.
+    status       TEXT        NOT NULL DEFAULT 'pending',
     attempts     INT         NOT NULL DEFAULT 0,
     scheduled_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     sent_at      TIMESTAMPTZ
