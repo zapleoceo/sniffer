@@ -272,6 +272,10 @@ class FakeLedger:
         await self._enter("record_payment")
         fresh = record.charge_id not in self.payments
         self.payments.setdefault(record.charge_id, record)
+        if fresh and any(
+            e.kind == EventKind.REFUNDED and e.charge_id == record.charge_id for e in self.events
+        ):
+            self.refunded.add(record.charge_id)
         return fresh
 
     async def get_payment(self, charge_id: str) -> StoredPayment | None:
@@ -318,8 +322,9 @@ class FakeLedger:
     async def mark_refunded(self, charge_id: str) -> bool:
         await self._enter("mark_refunded")
         changed = charge_id in self.payments and charge_id not in self.refunded
-        self.refunded.add(charge_id)
-        self.refunding.discard(charge_id)
+        if changed:
+            self.refunded.add(charge_id)
+            self.refunding.discard(charge_id)
         return changed
 
     async def first_payment_of(self, invoice_payload: str) -> StoredPayment | None:
@@ -341,9 +346,27 @@ class FakeLedger:
             p
             for p in found
             if p is not None
-            and p.created_at < older_than
             and (
-                p.status == REFUNDING or (p.status == PAID and p.kind == PaymentKind.UNKNOWN.value)
+                (p.created_at < older_than and p.status == REFUNDING)
+                or (
+                    p.created_at < older_than
+                    and p.status == PAID
+                    and p.kind == PaymentKind.UNKNOWN.value
+                )
+                or (p.status == PAID and await self.has_event(EventKind.REFUNDED, p.charge_id))
+                or (
+                    p.status == REFUNDED
+                    and (
+                        not await self.has_event(EventKind.REFUND_SYNCED, p.charge_id)
+                        or (
+                            (p.is_recurring or p.is_first_recurring)
+                            and p.invoice_payload is not None
+                            and not await self.has_event(
+                                EventKind.RENEWAL_CANCELED, p.invoice_payload
+                            )
+                        )
+                    )
+                )
             )
         ]
 

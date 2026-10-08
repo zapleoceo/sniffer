@@ -10,6 +10,7 @@ from datetime import timedelta
 import pytest
 
 from sniffer.bot import billing_owner_wording as owner_words
+from sniffer.bot.billing import RefundedFacts
 from sniffer.bot.billing_payments import PaymentDesk
 from sniffer.bot.billing_reconcile import Every, ReconcileMode, StarsReconciler
 from sniffer.domain import plans
@@ -425,3 +426,68 @@ async def test_report_mode_does_not_mark_refunds_in_the_ledger() -> None:
     await reconciler.reconcile()
 
     assert "back" not in ledger.refunded
+
+
+async def test_refunded_payment_older_than_lookback_retries_slot_sync() -> None:
+    reconciler, ledger, api, slots = build()
+    await ledger.record_payment(stored("old"))
+    ledger.created["old"] = NOW - timedelta(days=5)
+    await ledger.mark_refunded("old")
+    slots.failure = Failing("temporary slot error")
+
+    await reconciler.reconcile()
+    assert not await ledger.has_event(EventKind.REFUND_SYNCED, "old")
+    slots.failure = None
+    await reconciler.reconcile()
+
+    assert await ledger.has_event(EventKind.REFUND_SYNCED, "old")
+    assert slots.syncs == [CLIENT, CLIENT]
+    assert api.refunds == []
+
+
+async def test_report_mode_repairs_confirmed_refund_without_refund_api() -> None:
+    reconciler, ledger, api, slots = build(mode=ReconcileMode.REPORT)
+    await ledger.record_payment(stored("reported"))
+    await ledger.mark_refunded("reported")
+    slots.failure = Failing("temporary slot error")
+
+    await reconciler.reconcile()
+    assert not await ledger.has_event(EventKind.REFUND_SYNCED, "reported")
+    slots.failure = None
+    await reconciler.reconcile()
+
+    assert await ledger.has_event(EventKind.REFUND_SYNCED, "reported")
+    assert api.refunds == []
+
+
+async def test_early_refund_sync_does_not_complete_later_payment_sync() -> None:
+    reconciler, ledger, api, slots = build(mode=ReconcileMode.REPORT)
+    desk = PaymentDesk(
+        ledger=ledger, api=api, slots=slots, owner_id=OWNER, reply_hours=48, clock=lambda: NOW
+    )
+    await desk.on_refunded(RefundedFacts(CLIENT, "early", 10, PAYLOAD.encode(), update_id=901))
+    assert not await ledger.has_event(EventKind.REFUND_SYNCED, "early")
+    await ledger.record_payment(stored("early"))
+    slots.failure = Failing("temporary slot error")
+    await reconciler.reconcile()
+    assert not await ledger.has_event(EventKind.REFUND_SYNCED, "early")
+    slots.failure = None
+    await reconciler.reconcile()
+
+    assert await ledger.has_event(EventKind.REFUND_SYNCED, "early")
+    assert api.refunds == []
+
+
+async def test_failed_owner_alert_is_retried() -> None:
+    reconciler, ledger, api, _slots = build()
+    await ledger.record_payment(stored("gap"))
+    ledger.created["gap"] = LONG_AGO
+    api.failures["send_text"] = Failing("temporary send error")
+
+    await reconciler.reconcile()
+    assert not await ledger.has_event(EventKind.RECONCILE_GAP, "gap")
+    api.failures.clear()
+    await reconciler.reconcile()
+
+    assert await ledger.has_event(EventKind.RECONCILE_GAP, "gap")
+    assert len(api.texts) == 1
