@@ -28,6 +28,20 @@ from sniffer.search.market_terms import ATTRIBUTE_TERMS
 CITY = "nha_trang"
 
 
+async def test_production_intake_does_not_mark_default_city_as_explicit(
+    offline: None,
+) -> None:
+    from sniffer.search.refinements import merge_edit, refines
+
+    current = await QueryIntake().parse("Куплю honda lead в Дананге до 20 млн")
+    fresh = await QueryIntake().parse("honda vision", for_edit=True)
+
+    assert current.city == "da_nang"
+    assert fresh.city is None
+    assert refines(current, fresh)
+    assert merge_edit(current, fresh).city == "da_nang"
+
+
 class FakeBroker:
     """Подменяет только `structured` — больше разбору от брокера не нужно."""
 

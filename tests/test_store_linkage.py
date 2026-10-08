@@ -142,6 +142,47 @@ async def test_load_reads_the_armed_flag_from_the_user_row(
     assert dialogue.starting_new is armed
 
 
+async def test_topic_selection_reads_selected_root_not_general_pointer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trace = Trace()
+    general = StoredPassport(id=5, user_id=7, version=1, passport=bike())
+    topic = StoredPassport(id=6, user_id=7, version=1, passport=bike())
+
+    class Passports:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def select(self, user_id: int, root: int, **_kwargs: object) -> bool:
+            return user_id == 7 and root in {5, 6}
+
+        async def get_current(self, _user_id: int) -> StoredPassport:
+            return general
+
+        async def current_of(self, _user_id: int, root: int) -> StoredPassport | None:
+            return topic if root == 6 else None
+
+        async def list_events(self, _root: int) -> list[Any]:
+            return []
+
+    class Tabs:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def root_of(self, user_id: int, thread_id: int) -> int | None:
+            return 6 if user_id == 7 and thread_id == 100 else None
+
+    monkeypatch.setattr(store_module, "PassportRepository", Passports)
+    monkeypatch.setattr(store_module, "TabRepository", Tabs)
+    store = PassportStore(lambda: _Scope(trace))  # type: ignore[arg-type]
+
+    selected = await store.select(Dialogue(user_id=7, thread_id=100), 6)
+
+    assert selected.passport is not None and selected.passport.root == 6
+    wrong_topic = await store.select(Dialogue(user_id=7, passport=topic, thread_id=100), 5)
+    assert wrong_topic.passport is not None and wrong_topic.passport.root == 6
+
+
 async def test_await_new_writes_the_flag_and_commits_it(monkeypatch: pytest.MonkeyPatch) -> None:
     """Без `commit` флаг жил бы до закрытия сессии, а следующее сообщение его не увидело бы."""
     store, trace = _storage(monkeypatch)

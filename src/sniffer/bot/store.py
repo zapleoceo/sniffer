@@ -259,6 +259,10 @@ class PassportStore:
     async def select(self, dialogue: Dialogue, root: int, *, editing: bool = False) -> Dialogue:
         """Переключить контекст только на принадлежащую клиенту цепочку."""
         async with self._sessions() as session:
+            if dialogue.thread_id is not None and (
+                await TabRepository(session).root_of(dialogue.user_id, dialogue.thread_id) != root
+            ):
+                return dialogue
             passports = PassportRepository(session)
             if not await passports.select(
                 dialogue.user_id,
@@ -267,7 +271,11 @@ class PassportStore:
                 move_pointer=dialogue.thread_id is None,
             ):
                 return dialogue
-            current = await passports.get_current(dialogue.user_id)
+            current = (
+                await passports.current_of(dialogue.user_id, root)
+                if dialogue.thread_id is not None
+                else await passports.get_current(dialogue.user_id)
+            )
             events = [] if current is None else await passports.list_events(current.root)
             await session.commit()
         return Dialogue(

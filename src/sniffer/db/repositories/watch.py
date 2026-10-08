@@ -21,6 +21,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sniffer.db import models
 from sniffer.db.models import tabs
 from sniffer.db.repositories.base import Repository
+from sniffer.db.repositories.delivery import DeliveryRepository
 from sniffer.db.repositories.passports import not_archived
 
 
@@ -82,6 +83,7 @@ class WatchRepository(Repository):
             )
             .values(is_active=False)
         )
+        await DeliveryRepository(self._session).cancel_pending_for_search(user_id, root)
         table = cast(Table, models.SearchTab.__table__)
         await self._session.execute(
             pg_insert(table)

@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -283,6 +284,115 @@ async def test_cancelling_a_clients_queue_leaves_everyone_elses_and_sent_rows_al
     rows = {row.id: row for row in await db_session.scalars(select(models.Outbox))}
     assert (rows[waiting].status, rows[waiting].last_error) == ("cancelled", "forbidden")
     assert rows[delivered].status == "sent" and rows[strangers].status == "pending"
+
+
+async def test_explicit_stop_cancels_due_and_future_rows_for_only_one_search(
+    db_session: AsyncSession,
+) -> None:
+    user_id, stopped_sub = await _subscriber(db_session, 551, expires_at=NOW + timedelta(days=1))
+    _, other_sub = await _subscriber(db_session, 551, expires_at=NOW + timedelta(days=1))
+    rows = [
+        models.Outbox(
+            user_id=user_id,
+            subscription_id=sub,
+            payload=dict(PAYLOAD),
+            scheduled_at=scheduled,
+            status=status,
+        )
+        for sub, scheduled, status in [
+            (stopped_sub, NOW - timedelta(minutes=1), "pending"),
+            (stopped_sub, NOW + timedelta(hours=1), "pending"),
+            (stopped_sub, NOW - timedelta(minutes=1), "sent"),
+            (other_sub, NOW - timedelta(minutes=1), "pending"),
+            (None, NOW - timedelta(minutes=1), "pending"),
+        ]
+    ]
+    db_session.add_all(rows)
+    await db_session.commit()
+    subscription = await db_session.get(models.Subscription, stopped_sub)
+    assert subscription is not None
+    root = subscription.passport_root
+    ids = [row.id for row in rows]
+    repo = DeliveryRepository(db_session)
+
+    assert await repo.set_active(user_id=user_id, passport_root=root, active=False, now=NOW)
+    assert await repo.cancel_pending_for_search(user_id, root) == 2
+    assert await repo.cancel_pending_for_search(user_id, root) == 0
+    await db_session.commit()
+    db_session.expire_all()
+
+    stored = [await db_session.get(models.Outbox, row_id) for row_id in ids]
+    assert [row.status for row in stored if row is not None] == [
+        "cancelled",
+        "cancelled",
+        "sent",
+        "pending",
+        "pending",
+    ]
+    assert [row.id for row in await repo.lock_pending(ids, now=NOW)] == [ids[3], ids[4]]
+
+
+async def test_dispatch_skips_a_subscription_while_stop_holds_its_lock(
+    db_engine: AsyncEngine,
+) -> None:
+    sessions = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with sessions() as setup:
+        user_id, sub_id = await _subscriber(setup, 552, expires_at=NOW + timedelta(days=1))
+        row = models.Outbox(
+            user_id=user_id,
+            subscription_id=sub_id,
+            payload=dict(PAYLOAD),
+            scheduled_at=NOW - timedelta(minutes=1),
+        )
+        setup.add(row)
+        await setup.commit()
+        row_id = row.id
+        subscription = await setup.get(models.Subscription, sub_id)
+        assert subscription is not None
+        root = subscription.passport_root
+
+    async with sessions() as stopping, sessions() as dispatching:
+        stop = DeliveryRepository(stopping)
+        assert await stop.set_active(user_id=user_id, passport_root=root, active=False, now=NOW)
+        assert await DeliveryRepository(dispatching).lock_pending([row_id], now=NOW) == []
+        assert await stop.cancel_pending_for_search(user_id, root) == 1
+        await stopping.commit()
+        assert await DeliveryRepository(dispatching).lock_pending([row_id], now=NOW) == []
+
+
+async def test_enqueue_cannot_commit_a_late_row_after_explicit_stop(
+    db_engine: AsyncEngine,
+) -> None:
+    sessions = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with sessions() as setup:
+        user_id, sub_id = await _subscriber(setup, 553, expires_at=NOW + timedelta(days=1))
+        subscription = await setup.get(models.Subscription, sub_id)
+        assert subscription is not None
+        root = subscription.passport_root
+        await setup.commit()
+
+    async with sessions() as stopping, sessions() as enqueuing:
+        stop = DeliveryRepository(stopping)
+        assert await stop.set_active(user_id=user_id, passport_root=root, active=False, now=NOW)
+        pending_insert = asyncio.create_task(
+            DeliveryRepository(enqueuing).enqueue(
+                subscription_id=sub_id,
+                user_id=user_id,
+                listing_id=987654,
+                score=0.9,
+                payload=dict(PAYLOAD),
+                now=NOW,
+            )
+        )
+        await asyncio.sleep(0.05)
+        assert not pending_insert.done(), "enqueue must wait for the stop's subscription lock"
+        await stop.cancel_pending_for_search(user_id, root)
+        await stopping.commit()
+        assert not await pending_insert
+        await enqueuing.commit()
+
+    async with sessions() as check:
+        assert await check.scalar(select(models.Outbox.id)) is None
 
 
 async def test_blocking_keeps_the_first_moment_and_unblocking_clears_it(
