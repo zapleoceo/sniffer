@@ -6,6 +6,9 @@ import re
 
 from sniffer.domain.dialogue import apply_answer
 from sniffer.domain.passport import Passport
+from sniffer.search.housing_preferences import HOUSING, KEY
+from sniffer.search.housing_preferences import current as current_housing_preferences
+from sniffer.search.housing_preferences import updates as housing_preference_updates
 from sniffer.search.intake_rules import detect_category, detect_intent, parse_query
 
 # Only a complete price phrase is an implicit edit. An unknown noun such as
@@ -48,12 +51,26 @@ def merge_edit(current: Passport, fresh: Passport) -> Passport:
         or (detect_intent(current.raw_query) if current.category is None else current.intent)
         or fresh.intent
     )
+    merged_attributes = {**attributes, **fresh.attributes}
+    if (fresh.category or current.category) in HOUSING:
+        wishes = current_housing_preferences(attributes)
+        for kind, value in housing_preference_updates(
+            fresh.raw_query, fresh.category or current.category
+        ).items():
+            if value is None:
+                wishes.pop(kind, None)
+            else:
+                wishes[kind] = value
+        if wishes:
+            merged_attributes[KEY] = wishes
+        else:
+            merged_attributes.pop(KEY, None)
     revised = current.model_copy(
         update={
             "intent": intent,
             "city": fresh.city or current.city,
             "category": fresh.category or current.category,
-            "attributes": {**attributes, **fresh.attributes},
+            "attributes": merged_attributes,
             "raw_query": fresh.raw_query,
         }
     )
@@ -67,8 +84,10 @@ def merge_edit(current: Passport, fresh: Passport) -> Passport:
 
 
 def _history(current: Passport, text: str) -> str:
-    original = current.raw_query.split("\nПоследнее уточнение", 1)[0][:300]
-    return f"{original}\nПоследнее уточнение (заменяет прежние условия): {text[:150]}"
+    if current.category not in HOUSING:
+        original = current.raw_query.split("\nПоследнее уточнение", 1)[0][:300]
+        return f"{original}\nПоследнее уточнение (заменяет прежние условия): {text[:150]}"
+    return f"{current.raw_query}\nLatest follow-up: {text}"
 
 
 def refines(current: Passport, fresh: Passport) -> bool:
@@ -92,6 +111,7 @@ def refines(current: Passport, fresh: Passport) -> bool:
         or fresh.budget.max is not None
         or fresh.category is not None
         or fresh.city is not None
+        or housing_preference_updates(fresh.raw_query, current.category)
     )
 
 

@@ -20,6 +20,7 @@ from math import exp
 
 from sniffer.domain.match_filter import build_match_filter, ceiling_vnd
 from sniffer.domain.passport import (
+    HOUSING_PREFERENCES_KEY,
     Currency,
     Passport,
     engine_cc_bounds,
@@ -121,7 +122,7 @@ def _known_attribute_conflicts(listing: Listing, passport: Passport) -> bool:
         if (low is not None and actual_cc < low) or (high is not None and actual_cc > high):
             return True
     for field, wanted in wanted_all.items():
-        if field in _NOT_EQUALITY:
+        if field in _NOT_EQUALITY or field == HOUSING_PREFERENCES_KEY:
             continue
         actual = listing.attributes.get(field)
         if conflicts(field, actual, wanted, passport.attributes):
@@ -160,7 +161,11 @@ def _price_fit(listing: Listing, passport: Passport) -> float:
 
 def _attribute_fit(listing: Listing, passport: Passport) -> float:
     """Доля совпавших атрибутов паспорта. Пустой паспорт — половина."""
-    wanted = {k: v for k, v in passport.attributes.items() if k not in _NOT_EQUALITY}
+    wanted = {
+        k: v
+        for k, v in passport.attributes.items()
+        if k not in _NOT_EQUALITY and k != HOUSING_PREFERENCES_KEY
+    }
     if not wanted:
         return 0.5
     have = listing.attributes

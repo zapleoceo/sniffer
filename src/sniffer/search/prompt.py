@@ -11,6 +11,8 @@ from collections.abc import Sequence
 from typing import Any
 
 from sniffer.domain.passport import Budget, Passport, PricePeriod
+from sniffer.search.housing_preferences import HOUSING, effective_query
+from sniffer.search.housing_preferences import KEY as HOUSING_PREFERENCES_KEY
 from sniffer.search.plan import LOW_PRIORITY, MAX_TASKS, TOP_PRIORITY
 from sniffer.search.vocabulary import (
     attribute_phrases,
@@ -162,10 +164,22 @@ def _passport_block(passport: Passport) -> str:
         ("город", f"{city_name(city, 'ru')} ({city})" if city else ""),
         ("районы", ", ".join(passport.districts)),
         ("бюджет", _budget_line(passport.budget)),
-        ("атрибуты", ", ".join(f"{key}={value}" for key, value in passport.attributes.items())),
+        (
+            "атрибуты",
+            ", ".join(
+                f"{key}={value}"
+                for key, value in passport.attributes.items()
+                if key != HOUSING_PREFERENCES_KEY
+            ),
+        ),
         ("обязательно", ", ".join(passport.must_have)),
         ("недопустимо", ", ".join(passport.deal_breakers)),
-        ("формулировка клиента", passport.raw_query),
+        (
+            "формулировка клиента",
+            effective_query(passport.raw_query, passport.attributes)
+            if passport.category in HOUSING
+            else passport.raw_query,
+        ),
     ]
     return "\n".join(f"- {label}: {value}" for label, value in rows if value)
 

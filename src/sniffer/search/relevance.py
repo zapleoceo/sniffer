@@ -6,6 +6,8 @@ import re
 from datetime import UTC, datetime
 from math import exp
 
+from sniffer.domain.facts_amenities import amenity_facts
+from sniffer.domain.facts_text import fact_text
 from sniffer.domain.fingerprint import normalized
 from sniffer.domain.passport import (
     ENGINE_CC_BAND,
@@ -17,6 +19,7 @@ from sniffer.domain.passport import (
     with_default_attributes,
 )
 from sniffer.search.engine_size import listing_cc_values
+from sniffer.search.housing_preferences import KEY as HOUSING_PREFERENCES_KEY
 from sniffer.search.intake_rules import (
     category_of,
     detect_brand,
@@ -169,6 +172,11 @@ def _contradicts(item: RawItem, passport: Passport, usd_vnd: float | None) -> bo
         return True
     if _contrary_furnished(passport, text):
         return True
+    for field in ("balcony", "furnished"):
+        wanted = passport.attributes.get(field)
+        known = _housing_bool(item, field)
+        if isinstance(wanted, bool) and known is not None and known != wanted:
+            return True
     if _wrong_engine(
         text,
         passport.attributes.get("engine_cc"),
@@ -580,15 +588,36 @@ def _budget_floor_vnd(budget: Budget, usd_vnd: float | None) -> float | None:
 
 
 def _attribute_fit(item: RawItem, passport: Passport) -> float:
-    if passport.category is None or not passport.attributes:
+    wanted = {
+        key: value for key, value in passport.attributes.items() if key != HOUSING_PREFERENCES_KEY
+    }
+    if passport.category is None or not wanted:
         return 0.5
     haystack = f"{item.title} {item.text}"
     matched = sum(
-        _mentions(passport, field, value, haystack) for field, value in passport.attributes.items()
+        _housing_bool(item, field) is value
+        if field in {"balcony", "furnished"} and isinstance(value, bool)
+        else _mentions(passport, field, value, haystack)
+        for field, value in wanted.items()
     )
     # Отсутствующее слово не считаем несовпадением: Chotot уже мог отфильтровать
     # это свойство структурным полем, а оно не обязано повторяться в заголовке.
-    return 0.5 + 0.5 * matched / len(passport.attributes)
+    return 0.5 + 0.5 * matched / len(wanted)
+
+
+def _housing_bool(item: RawItem, field: str) -> bool | None:
+    attributes = item.raw.get("attributes")
+    if isinstance(attributes, dict) and isinstance(attributes.get(field), bool):
+        return bool(attributes[field])
+    if field == "furnished":
+        value = detect_housing_attributes(f"{item.title} {item.text}", Category.APARTMENT).get(
+            field
+        )
+        return value if isinstance(value, bool) else None
+    if field == "balcony":
+        value = amenity_facts(fact_text(f"{item.title}\n{item.text}")).get(field)
+        return value if isinstance(value, bool) else None
+    return None
 
 
 def _mentions(passport: Passport, field: str, value: object, haystack: str) -> bool:

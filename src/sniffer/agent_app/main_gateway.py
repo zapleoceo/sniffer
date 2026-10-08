@@ -16,6 +16,7 @@ from sniffer.db.repositories.agent_requests import AgentRequestRepository
 from sniffer.db.repositories.catalog_observations import CatalogObservationRepository
 from sniffer.db.repositories.collection_tasks import CollectionTaskRepository
 from sniffer.domain.passport import Currency, Passport, counterpart_deal_type
+from sniffer.search.housing_preferences import KEY as HOUSING_PREFERENCES_KEY
 
 UNSUPPORTED_BUDGET = (
     "Каталог пока умеет строго проверять бюджет только в VND и USD. "
@@ -29,7 +30,9 @@ def _unsupported_budget(passport: Passport) -> bool:
 
 def collection_scope(passport: Passport) -> CollectionScope:
     """Build a stable, non-free-form collection identity from the owned passport."""
-    attrs = passport.attributes
+    attrs = {
+        key: value for key, value in passport.attributes.items() if key != HOUSING_PREFERENCES_KEY
+    }
     canonical = {
         "city": passport.city,
         "category": passport.category,
