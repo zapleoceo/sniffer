@@ -195,9 +195,12 @@ async def test_set_active_judges_the_term_by_the_moment_it_was_given(
 
     after_term = now + timedelta(days=2)
     assert not await repo.set_active(
-        user_id=user_id, passport_root=root, active=False, now=after_term
+        user_id=user_id, passport_root=root, active=True, now=after_term
     )
-    assert await repo.set_active(user_id=user_id, passport_root=root, active=False, now=now)
+    assert await repo.set_active(user_id=user_id, passport_root=root, active=False, now=after_term)
+    assert not await db_session.scalar(
+        select(models.Subscription.is_active).where(models.Subscription.id == sub_id)
+    )
 
 
 # ── курс доллара (D2) ───────────────────────────────────────────────────────
