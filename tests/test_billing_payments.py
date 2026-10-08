@@ -412,6 +412,7 @@ LEDGER_STEPS = {
     "first_payment_of",
     "first_charge_of",
     "record_event",
+    "has_event",
 }
 INTERRUPTS = [
     pytest.param(KeyboardInterrupt, id="KeyboardInterrupt"),
