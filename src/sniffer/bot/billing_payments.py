@@ -265,14 +265,14 @@ class PaymentDesk:
         notes: list[str] = []
         current = await flow.step("get_payment", lambda: self._ledger.get_payment(charge_id))
         if not current.ok:
-            return RefundResult(False, describe(current.error or Exception()))
+            notes.append("Не удалось прочитать журнал платежей")
         confirmed = current.value is not None and current.value.status == REFUNDED
         if not confirmed:
             planned = await flow.step(
                 "mark_refunding", lambda: self._ledger.mark_refunding(charge_id)
             )
             if not planned.ok:
-                return RefundResult(False, describe(planned.error or Exception()))
+                notes.append("Не удалось записать намерение возврата")
             called = await flow.step(
                 "refund",
                 lambda: self._api.refund_star_payment(user_id=user_id, charge_id=charge_id),
@@ -335,7 +335,7 @@ class PaymentDesk:
             lambda: self._api.cancel_star_subscription(user_id=user_id, charge_id=charge),
         )
         if not stopped.ok:
-            return ["Продление не остановлено: требуется повторная сверка"]
+            return ["продление не отключено: требуется повторная сверка"]
         saved = await flow.step(
             "record_cancel",
             lambda: self._ledger.record_event(

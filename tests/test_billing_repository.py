@@ -361,7 +361,7 @@ async def test_the_first_payment_of_a_subscription_comes_back_with_its_amount(
     assert await repo.first_payment_of("v2:s:42:2026-10-03:ffffffffffff") is None
 
 
-async def test_unsettled_refunds_are_foreign_paid_rows_and_refunding_ones_only(
+async def test_unsettled_refunds_include_confirmed_rows_with_pending_effects(
     db_session: AsyncSession,
 ) -> None:
     user_id = await _user(db_session)
@@ -381,8 +381,8 @@ async def test_unsettled_refunds_are_foreign_paid_rows_and_refunding_ones_only(
     }
     young = await repo.unsettled_refunds(datetime.now(UTC) - timedelta(days=1))
 
-    assert found == {"foreign", "half"}
-    assert young == [], "платёж моложе границы сверка не трогает"
+    assert found == {"foreign", "half", "done"}
+    assert {p.charge_id for p in young} == {"done"}
 
 
 async def test_a_reconciled_payment_remembers_where_it_came_from(

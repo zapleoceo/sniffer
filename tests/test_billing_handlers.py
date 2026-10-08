@@ -311,7 +311,7 @@ async def test_a_refund_message_and_a_subscription_update_are_journaled(wired: W
     await wired.feed(fx.subscription_changed(PAYLOAD, "canceled"))
 
     kinds = [event.kind.value for event in wired.ledger.events]
-    assert kinds == ["refunded", "sub_canceled"]
+    assert kinds == ["refunded", "refund_synced", "renewal_canceled", "sub_canceled"]
     assert "charge-1" in wired.ledger.refunded
 
 

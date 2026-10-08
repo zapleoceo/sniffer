@@ -455,6 +455,7 @@ FLOWS: dict[str, tuple[Callable[[PaymentDesk], Awaitable[object]], tuple[str, ..
             "mark_refunding",
             "refund_star_payment",
             "mark_refunded",
+            "has_event",
             "sync",
             "first_charge_of",
             "cancel_star_subscription",
@@ -468,6 +469,7 @@ FLOWS: dict[str, tuple[Callable[[PaymentDesk], Awaitable[object]], tuple[str, ..
             "mark_refunding",
             "refund_star_payment",
             "mark_refunded",
+            "has_event",
             "sync",
             "first_charge_of",
             "cancel_star_subscription",
@@ -476,7 +478,7 @@ FLOWS: dict[str, tuple[Callable[[PaymentDesk], Awaitable[object]], tuple[str, ..
     ),
     "on_refunded": (
         refunded_flow,
-        ("get_payment", "mark_refunded", "sync", "record_event", "send_text"),
+        ("get_payment", "mark_refunded", "has_event", "sync", "record_event", "send_text"),
     ),
     "on_subscription": (subscription_flow, ("record_event",)),
 }
