@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import cast
 
-from sqlalchemy import Table, and_, func, or_, select, update
+from sqlalchemy import Table, and_, case, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from sniffer.db import models
@@ -30,6 +30,10 @@ from sniffer.domain.billing import (
 
 
 class BillingRepository(Repository):
+    async def _lock_charge(self, charge_id: str) -> None:
+        # Serialize a payment insert with a refund notice for the same charge.
+        await self._session.execute(select(func.pg_advisory_xact_lock(func.hashtext(charge_id))))
+
     async def insert_payment(self, user_id: int, record: PaymentRecord) -> bool:
         """Записать платёж в журнал. `False` — этот `charge_id` уже был.
 
@@ -37,7 +41,16 @@ class BillingRepository(Repository):
         упадёт, строка уже лежит, а в `raw` — всё, что прислал Telegram, и по
         ней платёж можно разобрать и вернуть вручную.
         """
+        await self._lock_charge(record.charge_id)
         table = cast(Table, models.Payment.__table__)
+        refunded = (
+            select(models.BillingEvent.id)
+            .where(
+                models.BillingEvent.charge_id == record.charge_id,
+                models.BillingEvent.kind == EventKind.REFUNDED.value,
+            )
+            .exists()
+        )
         inserted = await self._session.execute(
             pg_insert(table)
             .values(
@@ -45,7 +58,8 @@ class BillingRepository(Repository):
                 tg_user_id=record.tg_user_id,
                 amount=record.amount,
                 currency=record.currency,
-                status=PAID,
+                status=case((refunded, REFUNDED), else_=PAID),
+                refunded_at=case((refunded, func.now()), else_=None),
                 external_id=record.charge_id,
                 invoice_payload=record.invoice_payload,
                 kind=record.kind.value,
@@ -151,16 +165,57 @@ class BillingRepository(Repository):
         именно такую строку; без этого запроса она жила бы вечно. `older_than` не даёт
         сверке перехватить возврат, который прямо сейчас делает обработчик апдейта.
         """
+        refunded_notice = (
+            select(models.BillingEvent.id)
+            .where(
+                models.BillingEvent.charge_id == models.Payment.external_id,
+                models.BillingEvent.kind == EventKind.REFUNDED.value,
+            )
+            .exists()
+        )
+        synced = (
+            select(models.BillingEvent.id)
+            .where(
+                models.BillingEvent.charge_id == models.Payment.external_id,
+                models.BillingEvent.kind == EventKind.REFUND_SYNCED.value,
+            )
+            .exists()
+        )
+        canceled = (
+            select(models.BillingEvent.id)
+            .where(
+                models.BillingEvent.charge_id == models.Payment.invoice_payload,
+                models.BillingEvent.kind == EventKind.RENEWAL_CANCELED.value,
+            )
+            .exists()
+        )
         rows = await self._session.execute(
             select(models.Payment, models.User.tg_user_id)
             .join(models.User, models.User.id == models.Payment.user_id)
             .where(
-                models.Payment.created_at < older_than,
                 or_(
-                    models.Payment.status == REFUNDING,
                     and_(
+                        models.Payment.created_at < older_than, models.Payment.status == REFUNDING
+                    ),
+                    and_(
+                        models.Payment.created_at < older_than,
                         models.Payment.status == PAID,
                         models.Payment.kind == PaymentKind.UNKNOWN.value,
+                    ),
+                    and_(models.Payment.status == PAID, refunded_notice),
+                    and_(
+                        models.Payment.status == REFUNDED,
+                        or_(
+                            ~synced,
+                            and_(
+                                or_(
+                                    models.Payment.is_recurring,
+                                    models.Payment.is_first_recurring,
+                                ),
+                                models.Payment.invoice_payload.is_not(None),
+                                ~canceled,
+                            ),
+                        ),
                     ),
                 ),
             )
@@ -232,6 +287,8 @@ class BillingRepository(Repository):
 
     async def record_event(self, event: BillingEvent) -> bool:
         """Записать событие. `False` — апдейт с таким `update_id` уже был."""
+        if event.kind is EventKind.REFUNDED and event.charge_id is not None:
+            await self._lock_charge(event.charge_id)
         table = cast(Table, models.BillingEvent.__table__)
         inserted = await self._session.execute(
             pg_insert(table)

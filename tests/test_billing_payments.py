@@ -88,6 +88,17 @@ async def test_a_redelivered_update_is_silent_and_changes_nothing() -> None:
     assert len(ledger.payments) == 1 and api.refunds == []
 
 
+async def test_refund_status_write_failure_never_confirms_slot_sync() -> None:
+    payments, ledger, api, slots = desk_with_slots()
+    ledger.failures["mark_refunded"] = Failing("temporary database error")
+
+    await payments.on_payment(facts(total_amount=1))
+
+    assert api.refunds == [(CLIENT, "charge-1")]
+    assert slots.syncs == []
+    assert not await ledger.has_event(EventKind.REFUND_SYNCED, "charge-1")
+
+
 # ── чужой платёж возвращается сам ───────────────────────────────────────────
 
 
@@ -345,7 +356,11 @@ async def test_a_refund_made_elsewhere_is_marked_and_told_to_the_owner() -> None
 
     assert "charge-1" in ledger.refunded
     assert OWNER in [chat for chat, _text in api.texts] and "не через бота" in api.texts[0][1]
-    assert [event.kind for event in ledger.events] == [EventKind.REFUNDED]
+    assert [event.kind for event in ledger.events] == [
+        EventKind.REFUNDED,
+        EventKind.REFUND_SYNCED,
+        EventKind.RENEWAL_CANCELED,
+    ]
 
 
 async def test_a_refund_of_a_payment_we_never_recorded_is_told_to_the_owner() -> None:

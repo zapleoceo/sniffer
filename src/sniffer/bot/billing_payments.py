@@ -141,6 +141,11 @@ class PaymentDesk:
         if not saved.or_else(False):
             flow.finish()
             return None
+        stored = await flow.step("get_payment", lambda: self._ledger.get_payment(entry.charge_id))
+        if stored.value is not None and stored.value.status == REFUNDED:
+            await flow.step("sync_slots", lambda: self._slots.sync(entry.tg_user_id, self._clock()))
+            flow.finish()
+            return None
         reply = await self._reply_to_payment(flow, entry, facts, verdict)
         flow.finish()
         return reply
@@ -258,37 +263,86 @@ class PaymentDesk:
         Недоступный журнал возврат не останавливает: деньги клиента важнее учёта.
         """
         notes: list[str] = []
-        planned = await flow.step("mark_refunding", lambda: self._ledger.mark_refunding(charge_id))
-        if not planned.ok:
-            notes.append("журнал не обновлён до возврата")
-        called = await flow.step(
-            "refund",
-            lambda: self._api.refund_star_payment(user_id=user_id, charge_id=charge_id),
-        )
-        if not called.ok and not already_refunded(called.error):
-            return RefundResult(False, describe(called.error or Exception()), tuple(notes))
+        current = await flow.step("get_payment", lambda: self._ledger.get_payment(charge_id))
+        if not current.ok:
+            return RefundResult(False, describe(current.error or Exception()))
+        confirmed = current.value is not None and current.value.status == REFUNDED
+        if not confirmed:
+            planned = await flow.step(
+                "mark_refunding", lambda: self._ledger.mark_refunding(charge_id)
+            )
+            if not planned.ok:
+                return RefundResult(False, describe(planned.error or Exception()))
+            called = await flow.step(
+                "refund",
+                lambda: self._api.refund_star_payment(user_id=user_id, charge_id=charge_id),
+            )
+            if not called.ok and not already_refunded(called.error):
+                return RefundResult(False, describe(called.error or Exception()))
+            notice = await flow.step(
+                "record_refund",
+                lambda: self._ledger.record_event(
+                    BillingEvent(EventKind.REFUNDED, user_id, {}, charge_id=charge_id)
+                ),
+            )
+            if not notice.ok:
+                notes.append("Refund confirmation was not saved")
         marked = await flow.step("mark_refunded", lambda: self._ledger.mark_refunded(charge_id))
         if not marked.ok:
-            notes.append("журнал не обновлён: отметьте возврат вручную")
-        # Слот за возвращённый платёж снят сразу, а не в конце оплаченного срока.
-        resynced = await flow.step("sync_slots", lambda: self._slots.sync(user_id, self._clock()))
-        if not resynced.ok:
-            notes.append("слоты не пересчитаны: сверка сделает это сама")
+            notes.append("Refund status was not saved")
+        persisted = await flow.step("get_payment", lambda: self._ledger.get_payment(charge_id))
+        if not persisted.ok:
+            return RefundResult(False, describe(persisted.error or Exception()), tuple(notes))
+        if persisted.value is None:
+            return RefundResult(True, notes=tuple([*notes, "Payment not yet in ledger"]))
+        if persisted.value.status != REFUNDED:
+            return RefundResult(False, "Refunded status is pending", tuple(notes))
+        synced_before = await flow.step(
+            "has_refund_sync", lambda: self._ledger.has_event(EventKind.REFUND_SYNCED, charge_id)
+        )
+        if not synced_before.or_else(False):
+            resynced = await flow.step(
+                "sync_slots", lambda: self._slots.sync(user_id, self._clock())
+            )
+            if resynced.ok:
+                saved = await flow.step(
+                    "record_refund_sync",
+                    lambda: self._ledger.record_event(
+                        BillingEvent(EventKind.REFUND_SYNCED, user_id, {}, charge_id=charge_id)
+                    ),
+                )
+                if not saved.ok:
+                    notes.append("Slot sync confirmation was not saved")
+            else:
+                notes.append("Slot sync failed; reconciliation will retry")
         if recurring and payload:
             notes += await self._stop_renewal(flow, user_id, payload)
         return RefundResult(True, notes=tuple(notes))
 
     async def _stop_renewal(self, flow: Flow, user_id: int, payload: str) -> list[str]:
         """Возврат первого платежа подписки без отмены продлил бы её и списал клиента снова."""
+        done = await flow.step(
+            "has_cancel", lambda: self._ledger.has_event(EventKind.RENEWAL_CANCELED, payload)
+        )
+        if done.or_else(False):
+            return []
         first = await flow.step("first_charge", lambda: self._ledger.first_charge_of(payload))
         charge = first.or_else(None)
         if charge is None:
-            return ["первый платёж подписки не найден: отключите продление вручную"]
+            return ["First charge missing; reconciliation will retry"]
         stopped = await flow.step(
             "cancel_renewal",
             lambda: self._api.cancel_star_subscription(user_id=user_id, charge_id=charge),
         )
-        return [] if stopped.ok else ["продление не отключено: отключите вручную"]
+        if not stopped.ok:
+            return ["Продление не остановлено: требуется повторная сверка"]
+        saved = await flow.step(
+            "record_cancel",
+            lambda: self._ledger.record_event(
+                BillingEvent(EventKind.RENEWAL_CANCELED, user_id, {}, charge_id=payload)
+            ),
+        )
+        return [] if saved.ok else ["Cancellation confirmation was not saved"]
 
     async def refund(self, charge_id: str, *, user_id: int | None) -> str:
         """Команда владельца `/refund`: вернуть платёж. Возвращает ответ владельцу."""
@@ -324,19 +378,43 @@ class PaymentDesk:
         """
         flow = Flow("on_refunded")
         found = await flow.step("get_payment", lambda: self._ledger.get_payment(facts.charge_id))
+        event = BillingEvent(
+            EventKind.REFUNDED,
+            facts.payer_id or (found.value.tg_user_id if found.value else 0) or 0,
+            {"invoice_payload": facts.payload, "total_amount": facts.total_amount},
+            charge_id=facts.charge_id,
+            update_id=facts.update_id,
+        )
+        await flow.step("record_refund", lambda: self._ledger.record_event(event))
         await flow.step("mark_refunded", lambda: self._ledger.mark_refunded(facts.charge_id))
         payment = found.or_else(None)
         tg_user_id = payment.tg_user_id if payment is not None else facts.payer_id
         if tg_user_id is not None:
-            await flow.step("sync_slots", lambda: self._slots.sync(tg_user_id, self._clock()))
-            event = BillingEvent(
-                EventKind.REFUNDED,
-                tg_user_id,
-                {"invoice_payload": facts.payload, "total_amount": facts.total_amount},
-                charge_id=facts.charge_id,
-                update_id=facts.update_id,
+            persisted = await flow.step(
+                "get_payment", lambda: self._ledger.get_payment(facts.charge_id)
             )
-            await flow.step("record_event", lambda: self._ledger.record_event(event))
+            confirmed = persisted.value is not None and persisted.value.status == REFUNDED
+            synced = (
+                await flow.step("sync_slots", lambda: self._slots.sync(tg_user_id, self._clock()))
+                if confirmed
+                else None
+            )
+            if synced is not None and synced.ok:
+                await flow.step(
+                    "record_refund_sync",
+                    lambda: self._ledger.record_event(
+                        BillingEvent(
+                            EventKind.REFUND_SYNCED, tg_user_id, {}, charge_id=facts.charge_id
+                        )
+                    ),
+                )
+            if (
+                confirmed
+                and payment is not None
+                and (payment.is_recurring or payment.is_first_recurring)
+            ):
+                if payment.invoice_payload:
+                    await self._stop_renewal(flow, tg_user_id, payment.invoice_payload)
         # Свой возврат журнал уже знает (`refunding`/`refunded`); `paid` или отсутствие записи —
         # возврат сделан не нами (поддержка Telegram, спор).
         if payment is None or payment.status == PAID:

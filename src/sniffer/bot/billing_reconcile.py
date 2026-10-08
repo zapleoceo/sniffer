@@ -149,9 +149,9 @@ class StarsReconciler:
         recent = (
             await flow.step("recent", lambda: self._ledger.payments_since(now - LOOKBACK))
         ).or_else([])
+        marked = await self._mark_refunds(flow, history)
         recovered = await self._recover(flow, history, now)
         gaps = await self._gaps(flow, history, recent, complete=complete, now=now)
-        marked = await self._mark_refunds(flow, history)
         settled = await self._settle(flow, now)
         resynced = await self._resync(flow, recent, now)
         flow.finish()
@@ -308,16 +308,32 @@ class StarsReconciler:
         for tx in history:
             if tx.incoming:
                 continue
+            if not await self._notice_refund(flow, tx):
+                continue
             stored = await self._lookup(flow, tx.charge_id)
             payment = stored.or_else(None)
             if payment is None or payment.status == REFUNDED:
                 continue
             done = await self._mark(flow, tx.charge_id)
             if done.or_else(False) and payment.tg_user_id is not None:
-                user = payment.tg_user_id
-                await self._sync(flow, user, self._clock())
+                await self._settle_one(flow, payment)
                 marked += 1
         return marked
+
+    async def _notice_refund(self, flow: Flow, tx: StarTransaction) -> bool:
+        known = await flow.step(
+            "has_refund", lambda: self._ledger.has_event(EventKind.REFUNDED, tx.charge_id)
+        )
+        if known.or_else(False):
+            return True
+        event = BillingEvent(
+            EventKind.REFUNDED,
+            tx.user_id or 0,
+            {"total_amount": tx.amount, "invoice_payload": tx.invoice_payload},
+            charge_id=tx.charge_id,
+        )
+        saved = await flow.step("record_refund", lambda: self._ledger.record_event(event))
+        return saved.ok
 
     async def _settle(self, flow: Flow, now: datetime) -> int:
         """Довести возвраты: «не наши» платежи, которые так и остались `paid`, и `refunding`."""
@@ -326,7 +342,10 @@ class StarsReconciler:
         )
         settled = 0
         for payment in stuck.or_else([]):
-            if self._mode is not ReconcileMode.REFUND or is_legacy_payload(payment.invoice_payload):
+            confirmed = payment.status == REFUNDED
+            if not confirmed and (
+                self._mode is not ReconcileMode.REFUND or is_legacy_payload(payment.invoice_payload)
+            ):
                 await self._report_refund(flow, payment)
                 continue
             result = await self._settle_one(flow, payment)
@@ -390,10 +409,12 @@ class StarsReconciler:
         known = await flow.step("has_event", lambda: self._ledger.has_event(kind, charge_id))
         if known.or_else(False):
             return False
-        if self._owner_id:
-            await flow.step("alert_owner", lambda: self._api.send_text(self._owner_id, text))
-        else:
+        if not self._owner_id:
             log.error("billing.reconcile_gap", kind=kind.value, charge_id=charge_id)
+            return False
+        sent = await flow.step("alert_owner", lambda: self._api.send_text(self._owner_id, text))
+        if not sent.ok:
+            return False
         event = BillingEvent(kind, tg_user_id, {"stage": kind.value}, charge_id=charge_id)
-        await flow.step("record_event", lambda: self._ledger.record_event(event))
-        return True
+        recorded = await flow.step("record_event", lambda: self._ledger.record_event(event))
+        return recorded.ok

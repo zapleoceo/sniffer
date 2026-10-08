@@ -143,6 +143,58 @@ async def test_a_refund_moves_forward_only_and_a_redelivered_payment_does_not_un
     assert stored is not None and stored.status == "refunded" and stored.refunded_at is not None
 
 
+async def test_refund_notice_before_payment_prevents_entitlement_in_real_repository(
+    db_session: AsyncSession,
+) -> None:
+    user_id = await _user(db_session)
+    repo = BillingRepository(db_session)
+    assert not await repo.mark_refunded("late-charge")
+    await repo.record_event(
+        BillingEvent(EventKind.REFUNDED, 42, {}, charge_id="late-charge", update_id=901)
+    )
+    await db_session.commit()
+
+    assert await repo.insert_payment(user_id, _record("late-charge"))
+    await db_session.commit()
+    stored = await repo.get_payment("late-charge")
+    assert stored is not None and stored.status == "refunded"
+    assert stored.refunded_at is not None
+    assert await repo.live_subscriptions(user_id, NOW) == 0
+    assert not await repo.insert_payment(user_id, _record("late-charge"))
+
+
+async def test_concurrent_refund_notice_and_payment_never_leave_paid_row(
+    db_engine: AsyncEngine,
+) -> None:
+    sessions = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with sessions() as setup:
+        user_id = await _user(setup)
+    gate = asyncio.Barrier(2)
+
+    async def payment() -> None:
+        async with sessions() as session:
+            await gate.wait()
+            await BillingRepository(session).insert_payment(user_id, _record("race-refund"))
+            await session.commit()
+
+    async def refund() -> None:
+        async with sessions() as session:
+            await gate.wait()
+            repo = BillingRepository(session)
+            await repo.record_event(
+                BillingEvent(EventKind.REFUNDED, 42, {}, charge_id="race-refund")
+            )
+            await repo.mark_refunded("race-refund")
+            await session.commit()
+
+    await asyncio.gather(payment(), refund())
+    async with sessions() as session:
+        repo = BillingRepository(session)
+        stored = await repo.get_payment("race-refund")
+        assert stored is not None and stored.status == "refunded"
+        assert await repo.live_subscriptions(user_id, NOW) == 0
+
+
 async def test_the_first_charge_of_a_subscription_is_its_earliest_payment(
     db_session: AsyncSession,
 ) -> None:

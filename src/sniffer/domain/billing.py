@@ -60,6 +60,8 @@ class EventKind(StrEnum):
     SUB_FAILED = "sub_failed"
     SUB_OTHER = "sub_other"
     REFUNDED = "refunded"
+    REFUND_SYNCED = "refund_synced"
+    RENEWAL_CANCELED = "renewal_canceled"
     SUPPORT = "support"
     # Сверка нашла расхождение и сказала о нём владельцу: по записи — один раз.
     RECONCILE_GAP = "reconcile_gap"
