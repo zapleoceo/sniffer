@@ -31,6 +31,8 @@ from sniffer.domain.passport import (
 )
 from sniffer.search.budget_rules import parse_budget
 from sniffer.search.engine_size import cc_glued_to_name, read_engine_size, without_engine_cc
+from sniffer.search.housing_preferences import KEY as HOUSING_PREFERENCES_KEY
+from sniffer.search.housing_preferences import updates as housing_preference_updates
 from sniffer.search.market_terms import ALL_CITY_NAMES, ATTRIBUTE_TERMS, LangTerms
 from sniffer.search.motorbike_models import BODY_SCOOTER, MOTORBIKE_BRANDS
 from sniffer.search.rooms import read_rooms
@@ -367,6 +369,11 @@ def parse_query(text: str, *, default_city: str = "") -> Passport:
     # (коробка, документы, объём), у жилья свой. Для транспорта функция вернёт
     # пусто, потому что мебели и комнат у мотобайка нет в его таблице.
     attributes.update(detect_housing_attributes(query, category))
+    preferences = housing_preference_updates(query, category)
+    if preferences:
+        attributes[HOUSING_PREFERENCES_KEY] = {
+            key: value for key, value in preferences.items() if value is not None
+        }
 
     known_city = city or default_city or None
     return Passport(
@@ -620,6 +627,24 @@ def detect_housing_attributes(text: str, category: Category | None) -> dict[str,
         found["furnished"] = furnished == "true"
     if _attribute_named_in(category, "sea_view", text) == "true":
         found["sea_view"] = True
+    # The listing extractor already records balcony as true/false/unknown.
+    # Do not turn a bare mention following a negation into a positive wish.
+    if re.search(r"\b(?:балкон\w*|balcon\w*)\b", text, re.IGNORECASE):
+        if re.search(r"\b(?:без|no|without)\s+(?:балкон\w*|balcon\w*)", text, re.I):
+            found["balcony"] = False
+        elif not re.search(
+            r"(?:балкон\w*\s+(?:необязател\w*|не\s+(?:обязател\w*|важ\w*|нуж\w*))|"
+            r"балкон\w*\s+нет\s+в\s+требованиях|"
+            r"балкон\w*[^.!?]{0,60}(?:желател\w*|не\s+обязател\w*)|"
+            r"не\s+нуж\w*\s+балкон\w*)",
+            text,
+            re.I,
+        ):
+            found["balcony"] = True
+    if furnished is None and re.search(
+        r"\b(?:(?:с|и)\s+мебелью|нужн\w*[^.!?]{0,100}\bмебель)\b", text, re.I
+    ):
+        found["furnished"] = True
     return found
 
 

@@ -125,6 +125,9 @@ class Budget(BaseModel):
     period: PricePeriod = PricePeriod.MONTH
 
 
+HOUSING_PREFERENCES_KEY = "_unverified_housing_preferences"
+
+
 class Passport(BaseModel):
     """Неизменяем: правка поля создаёт новую версию, а не переписывает эту."""
 

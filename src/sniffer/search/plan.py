@@ -15,6 +15,7 @@ import structlog
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from sniffer.domain.passport import Passport
+from sniffer.search.housing_preferences import KEY as HOUSING_PREFERENCES_KEY
 from sniffer.search.vocabulary import board_query_allowed, source_profile
 
 log = structlog.get_logger(__name__)
@@ -134,7 +135,9 @@ def context_params(passport: Passport) -> dict[str, Any]:
     if passport.intent:
         params["intent"] = passport.intent.value
     attributes = {
-        key: value for key, value in passport.attributes.items() if value not in (None, "", [], {})
+        key: value
+        for key, value in passport.attributes.items()
+        if key != HOUSING_PREFERENCES_KEY and value not in (None, "", [], {})
     }
     if attributes:
         params["attributes"] = attributes

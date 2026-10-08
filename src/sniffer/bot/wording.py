@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+from html import escape
+
 from sniffer.bot.naming import budget_phrase, category_noun
 from sniffer.domain.passport import Category, Intent, Passport
 from sniffer.domain.plans import (
@@ -24,6 +26,7 @@ from sniffer.domain.plans import (
     PAID_SEARCHES,
     SUBSCRIPTION_STARS,
 )
+from sniffer.search.housing_preferences import current as current_housing_preferences
 from sniffer.search.vocabulary import city_name, served_cities
 
 NOTHING_FOUND = (
@@ -108,6 +111,25 @@ def _is_broad(passport: Passport) -> bool:
 
 
 def result_header(
+    passport: Passport, total: int, shown: int, *, capped: bool = False, unpriced: int = 0
+) -> str:
+    header = _result_header(passport, total, shown, capped=capped, unpriced=unpriced)
+    caution = _housing_caution(passport)
+    return f"{header}\n{caution}" if caution else header
+
+
+def _housing_caution(passport: Passport) -> str:
+    if passport.category not in {Category.APARTMENT, Category.ROOM, Category.HOUSE}:
+        return ""
+    if not passport.raw_query:
+        return ""
+    return (
+        "Пожелания к жилью сохранены, но не проверены по каждому объявлению. "
+        "Сверьте детали с источником."
+    )
+
+
+def _result_header(
     passport: Passport, total: int, shown: int, *, capped: bool = False, unpriced: int = 0
 ) -> str:
     """Строка над карточками: что нашлось и, если запрос широкий, как сузить.
@@ -217,4 +239,14 @@ def accepted(passport: Passport) -> str:
         action = "Ищу покупателей"
     elif passport.intent is Intent.RENT_OUT:
         action = "Ищу арендаторов"
-    return f"Понял: {understood}. {action}, это занимает до минуты."
+    message = f"Понял: {understood}. {action}, это занимает до минуты."
+    unverified = list(current_housing_preferences(passport.attributes).values())
+    if unverified:
+        wishes = "; ".join(unverified)
+        message += (
+            f"\nПока не проверены по объявлениям: {escape(wishes[:500])}. "
+            "Другие детали исходного запроса также нужно сверить с источником."
+        )
+    elif caution := _housing_caution(passport):
+        message += f"\n{caution}"
+    return message

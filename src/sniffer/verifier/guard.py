@@ -43,6 +43,7 @@ import structlog
 from sniffer.broker.client import BrokerClient, BrokerError
 from sniffer.broker.usage import default_usage_sink
 from sniffer.domain.passport import Category, Currency, Intent, Passport
+from sniffer.search.housing_preferences import KEY as HOUSING_PREFERENCES_KEY
 
 # Словарь рынка — знание о том, как предмет называют люди. Охраннику он
 # нужен ровно за тем же, за чем планировщику: говорить с моделью словами
@@ -341,6 +342,8 @@ def _wanted(passport: Passport, usd_vnd: float | None) -> str:
     if passport.city:
         parts.append(CITY_WORDS.get(passport.city, passport.city))
     for field, value in passport.attributes.items():
+        if field == HOUSING_PREFERENCES_KEY:
+            continue
         parts.append(f"{field}={value}")
     ceiling = _ceiling_vnd(passport, usd_vnd)
     if ceiling is not None:
