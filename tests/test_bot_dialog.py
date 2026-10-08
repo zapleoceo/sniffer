@@ -248,6 +248,81 @@ async def test_repeat_searches_the_selected_request_without_a_new_version() -> N
     assert len(store.rows) == 2
 
 
+async def test_production_intake_refines_model_without_moving_the_city(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sniffer.config import Settings
+    from sniffer.search import intake as intake_module
+    from sniffer.search.intake import QueryIntake
+
+    monkeypatch.setattr(
+        intake_module,
+        "get_settings",
+        lambda: Settings(broker_project_key="", default_city="nha_trang"),
+    )
+    store = MemoryStore()
+    talker = Conversation(store, intake=QueryIntake, finder=nothing, recorder=FakeJournal())
+    await talker.on_text(CLIENT, "Куплю honda lead в Дананге до 20 млн", Replies())
+
+    await talker.on_text(CLIENT, "honda vision", Replies())
+
+    current = await store.load(CLIENT)
+    assert current.passport is not None
+    assert current.passport.passport.city == "da_nang"
+    assert current.passport.passport.attributes["model"] == "vision"
+    assert current.passport.version == 2
+    assert len(store.rows) == 2
+
+
+async def test_production_edit_keeps_an_omitted_city(monkeypatch: pytest.MonkeyPatch) -> None:
+    from sniffer.config import Settings
+    from sniffer.search import intake as intake_module
+    from sniffer.search.intake import QueryIntake
+
+    monkeypatch.setattr(
+        intake_module,
+        "get_settings",
+        lambda: Settings(broker_project_key="", default_city="nha_trang"),
+    )
+    store = MemoryStore()
+    talker = Conversation(store, intake=QueryIntake, finder=nothing, recorder=FakeJournal())
+    await talker.on_text(CLIENT, "Куплю honda lead в Дананге до 20 млн", Replies())
+    current = await store.load(CLIENT)
+    assert current.passport is not None
+    await store.select(current, current.passport.root, editing=True)
+
+    await talker.on_text(CLIENT, "honda vision", Replies())
+
+    edited = await store.load(CLIENT)
+    assert edited.passport is not None
+    assert edited.passport.passport.city == "da_nang"
+    assert edited.passport.passport.attributes["model"] == "vision"
+
+
+async def test_new_subject_after_current_search_still_gets_default_city(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sniffer.config import Settings
+    from sniffer.search import intake as intake_module
+    from sniffer.search.intake import QueryIntake
+
+    monkeypatch.setattr(
+        intake_module,
+        "get_settings",
+        lambda: Settings(broker_project_key="", default_city="nha_trang"),
+    )
+    store = MemoryStore()
+    talker = Conversation(store, intake=QueryIntake, finder=nothing, recorder=FakeJournal())
+    await talker.on_text(CLIENT, "Куплю honda lead в Дананге", Replies())
+
+    await talker.on_text(CLIENT, "Сниму квартиру", Replies())
+
+    current = await store.load(CLIENT)
+    assert current.passport is not None
+    assert current.passport.passport.category is Category.APARTMENT
+    assert current.passport.passport.city == "nha_trang"
+
+
 async def test_a_scooter_request_searches_immediately_without_asking_city_or_budget() -> None:
     """search-first (владелец, 04.09.2026): «нужен скутер» уже называет
     категорию (и вместе с ней автомат) — этого достаточно, чтобы искать. Раньше

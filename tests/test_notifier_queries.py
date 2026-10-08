@@ -65,15 +65,46 @@ def params(statement: Any) -> dict[str, Any]:
     return dict(compiled.params)
 
 
-async def test_lock_pending_locks_only_outbox_rows_and_skips_foreign_locks() -> None:
+async def test_lock_pending_locks_subscription_before_outbox_and_skips_foreign_locks() -> None:
     repo, session = repository()
 
     await repo.lock_pending([3, 1], now=NOW)
 
-    text = sql(session.statements[0])
+    assert "FOR UPDATE SKIP LOCKED" in sql(session.statements[0])
+    text = sql(session.statements[1])
     assert "FOR UPDATE OF outbox SKIP LOCKED" in text, "две копии нотифаера пошлют дважды"
     assert "outbox.id IN" in text and "outbox.status =" in text, text
     assert "outbox.scheduled_at <=" in text, "отложенную другой копией строку слать нельзя"
+
+
+async def test_dispatch_checks_explicitly_paused_subscriptions() -> None:
+    repo, session = repository()
+
+    await repo.lock_pending([3], now=NOW)
+
+    assert "subscriptions.is_active" in sql(session.statements[0])
+    assert "FOR UPDATE SKIP LOCKED" in sql(session.statements[0])
+
+
+async def test_explicit_stop_cancels_pending_rows_without_expiry_grace() -> None:
+    repo, session = repository()
+
+    await repo.cancel_pending_for_search(7, 11, reason="stopped")
+
+    text = sql(session.statements[0])
+    assert "outbox.subscription_id" in text
+    assert "outbox.status" in text
+    assert "SKIP LOCKED" not in text
+
+
+async def test_pause_can_stop_expired_search_but_resume_requires_live_term() -> None:
+    repo, session = repository()
+
+    await repo.set_active(user_id=7, passport_root=11, active=False, now=NOW)
+    await repo.set_active(user_id=7, passport_root=11, active=True, now=NOW)
+
+    assert "expires_at" not in sql(session.statements[0])
+    assert "expires_at" in sql(session.statements[1])
 
 
 async def test_lock_pending_without_ids_does_not_touch_the_database() -> None:

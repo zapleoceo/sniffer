@@ -21,6 +21,7 @@ from sniffer.db.engine import session_scope
 from sniffer.db.repositories import PassportRepository, UserRepository
 from sniffer.db.repositories.delivery import DeliveryRepository
 from sniffer.db.repositories.slots import SlotRepository
+from sniffer.db.repositories.tabs import TabRepository
 from sniffer.domain.records import QueryOverview
 from sniffer.domain.slots import Outcome
 
@@ -63,6 +64,12 @@ async def select(client: Client, root: int, *, editing: bool = False) -> bool:
         user = await UserRepository(session).get_or_create(
             client.tg_user_id, username=client.username
         )
+        if (
+            client.thread_id is not None
+            and user.id is not None
+            and (await TabRepository(session).root_of(user.id, client.thread_id) != root)
+        ):
+            return False
         changed = bool(
             user.id is not None
             and await PassportRepository(session).select(
@@ -85,9 +92,10 @@ async def toggle(client: Client, root: int, *, active: bool) -> bool:
             outcome, _ = await SlotRepository(session).enable(user.id, root, datetime.now(UTC))
             changed = outcome in {Outcome.ENABLE, Outcome.ALREADY_ON}
         elif user.id is not None:
-            changed = await DeliveryRepository(session).set_active(
-                user_id=user.id, passport_root=root, active=False
-            )
+            delivery = DeliveryRepository(session)
+            changed = await delivery.set_active(user_id=user.id, passport_root=root, active=False)
+            if changed or await delivery.owns_chain(user_id=user.id, passport_root=root):
+                await delivery.cancel_pending_for_search(user.id, root)
             if changed:
                 await SlotRepository(session).sync(user.id, datetime.now(UTC))
         await session.commit()

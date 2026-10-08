@@ -145,6 +145,48 @@ async def test_a_message_in_a_known_thread_works_on_its_search_not_on_the_pointe
     assert in_a.thread_id == 700
 
 
+async def test_select_in_topic_keeps_general_pointer_and_returns_selected_root(
+    db_engine: AsyncEngine,
+) -> None:
+    sessions = async_sessionmaker(db_engine, expire_on_commit=False)
+    store = PassportStore(lambda: sessions())
+    general = await store.start(await store.load(Client(101)), bike())
+    topic = await store.start(
+        await store.load(Client(101, thread_id=702)),
+        bike().model_copy(update={"city": "da_nang"}),
+    )
+    assert general.passport is not None and topic.passport is not None
+
+    selected = await store.select(await store.load(Client(101, thread_id=702)), topic.passport.root)
+
+    assert selected.passport is not None and selected.passport.root == topic.passport.root
+    assert (await store.load(Client(101))).passport.root == general.passport.root  # type: ignore[union-attr]
+
+
+async def test_select_in_topic_rejects_another_users_root(db_engine: AsyncEngine) -> None:
+    sessions = async_sessionmaker(db_engine, expire_on_commit=False)
+    store = PassportStore(lambda: sessions())
+    owner = await store.start(await store.load(Client(102)), bike())
+    topic = await store.start(await store.load(Client(103, thread_id=703)), bike())
+    assert owner.passport is not None and topic.passport is not None
+
+    selected = await store.select(await store.load(Client(103, thread_id=703)), owner.passport.root)
+
+    assert selected.passport.root == topic.passport.root  # type: ignore[union-attr]
+
+
+async def test_select_in_topic_rejects_another_owned_topic_root(db_engine: AsyncEngine) -> None:
+    sessions = async_sessionmaker(db_engine, expire_on_commit=False)
+    store = PassportStore(lambda: sessions())
+    a = await store.start(await store.load(Client(104, thread_id=704)), bike())
+    b = await store.start(await store.load(Client(104, thread_id=705)), bike())
+    assert a.passport is not None and b.passport is not None
+
+    selected = await store.select(await store.load(Client(104, thread_id=705)), a.passport.root)
+
+    assert selected.passport is not None and selected.passport.root == b.passport.root
+
+
 async def test_a_new_topic_starts_a_search_and_links_itself(db_engine: AsyncEngine) -> None:
     sessions = async_sessionmaker(db_engine, expire_on_commit=False)
     store = PassportStore(lambda: sessions())

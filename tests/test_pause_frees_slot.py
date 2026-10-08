@@ -48,6 +48,13 @@ def calls(monkeypatch: pytest.MonkeyPatch) -> Calls:
             seen.log.append(f"set_active:{kw['active']}")
             return seen.paused
 
+        async def owns_chain(self, **_kw: Any) -> bool:
+            return True
+
+        async def cancel_pending_for_search(self, *_a: Any) -> int:
+            seen.log.append("cancel_pending")
+            return 0
+
     class Slots:
         def __init__(self, _s: Any) -> None: ...
 
@@ -78,12 +85,13 @@ def calls(monkeypatch: pytest.MonkeyPatch) -> Calls:
 
 async def test_a_pause_frees_the_slot_by_recounting_in_the_same_transaction(calls: Calls) -> None:
     assert await query_menu.toggle(CLIENT, 7, active=False)
-    assert calls.log == ["set_active:False", "sync", "commit"]
+    assert calls.log == ["set_active:False", "cancel_pending", "sync", "commit"]
 
 
 async def test_a_pause_that_changed_nothing_does_not_recount(calls: Calls) -> None:
     calls.paused = False
     assert not await query_menu.toggle(CLIENT, 7, active=False)
+    assert "cancel_pending" in calls.log
     assert "sync" not in calls.log
 
 

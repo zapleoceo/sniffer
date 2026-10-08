@@ -30,6 +30,9 @@ class Result:
     def scalar_one_or_none(self) -> Any:
         return self.row
 
+    def all(self) -> list[Any]:
+        return []
+
 
 class Recorder:
     """Подставная сессия: пишет SQL по порядку и отвечает настолько, чтобы код дошёл."""
@@ -56,10 +59,12 @@ class Recorder:
 async def test_archive_pauses_upserts_the_mark_and_resets_the_pointer_in_this_order() -> None:
     session = Recorder()
     assert await WatchRepository(session).archive(7, 3)  # type: ignore[arg-type]
-    owns, pause, mark, pointer = session.sql
+    owns, pause, cancel, mark, pointer = session.sql
     assert "passports.user_id = 7" in owns
     assert pause.startswith("UPDATE subscriptions SET is_active=false")
     assert "subscriptions.user_id = 7" in pause and "subscriptions.passport_root = 3" in pause
+    assert cancel.startswith("UPDATE outbox SET status='cancelled'")
+    assert "subscriptions.passport_root = 3" in cancel
     assert (
         mark.startswith("INSERT INTO search_tabs")
         and "ON CONFLICT (user_id, passport_root)" in mark

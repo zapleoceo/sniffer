@@ -46,6 +46,7 @@ OUTBOX_FAILED = "failed"
 OUTBOX_CANCELLED = "cancelled"
 # Почему строка отменена: пишется в `outbox.last_error` и читается человеком.
 REASON_EXPIRED = "expired"
+REASON_STOPPED = "stopped"
 
 
 def entitled(now: datetime) -> ColumnElement[bool]:
@@ -115,6 +116,14 @@ class DeliveryRepository(Repository):
         """
         moment = now or datetime.now(UTC)
         table = cast(Table, models.Notification.__table__)
+        # Serialize insertion with an explicit stop. Without this lock a match
+        # may pass the entitlement check before Pause, then commit its outbox
+        # row after Pause has already cancelled the queue.
+        await self._session.execute(
+            select(models.Subscription.id)
+            .where(models.Subscription.id == subscription_id)
+            .with_for_update()
+        )
         # Право проверяется в самой вставке, а не запросом перед ней: между «проверил» и
         # «вставил» подписка успела бы истечь или встать на паузу. Выбор подписок на проход
         # уже спрашивал тот же предикат, и здесь он не лишний: постановка — единственное
@@ -179,6 +188,20 @@ class DeliveryRepository(Repository):
         """
         if not ids:
             return []
+        # Stop locks the subscription before cancelling its outbox. Take the
+        # same locks in the same order so dispatch cannot overtake a stop.
+        subscriptions = await self._session.execute(
+            select(models.Subscription.id)
+            .where(
+                models.Subscription.id.in_(
+                    select(models.Outbox.subscription_id).where(models.Outbox.id.in_(list(ids)))
+                ),
+                models.Subscription.is_active.is_(True),
+            )
+            .order_by(models.Subscription.id)
+            .with_for_update(skip_locked=True)
+        )
+        active_ids = [row[0] for row in subscriptions.all()]
         rows = await self._session.execute(
             select(models.Outbox, models.User.tg_user_id)
             .join(models.User, models.User.id == models.Outbox.user_id)
@@ -186,6 +209,10 @@ class DeliveryRepository(Repository):
                 models.Outbox.id.in_(list(ids)),
                 models.Outbox.status == OUTBOX_PENDING,
                 models.Outbox.scheduled_at <= now,
+                or_(
+                    models.Outbox.subscription_id.is_(None),
+                    models.Outbox.subscription_id.in_(active_ids),
+                ),
             )
             .order_by(models.Outbox.scheduled_at, models.Outbox.id)
             .with_for_update(of=models.Outbox, skip_locked=True)
@@ -362,6 +389,29 @@ class DeliveryRepository(Repository):
             )
         )
 
+    async def cancel_pending_for_search(
+        self, user_id: int, passport_root: int, *, reason: str = REASON_STOPPED
+    ) -> int:
+        """Cancel queued notifications for one owned search, including future digests.
+
+        Do not skip locked rows: a concurrent dispatch must finish before an
+        explicit stop reports success. Expiry cleanup has a separate grace rule.
+        """
+        subscription = select(models.Subscription.id).where(
+            models.Subscription.user_id == user_id,
+            models.Subscription.passport_root == passport_root,
+        )
+        done = await self._session.execute(
+            update(models.Outbox)
+            .where(
+                models.Outbox.subscription_id.in_(subscription),
+                models.Outbox.status == OUTBOX_PENDING,
+            )
+            .values(status=OUTBOX_CANCELLED, last_error=reason)
+            .returning(models.Outbox.id)
+        )
+        return len(done.all())
+
     async def cancel_pending_of(self, user_id: int, *, reason: str) -> int:
         """Отменить всё, что ждёт отправки этому клиенту. Возврат — сколько строк.
 
@@ -487,13 +537,15 @@ class DeliveryRepository(Repository):
         self, *, user_id: int, passport_root: int, active: bool, now: datetime | None = None
     ) -> bool:
         """Поставить мониторинг на паузу или возобновить оплаченный."""
+        conditions: list[ColumnElement[bool]] = [
+            models.Subscription.user_id == user_id,
+            models.Subscription.passport_root == passport_root,
+        ]
+        if active:
+            conditions.append(models.Subscription.expires_at > (now or datetime.now(UTC)))
         changed = await self._session.execute(
             update(models.Subscription)
-            .where(
-                models.Subscription.user_id == user_id,
-                models.Subscription.passport_root == passport_root,
-                models.Subscription.expires_at > (now or datetime.now(UTC)),
-            )
+            .where(*conditions)
             .values(is_active=active)
             .returning(models.Subscription.id)
         )

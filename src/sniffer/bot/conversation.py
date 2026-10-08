@@ -327,7 +327,7 @@ class Conversation:
                 await self._ask_or_search(dialogue, send)
                 return
         if dialogue.editing and current is not None:
-            passport = await self._intake().parse(message)
+            passport = await self._parse_against_current(message)
             passport = merge_edit(current.passport, passport)
             _lap("intake_ms")
             dialogue = await self._store.revise(
@@ -343,7 +343,11 @@ class Conversation:
             if answered:
                 return
 
-        passport = await self._intake().parse(message)
+        passport = (
+            await self._parse_against_current(message)
+            if current is not None
+            else await self._intake().parse(message)
+        )
         _lap("intake_ms")
         if current is not None and restates(current.passport, passport):
             # Та же просьба другими словами — не новый запрос. Начни здесь
@@ -387,6 +391,13 @@ class Conversation:
             return
         await self._open(dialogue, passport, send)
 
+    async def _parse_against_current(self, message: str) -> Passport:
+        """Keep an absent city absent until the current search is merged."""
+        intake = self._intake()
+        if isinstance(intake, QueryIntake):
+            return await intake.parse(message, for_edit=True)
+        return await intake.parse(message)
+
     async def _begin_requested(self, dialogue: Dialogue, message: str, send: Send) -> bool:
         """Сообщение после `/new`: разобрать и открыть ветку. `False` — `/new` уже потрачен."""
         fresh = await self._intake().parse(message)
@@ -404,6 +415,9 @@ class Conversation:
         не говорят: про ушедший из списка поиск. `False` — ветку открыть не
         вышло, потому что взведённое `/new` потратило другое сообщение.
         """
+        intake = self._intake()
+        if isinstance(intake, QueryIntake):
+            passport = intake.default_new_city(passport)
         if self._search_limit is not None:
             full = await self._search_limit.blocked(dialogue.user_id)
             if full is not None:

@@ -61,16 +61,33 @@ class QueryIntake:
         # настроенного окружения.
         self._broker = broker
 
-    async def parse(self, text: str) -> Passport:
+    def default_new_city(self, passport: Passport) -> Passport:
+        """Apply the configured city only after choosing to open a new search."""
+        if passport.city is not None:
+            return passport
+        city = get_settings().default_city
+        return passport.model_copy(
+            update={
+                "city": city,
+                "missing_fields": [field for field in passport.missing_fields if field != "city"],
+                "status": PassportStatus.READY
+                if passport.category and city
+                else PassportStatus.DRAFT,
+            }
+        )
+
+    async def parse(self, text: str, *, for_edit: bool = False) -> Passport:
         settings = get_settings()
         # Город по умолчанию подставляется, а не спрашивается: клиент рынка
         # Нячанга по умолчанию в Нячанге, и вопрос «в каком городе?» на «нужен
         # байк» — та самая лишняя ступень допроса, на которую жаловался владелец
         # (журнал 04.09.2026). Дананг он назовёт словом, необслуживаемый ловит
         # `is_served`. Search-first: до выдачи спрашиваем только предмет.
-        rules = parse_query(text, default_city=settings.default_city)
+        rules = parse_query(text, default_city="" if for_edit else settings.default_city)
 
-        if rules.is_ready() and rules.attributes.get("model"):
+        if (rules.is_ready() or (for_edit and rules.category is not None)) and rules.attributes.get(
+            "model"
+        ):
             # The exact named item is already executable. A paid semantic pass
             # cannot add a question here, but can add seconds and overwrite a
             # correct model, so agent reasoning is reserved for ambiguity.
@@ -90,6 +107,9 @@ class QueryIntake:
             return rules
 
         merged = merge(rules, payload)
+        if for_edit:
+            # A semantic guess must not turn an omitted city into a city edit.
+            merged = merged.model_copy(update={"city": rules.city})
         log.info(
             "intake.ready",
             category=merged.category,

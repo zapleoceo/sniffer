@@ -34,7 +34,8 @@ async def test_enqueue_puts_the_given_moment_into_both_rows() -> None:
     )
 
     assert queued is True
-    (insert,) = session.statements
+    lock, insert = session.statements
+    assert "FOR UPDATE" in _flat(lock)
     # Момент прохода — и слот суток (`created_at`), и срок для проверки права: два параметра.
     assert list(params_of(insert).values()).count(MOMENT) == 2
     (outbox,) = session.added
@@ -56,7 +57,7 @@ async def test_an_explicit_delivery_time_is_kept_apart_from_the_moment() -> None
         now=MOMENT,
     )
 
-    values = list(params_of(session.statements[0]).values())
+    values = list(params_of(session.statements[1]).values())
     assert values.count(MOMENT) == 2, "слот суток занят в момент прохода"
     assert evening not in values, "вечернее время — только у письма, а не у записи о слоте"
     assert session.added[0].scheduled_at == evening
@@ -291,7 +292,8 @@ async def test_enqueue_checks_the_right_to_receive_inside_the_insert() -> None:
         subscription_id=1, user_id=2, listing_id=3, score=0.9, payload={}, now=MOMENT
     )
 
-    (insert,) = session.statements
+    lock, insert = session.statements
+    assert "FOR UPDATE" in _flat(lock)
     sql = _flat(insert)
     assert sql.startswith(
         "INSERT INTO notifications (subscription_id, listing_id, score, created_at) SELECT "
@@ -314,7 +316,7 @@ async def test_the_claim_and_the_enqueue_ask_one_and_the_same_predicate() -> Non
     )
 
     assert ENTITLED in _flat(_due_statement(limit=1, now=MOMENT))
-    assert ENTITLED in _flat(session.statements[0])
+    assert ENTITLED in _flat(session.statements[1])
 
 
 async def test_a_lapsed_subscription_adds_nothing_to_the_outbox() -> None:
