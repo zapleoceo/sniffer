@@ -174,7 +174,7 @@ async def test_topic_selection_reads_selected_root_not_general_pointer(
 
     monkeypatch.setattr(store_module, "PassportRepository", Passports)
     monkeypatch.setattr(store_module, "TabRepository", Tabs)
-    store = PassportStore(lambda: _Scope(trace))  # type: ignore[arg-type]
+    store = PassportStore(lambda: _Scope(trace))  # type: ignore[arg-type,return-value]
 
     selected = await store.select(Dialogue(user_id=7, thread_id=100), 6)
 
