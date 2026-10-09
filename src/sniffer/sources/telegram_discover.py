@@ -30,8 +30,10 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 
 import structlog
+from telethon.errors import FloodWaitError
 
 from sniffer.config import get_settings
+from sniffer.sources.telegram_discover_joiner import CANDIDATE_REFUSED
 from sniffer.sources.telegram_discover_links import candidates_from
 from sniffer.sources.telegram_discover_reference import (
     MAX_SEARCH_RESULTS,
@@ -48,6 +50,26 @@ from sniffer.sources.telegram_discover_reference import (
 from sniffer.sources.telegram_discover_screen import screen
 
 log = structlog.get_logger(__name__)
+
+# Telethon при высокоуровневом разборе имени отвечает не RPC-ошибкой, а
+# `ValueError` с этими словами. Текст — единственный признак, поэтому сверка по
+# подстроке и только для `ValueError`: чужой `ValueError` (баг у нас) «чата
+# нет» не означает.
+_NOT_FOUND_TEXTS = ("No user has", "Cannot find any entity corresponding to")
+
+
+def chat_does_not_exist(exc: Exception) -> bool:
+    """Telegram ОТВЕТИЛ, что такого чата или имени нет.
+
+    Единственный исход, который вправе записаться в отказы как `unresolved`:
+    ответ стабилен, и повторный вопрос ничего не изменит. Всё остальное — сеть,
+    таймаут, `FloodWait`, сбой RPC, неизвестное исключение — говорит о нашем
+    соединении, а не о кандидате. Набор «отказов сервера» один на разведку и
+    вступление (`CANDIDATE_REFUSED`): два списка разошлись бы.
+    """
+    if isinstance(exc, CANDIDATE_REFUSED):
+        return True
+    return isinstance(exc, ValueError) and any(text in str(exc) for text in _NOT_FOUND_TEXTS)
 
 
 class ChatDiscovery:
@@ -73,6 +95,10 @@ class ChatDiscovery:
         self._rejected = rejected
         self._client = client
         self._city = city or get_settings().default_city
+        # После FloodWait в этом проходе больше не спрашиваем: каждый следующий
+        # запрос под флуд-лимитом — тот же ретрай в цикле, только по другим
+        # кандидатам. Кандидаты не теряются, их встретят снова.
+        self._flooded = False
 
     async def harvest(self, messages: Iterable[MessageLike], found_in: str = "") -> int:
         """Собрать кандидатов из сообщений, которые и так через нас проходят.
@@ -127,7 +153,26 @@ class ChatDiscovery:
             return False
 
         if resolved is None:
-            resolved = await self._look(candidate)
+            if self._flooded:
+                return False
+            try:
+                resolved = await self._look(candidate)
+            except Exception as exc:
+                # `Exception`, а не корень: Ctrl+C и отмена задачи — не отказ
+                # запроса и должны дойти наверх. Отказ запроса НЕ превращается
+                # в `unresolved`: 18.09.2026 за час так записали 154 из 198
+                # отказов, и кандидаты, о которых Telegram ничего не сказал,
+                # пропали из очереди навсегда.
+                if not chat_does_not_exist(exc):
+                    self._flooded = self._flooded or isinstance(exc, FloodWaitError)
+                    log.warning(
+                        "discover.look_failed",
+                        candidate=candidate.key,
+                        error_type=type(exc).__name__,
+                        error=why(exc),
+                    )
+                    return False
+                resolved = None
         if resolved is None:
             await self._rejected.reject(candidate.key, REJECT_UNRESOLVED)
             return False
@@ -152,10 +197,6 @@ class ChatDiscovery:
         Две формы ссылки — два запроса на чтение, но одно значение на выходе:
         дальше отбор не различает, откуда пришли название и тип.
         """
-        try:
-            if candidate.invite_hash:
-                return await self._client.check_invite(candidate.invite_hash)
-            return await self._client.resolve_username(candidate.username)
-        except Exception as exc:
-            log.warning("discover.look_failed", candidate=candidate.key, error=why(exc))
-            return None
+        if candidate.invite_hash:
+            return await self._client.check_invite(candidate.invite_hash)
+        return await self._client.resolve_username(candidate.username)
