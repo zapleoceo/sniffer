@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from sniffer.dashboard import data
+from sniffer.dashboard.app import REFUSAL_STATUS
 from sniffer.db import collection_models, models
 from sniffer.db.repositories import reject_retries
 from sniffer.db.repositories.reject_retries import RejectRetryRepository
@@ -86,6 +87,35 @@ async def ask(engine: AsyncEngine, key: str, form: str) -> RetryResult:
         )
         await session.commit()
         return result
+
+
+async def ask_at(engine: AsyncEngine, key: str, form: str, now: datetime) -> RetryResult:
+    """Как `ask`, но с заданным «сейчас»: cooldown проходит без правки строк журнала."""
+    async with sessions(engine)() as session:
+        result = await RejectRetryRepository(session).request(
+            key, idempotency_key=form, requested_by=OWNER, now=now
+        )
+        await session.commit()
+        return result
+
+
+async def snapshots(engine: AsyncEngine, key: str) -> list[tuple[object, ...]]:
+    """Колонки снимка всех попыток ключа: ключ, причина, исходное время, запрос, кто, токен."""
+    async with sessions(engine)() as session:
+        rows = await session.execute(
+            select(
+                models.ChatRejectRetry.id,
+                models.ChatRejectRetry.reject_key,
+                models.ChatRejectRetry.reject_reason,
+                models.ChatRejectRetry.reject_rejected_at,
+                models.ChatRejectRetry.requested_at,
+                models.ChatRejectRetry.requested_by,
+                models.ChatRejectRetry.idempotency_key,
+            )
+            .where(models.ChatRejectRetry.reject_key == key)
+            .order_by(models.ChatRejectRetry.id)
+        )
+        return [tuple(row) for row in rows]
 
 
 async def count(engine: AsyncEngine, model: type[models.Base]) -> int:
@@ -160,6 +190,28 @@ async def test_a_failure_in_the_middle_rolls_everything_back(
 
     assert await has_reject(db_engine, "@atomic")
     assert await queued(db_engine, "@atomic") is None
+    assert await count(db_engine, models.ChatRejectRetry) == 0
+
+
+async def test_a_failure_after_the_move_rolls_back_the_attempt_the_delete_and_the_queue(
+    db_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Сбой ПОСЛЕ вставки попытки, удаления отказа и flush: откатывается и это."""
+    await reject(db_engine, "@late_fail")
+
+    def explode(_row: models.ChatRejectRetry) -> None:
+        raise Boom
+
+    monkeypatch.setattr(reject_retries, "_record", explode)
+    async with sessions(db_engine)() as session:
+        with pytest.raises(Boom):
+            await RejectRetryRepository(session).request(
+                "@late_fail", idempotency_key=token(30), requested_by=OWNER, now=datetime.now(UTC)
+            )
+        await session.rollback()
+
+    assert await has_reject(db_engine, "@late_fail")
+    assert await queued(db_engine, "@late_fail") is None
     assert await count(db_engine, models.ChatRejectRetry) == 0
 
 
@@ -377,6 +429,94 @@ async def test_the_same_form_sent_twice_at_once_creates_one_attempt(db_engine: A
 
     assert [result.status for result in results] == [RetryStatus.CREATED, RetryStatus.REPLAYED]
     assert await count(db_engine, models.ChatRejectRetry) == 1
+
+
+# ── аудит: журнал не теряет ни отказов, ни попыток ──────────────────────────
+
+
+async def test_a_reject_after_a_retry_gets_its_own_snapshot_and_the_first_stays_intact(
+    db_engine: AsyncEngine,
+) -> None:
+    """Отказ → повтор (A) → joiner отклонил снова → после cooldown повтор (B)."""
+    key = "@again_audit"
+    await reject(db_engine, key, age_h=5)
+    first = await ask(db_engine, key, token(40))
+    assert first.status is RetryStatus.CREATED and first.record is not None
+    snapshot_a = (await snapshots(db_engine, key))[0]
+    original_time = first.record.reject_rejected_at
+    assert original_time is not None
+
+    # joiner снял ключ из очереди и записал новый отказ с новым временем
+    new_time = datetime.now(UTC)
+    async with sessions(db_engine)() as session:
+        await session.execute(delete(models.ChatCandidate).where(models.ChatCandidate.key == key))
+        session.add(models.ChatReject(key=key, reason=TEMP, rejected_at=new_time))
+        await session.commit()
+
+    later = datetime.now(UTC) + reject_retry.COOLDOWN + timedelta(hours=1)
+    second = await ask_at(db_engine, key, token(41), later)
+
+    assert second.status is RetryStatus.CREATED and second.record is not None
+    assert second.record.reject_rejected_at == new_time != original_time
+    stored = await snapshots(db_engine, key)
+    assert len(stored) == 2, "обе попытки в журнале"
+    assert stored[0] == snapshot_a, "снимок A не изменился (ключ, причина, исходное время)"
+    assert stored[1][3] == new_time
+    async with sessions(db_engine)() as session:
+        outcomes = (
+            await session.execute(
+                select(models.ChatRejectRetry.status, models.ChatRejectRetry.outcome).order_by(
+                    models.ChatRejectRetry.id
+                )
+            )
+        ).all()
+    assert [tuple(row) for row in outcomes] == [
+        ("done", reject_retries.OUTCOME_REJECTED_AGAIN),
+        ("active", None),
+    ]
+    assert not await has_reject(db_engine, key)
+    assert await queued(db_engine, key) is not None
+
+
+async def test_settling_changes_only_status_outcome_and_time_never_the_snapshot(
+    db_engine: AsyncEngine,
+) -> None:
+    await reject(db_engine, "@frozen", age_h=7)
+    await ask(db_engine, "@frozen", token(42))
+    before = await snapshots(db_engine, "@frozen")
+    async with sessions(db_engine)() as session:
+        await session.execute(
+            delete(models.ChatCandidate).where(models.ChatCandidate.key == "@frozen")
+        )
+        session.add(models.ChatReject(key="@frozen", reason="other_reason"))
+        await session.commit()
+
+    async with sessions(db_engine)() as session:
+        assert await RejectRetryRepository(session).settle_finished(datetime.now(UTC)) == 1
+        await session.commit()
+
+    assert await snapshots(db_engine, "@frozen") == before
+    async with sessions(db_engine)() as session:
+        row = await session.scalar(select(models.ChatRejectRetry))
+    assert row is not None
+    assert (row.status, row.outcome) == ("done", reject_retries.OUTCOME_REJECTED_AGAIN)
+    assert row.settled_at is not None
+    assert row.reject_reason == TEMP, "новая причина отказа снимок не переписала"
+
+
+async def test_two_different_forms_for_one_key_at_once_make_one_attempt_and_a_409(
+    db_engine: AsyncEngine,
+) -> None:
+    """Разные токены, один ключ, внахлёст: второй получает отказ, а страница — 409."""
+    await reject(db_engine, "@same_key")
+
+    results = await race(db_engine, ("@same_key", token(43)), ("@same_key", token(44)))
+
+    assert [result.status for result in results] == [RetryStatus.CREATED, RetryStatus.REFUSED]
+    assert results[1].decision.code is RetryCode.ALREADY_QUEUED
+    assert REFUSAL_STATUS.get(results[1].decision.code, 409) == 409
+    assert await count(db_engine, models.ChatRejectRetry) == 1
+    assert await queued(db_engine, "@same_key") is not None
 
 
 # ── что страница видит и как закрывается попытка ────────────────────────────
