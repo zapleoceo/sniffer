@@ -372,6 +372,8 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     no_slot_since     TIMESTAMPTZ,
     -- Порядок претензии на слот мониторинга (016_stars_slots.sql).
     priority       INT         NOT NULL DEFAULT 0,
+    -- Жёсткие условия подписки (018_subscription_hard_filter.sql); NULL — обычный отбор.
+    hard_filter    JSONB,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (user_id, passport_root)
 );

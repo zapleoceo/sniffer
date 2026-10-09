@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from sniffer.db import models
+from sniffer.domain.hard_filter import HardFilter
 from sniffer.domain.passport import Budget, Category, Intent, Passport, PassportStatus
 from sniffer.domain.records import (
     BrokerCall,
@@ -180,6 +181,7 @@ def to_subscription_state(row: models.Subscription, passport: models.Passport) -
         overflow_count=row.overflow_count,
         overflow_notified=row.overflow_notified,
         no_slot_since=row.no_slot_since,
+        hard_filter=HardFilter.from_json(row.hard_filter),
         passport=to_stored_passport(passport),
     )
 

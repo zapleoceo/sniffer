@@ -193,6 +193,7 @@ payments          source                 # 016_stars_slots: апдейт или 
 payments          period_end_estimated   # 016_stars_slots: срок посчитан сверкой, а не взят у Telegram
 schema_proposals                         # хвост цепочки на момент введения таблицы (004)
 search_tabs                              # вкладки поиска и архив «Удалить поиск» (017)
+subscriptions     hard_filter            # 018: жёсткие условия подписки; NULL — обычный отбор
 SENTINELS
 }
 

@@ -9,7 +9,8 @@
 1. Фильтр паспорта — тот же построитель, что у диалога (`domain.match_filter`).
 2. Вердикт: карточка, которую ИИ-проверка ещё не прочла, ждёт; курсор встаёт ПЕРЕД ней и
    вернётся, когда вердикт появится или выйдет срок (D9).
-3. Суждение монитора: возраст при появлении и противоречие паспорту (`matching.worth_sending`).
+3. Суждение монитора: возраст при появлении и противоречие паспорту (`matching.worth_sending`);
+   затем жёсткие условия подписки, если они заданы (`subscriptions.hard_filter`).
 4. Дедуп с журналом показов: уже показанное клиенту в этом периоде (диалог, другой слот)
    не приходит второй раз и места в потолке не занимает.
 5. Потолок слота за вьетнамские сутки: под него берутся НОВЕЙШИЕ, остальное — счёт «ещё N».
@@ -90,6 +91,9 @@ async def serve_slot(
     )
     ids = [item.id for item in batch if item.id is not None]
     candidates = [item for item in batch if item.id and worth_sending(item, passport, now=moment)]
+    if subscription.hard_filter is not None:
+        # Жёсткие условия подписки (`domain.hard_filter`): неизвестное — отказ, а не пропуск.
+        candidates = [item for item in candidates if subscription.hard_filter.accepts(item)]
     shown = await stores.ledger.seen(
         subscription.user_id, [item.id for item in candidates if item.id], moment
     )
