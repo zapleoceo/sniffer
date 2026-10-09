@@ -79,6 +79,11 @@ def classify(reason: str) -> RejectClass:
     return info.kind if info else RejectClass.UNKNOWN
 
 
+def reasons_of(kind: RejectClass) -> list[str]:
+    """Известные коды класса — для запроса «все отказы этого класса»."""
+    return sorted(code for code, info in REASONS.items() if info.kind is kind)
+
+
 def label(reason: str) -> str:
     """Понятная причина; для неизвестной — сам код, чтобы его можно было найти."""
     info = REASONS.get(reason)

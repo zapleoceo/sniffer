@@ -116,6 +116,19 @@ class RejectRepository(Repository):
             for row in rows
         ]
 
+    async def by_reasons(self, reasons: list[str], *, limit: int = 50) -> list[RejectedCandidate]:
+        """Отказы с заданными причинами, свежие первыми (не только хвост всей таблицы)."""
+        rows = await self._session.scalars(
+            select(models.ChatReject)
+            .where(models.ChatReject.reason.in_(reasons))
+            .order_by(models.ChatReject.rejected_at.desc())
+            .limit(limit)
+        )
+        return [
+            RejectedCandidate(key=row.key, reason=row.reason, rejected_at=row.rejected_at)
+            for row in rows
+        ]
+
     async def counts_by_reason(self) -> dict[str, int]:
         """Сколько отклонено по каждой причине — настоящий счёт, а не длина хвоста."""
         rows = await self._session.execute(

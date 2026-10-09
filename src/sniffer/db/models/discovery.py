@@ -74,6 +74,40 @@ class ChatReject(Base):
     )
 
 
+class ChatRejectRetry(BigIdMixin, Base):
+    """Попытка повторить отказ из дашборда — журнал, а не флаг (019_reject_retries.sql).
+
+    Снимок исходного отказа лежит здесь же: сама строка `chat_rejects` при повторе
+    переезжает в очередь и исчезает, а аудит обязан пережить это.
+    """
+
+    __tablename__ = "chat_reject_retries"
+    __table_args__ = (
+        Index("chat_reject_retries_key_idx", "reject_key", sa_text("requested_at DESC")),
+        Index("chat_reject_retries_requested_idx", sa_text("requested_at DESC")),
+        # Одна живая попытка на ключ при любых токенах формы.
+        Index(
+            "chat_reject_retries_one_active_idx",
+            "reject_key",
+            unique=True,
+            postgresql_where=sa_text("status = 'active'"),
+        ),
+    )
+
+    reject_key: Mapped[str] = mapped_column(Text, nullable=False)
+    reject_reason: Mapped[str] = mapped_column(Text, nullable=False)
+    reject_rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=NOW
+    )
+    requested_by: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=sa_text("'active'"))
+    outcome: Mapped[str | None] = mapped_column(Text)
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_retry_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class ChatJoinEvent(BigIdMixin, Base):
     """Журнал вступлений — источник правды по лимитам из CLAUDE.md.
 
