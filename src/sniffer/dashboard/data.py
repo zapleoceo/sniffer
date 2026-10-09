@@ -108,6 +108,10 @@ class Inventory:
     limits: JoinLimits | None = None
     join_ceiling: int = MAX_JOINS_PER_DAY
     rejects: list[RejectedCandidate] = field(default_factory=list)
+    # Настоящий счёт по причинам. `rejects` — лишь хвост в INVENTORY_TAIL строк,
+    # и по его длине считать нельзя: карточка «отклонено» годами показывала 30
+    # при полутора тысячах строк в таблице.
+    reject_counts: dict[str, int] = field(default_factory=dict)
     raw: list[RawMessage] = field(default_factory=list)
     collection_deliveries: list[CollectionDeliveryState] = field(default_factory=list)
 
@@ -158,6 +162,7 @@ async def inventory(*, now: datetime | None = None) -> Inventory:
             joins=await JoinLedgerRepository(session).recent_events(limit=INVENTORY_TAIL),
             limits=await JoinLedgerRepository(session).state(moment, window=JOIN_WINDOW),
             rejects=await RejectRepository(session).recent(limit=INVENTORY_TAIL),
+            reject_counts=await RejectRepository(session).counts_by_reason(),
             raw=await RawMessageRepository(session).recent(limit=INVENTORY_TAIL),
             collection_deliveries=await CollectionTaskRepository(session).recent_deliveries(
                 limit=INVENTORY_TAIL

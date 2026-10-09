@@ -646,6 +646,17 @@ async def test_rejections_are_readable_with_their_reason(db_session: AsyncSessio
     ]
 
 
+async def test_reject_counts_cover_every_row_not_just_the_tail(db_session: AsyncSession) -> None:
+    repo = RejectRepository(db_session)
+    for index in range(35):
+        await repo.reject(f"@u{index}", "user")
+    await repo.reject("@x", "unresolved")
+    await db_session.commit()
+
+    assert len(await repo.recent(limit=30)) == 30
+    assert await repo.counts_by_reason() == {"user": 35, "unresolved": 1}
+
+
 # ── уборка сырья по сроку хранения ──────────────────────────────────────────
 
 
