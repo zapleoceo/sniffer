@@ -25,8 +25,37 @@ class ChatRepository(Repository):
         statement = select(models.Chat.id).where(or_(*predicates)).limit(1)
         return bool(await self._session.scalar(statement))
 
+    async def is_excluded(self, *, tg_id: int | None = None, username: str = "") -> bool:
+        """Исключён ли чат с этим Telegram id или публичным именем (019).
+
+        Отдельно от `has_identity`: та отвечает «строка есть», эта — «строка есть и владелец
+        вывел её из сбора». Разведке нужны оба ответа: первый гасит кандидата, второй
+        пишет в лог причину.
+        """
+        predicates = []
+        if tg_id is not None:
+            predicates.append(models.Chat.tg_id == tg_id)
+        if username:
+            predicates.append(func.lower(models.Chat.username) == username.lstrip("@").lower())
+        if not predicates:
+            return False
+        statement = (
+            select(models.Chat.id)
+            .where(or_(*predicates), models.Chat.excluded_at.is_not(None))
+            .limit(1)
+        )
+        return bool(await self._session.scalar(statement))
+
     async def count(self) -> int:
-        return int(await self._session.scalar(select(func.count(models.Chat.id))) or 0)
+        """Сколько чатов занимают место в потолке `MAX_TRACKED_CHATS`.
+
+        Исключённые не считаются: они ушли из сбора, и держать за ними слот значило бы
+        платить потолком за группы, которые мы не читаем. Выключенные не владельцем
+        (`is_active=false` без `excluded_at`) по-прежнему считаются — их статус никто не
+        решал, и тихо освобождать под них место нельзя.
+        """
+        statement = select(func.count(models.Chat.id)).where(models.Chat.excluded_at.is_(None))
+        return int(await self._session.scalar(statement) or 0)
 
     async def get_by_tg_id(self, tg_id: int) -> Chat | None:
         row = await self._session.scalar(select(models.Chat).where(models.Chat.tg_id == tg_id))

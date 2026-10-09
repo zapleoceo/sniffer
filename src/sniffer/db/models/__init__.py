@@ -21,7 +21,12 @@ from sniffer.db.models.billing import BillingEvent, UserConsent
 from sniffer.db.models.catalog import coverage, observations, publications
 from sniffer.db.models.clients import Passport, PassportEvent, User
 from sniffer.db.models.delivery import Notification, Outbox, Payment, Subscription
-from sniffer.db.models.discovery import ChatCandidate, ChatJoinEvent, ChatReject
+from sniffer.db.models.discovery import (
+    ChatCandidate,
+    ChatExclusionEvent,
+    ChatJoinEvent,
+    ChatReject,
+)
 from sniffer.db.models.jobs import Job
 from sniffer.db.models.listings import Listing, ListingMedia
 from sniffer.db.models.observability import (
@@ -43,6 +48,7 @@ __all__ = [
     "BrokerCall",
     "Chat",
     "ChatCandidate",
+    "ChatExclusionEvent",
     "ChatJoinEvent",
     "ChatReject",
     "ClientRequest",

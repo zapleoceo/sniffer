@@ -43,6 +43,7 @@ def to_chat(row: models.Chat) -> Chat:
         backfill_done=row.backfill_done,
         last_synced_at=row.last_synced_at,
         added_at=row.added_at,
+        excluded_at=row.excluded_at,
     )
 
 

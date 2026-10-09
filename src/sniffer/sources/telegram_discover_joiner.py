@@ -50,6 +50,7 @@ from sniffer.sources.telegram_discover_reference import (
     MIN_JOIN_PAUSE,
     REJECT_ALREADY_INSIDE,
     REJECT_ALREADY_MEMBER,
+    REJECT_EXCLUDED,
     REJECT_JOIN_REFUSED,
     REJECT_JOIN_REQUEST_SENT,
     REJECT_TOO_MANY_ATTEMPTS,
@@ -210,6 +211,13 @@ class ChatJoiner:
                 return None
             if not candidate.username:
                 return candidate
+            if await self._registry.is_excluded(username=candidate.username):
+                # Кандидат встал в очередь до исключения (019): вступать в него нельзя, и
+                # заново он не нужен — чат остаётся строкой реестра, restore вернёт его.
+                await self._queue.drop(candidate.key)
+                await self._rejected.reject(candidate.key, REJECT_EXCLUDED)
+                log.info("discover.candidate_excluded", candidate=candidate.key)
+                continue
             if not await self._registry.has_chat(username=candidate.username):
                 return candidate
             await self._queue.drop(candidate.key)
@@ -342,6 +350,18 @@ class ChatJoiner:
             city=self._city,
             search_rank=DISCOVERED_RANK,
         )
+        if await self._registry.has_chat(tg_id=tg_id):
+            # Вступили в чат, который в реестре уже есть, — приглашение или имя, по которым
+            # его нельзя было узнать заранее. Вставка упала бы на UNIQUE(tg_id) или, хуже,
+            # вернула бы к работе исключённый (019). Строку не трогаем.
+            await self._queue.drop(candidate.key)
+            event = (
+                "discover.candidate_excluded"
+                if await self._registry.is_excluded(tg_id=tg_id)
+                else "discover.joined_already_tracked"
+            )
+            log.info(event, candidate=candidate.key, tg_id=tg_id)
+            return None
         await self._registry.add(chat)
         await self._queue.drop(candidate.key)
         log.info("discover.joined", chat=chat.username or tg_id, tg_id=tg_id)

@@ -19,6 +19,6 @@ def test_numbers_from_009_on_are_unique() -> None:
     assert repeated <= LEGACY_DUPLICATES, f"повторяются номера: {sorted(repeated)}"
 
 
-def test_the_stars_tabs_and_hard_filter_migrations_follow_each_other_without_a_gap() -> None:
+def test_migrations_from_14_on_follow_each_other_without_a_gap() -> None:
     numbers = sorted({int(path.name[:3]) for path in chain()})
-    assert [n for n in numbers if n >= 14] == [14, 15, 16, 17, 18]
+    assert [n for n in numbers if n >= 14] == [14, 15, 16, 17, 18, 19]

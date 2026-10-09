@@ -62,6 +62,10 @@ class DatabaseRegistry:
         async with _session() as session:
             return await ChatRepository(session).has_identity(tg_id=tg_id, username=username)
 
+    async def is_excluded(self, *, tg_id: int | None = None, username: str = "") -> bool:
+        async with _session() as session:
+            return await ChatRepository(session).is_excluded(tg_id=tg_id, username=username)
+
     async def count(self) -> int:
         async with _session() as session:
             return await ChatRepository(session).count()

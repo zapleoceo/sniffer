@@ -63,6 +63,8 @@ REASONS: dict[str, RejectInfo] = {
     # Состояния, а не отказы по существу.
     "already_member": RejectInfo(_M, "мы уже в этом чате"),
     "already_inside": RejectInfo(_M, "оказалось, мы уже внутри"),
+    # Строка реестра осталась, сбор выключен владельцем (019): возврат — `chat_exclusion restore`.
+    "excluded": RejectInfo(_M, "чат исключён владельцем из сбора"),
     "join_request_sent": RejectInfo(_W, "заявка ушла модератору — ждём"),
     "request_needed": RejectInfo(_W, "вход только по заявке — нужно действие"),
     # Суждение о самом чате или известный исход запроса.

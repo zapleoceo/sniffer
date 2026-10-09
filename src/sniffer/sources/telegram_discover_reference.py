@@ -100,6 +100,8 @@ REJECT_REQUEST_NEEDED = "request_needed"
 # Мы в этом чате уже состоим, а в реестре его нет. Вступать некуда;
 # заводить запись — работа не разведки, поэтому причина видна в журнале.
 REJECT_ALREADY_MEMBER = "already_member"
+# Чат исключён владельцем (019): кандидат на него не нужен, пока исключение не снято.
+REJECT_EXCLUDED = "excluded"
 # Вступая, узнали, что уже внутри. От `already_member` отличается моментом:
 # тот виден на отборе (до запроса), этот — из ответа Telegram (запрос ушёл,
 # слот потрачен). Разные причины, потому что разная цена.
@@ -205,7 +207,19 @@ class ChatRegistry(Protocol):
 
     async def has_chat(self, *, tg_id: int | None = None, username: str = "") -> bool: ...
 
-    async def count(self) -> int: ...
+    async def is_excluded(self, *, tg_id: int | None = None, username: str = "") -> bool:
+        """Чат есть в реестре И исключён владельцем (019).
+
+        Исключённая строка остаётся в `chats`, поэтому `has_chat` на ней тоже отвечает
+        «да» — разведка и так не заводит кандидата. Этот вопрос задаётся ради другого:
+        сказать в логе `discover.candidate_excluded`, а не «уже отслеживается», и не
+        дать вступлению обойтись с исключённым как с новым.
+        """
+        ...
+
+    async def count(self) -> int:
+        """Сколько чатов занимают место в потолке: исключённые не считаются."""
+        ...
 
     async def add(self, chat: DiscoveredChat) -> None: ...
 

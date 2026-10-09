@@ -194,6 +194,10 @@ payments          period_end_estimated   # 016_stars_slots: срок посчи�
 schema_proposals                         # хвост цепочки на момент введения таблицы (004)
 search_tabs                              # вкладки поиска и архив «Удалить поиск» (017)
 subscriptions     hard_filter            # 018: жёсткие условия подписки; NULL — обычный отбор
+chats             excluded_at            # 019: исключение группы из сбора; NULL — чат в работе
+chats             excluded_reason        # 019: причина решения владельца
+chats             excluded_evidence      # 019: снимок доказательств решения (отдельно от raw_messages)
+chat_exclusion_events                    # 019: журнал exclude/restore, append-only
 SENTINELS
 }
 

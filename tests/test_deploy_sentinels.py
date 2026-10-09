@@ -79,7 +79,7 @@ LEGACY_TABLES_WITHOUT_SENTINEL = frozenset(
         "chat_candidates",
         "chat_join_events",
         "chat_rejects",
-        "chats",
+        # chats охраняется колонками excluded_* (019), поэтому из списка ушёл
         "collection_actions",
         "collection_subscribers",
         "collection_tasks",

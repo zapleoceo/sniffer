@@ -128,6 +128,8 @@ class FakeDb:
     """«Диск». Переживает пересоздание репозиториев — как настоящая база."""
 
     chats: dict[int, DiscoveredChat] = field(default_factory=dict)
+    # tg_id исключённых владельцем чатов: строка в `chats` остаётся, из потолка выпадает.
+    excluded: set[int] = field(default_factory=set)
     candidates: list[dict[str, Any]] = field(default_factory=list)
     rejects: dict[str, str] = field(default_factory=dict)
     events: list[dict[str, Any]] = field(default_factory=list)
@@ -146,8 +148,16 @@ class FakeRegistry:
             return any(chat.username.lower() == wanted for chat in self.db.chats.values())
         return False
 
+    async def is_excluded(self, *, tg_id: int | None = None, username: str = "") -> bool:
+        wanted = username.lstrip("@").lower()
+        return any(
+            known in self.db.excluded
+            and (known == tg_id or (wanted and chat.username.lower() == wanted))
+            for known, chat in self.db.chats.items()
+        )
+
     async def count(self) -> int:
-        return len(self.db.chats)
+        return len([tg_id for tg_id in self.db.chats if tg_id not in self.db.excluded])
 
     async def add(self, chat: DiscoveredChat) -> None:
         self.db.chats[chat.tg_id] = chat

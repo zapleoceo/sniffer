@@ -52,6 +52,12 @@ class Chat(BigIdMixin, Base):
     added_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=NOW
     )
+    # Исключение по решению владельца (019_chat_exclusion.sql). NULL — чат в работе.
+    excluded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    excluded_reason: Mapped[str | None] = mapped_column(Text)
+    # `none_as_null`: без него Python-None ложится JSON-значением `null`, а не SQL NULL, и
+    # `excluded_evidence IS NULL` после restore молча врёт.
+    excluded_evidence: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
 
 
 class Seller(BigIdMixin, Base):
