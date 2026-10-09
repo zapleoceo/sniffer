@@ -31,7 +31,7 @@ from typing import Protocol
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sniffer.domain.listing_state import LISTING_MAX_AGE_DAYS
+from sniffer.domain.listing_state import LISTING_MAX_AGE_DAYS, unseen_reason
 from sniffer.domain.match_filter import build_match_filter
 from sniffer.domain.passport import Intent
 from sniffer.domain.records import Listing
@@ -208,7 +208,7 @@ async def retire_unseen_listings(source: str, *, city: str, category: str, seen:
 
     async with session_scope() as session:
         retired = await ListingRepository(session).retire_unseen(
-            source, city=city, category=category, seen=seen
+            source, city=city, category=category, seen=seen, reason=unseen_reason(source)
         )
         await session.commit()
         return retired

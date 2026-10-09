@@ -29,7 +29,12 @@ from typing import Protocol
 
 import structlog
 
-from sniffer.domain.listing_state import LISTING_MAX_AGE_DAYS, announces_closed
+from sniffer.domain.listing_state import (
+    LISTING_MAX_AGE_DAYS,
+    REASON_LIVENESS_CLOSED,
+    REASON_LIVENESS_DELETED,
+    announces_closed,
+)
 from sniffer.domain.records import Chat
 from sniffer.sources.telegram_discover_reference import MessageLike
 
@@ -63,7 +68,7 @@ class LivenessStore(Protocol):
         self, chat: Chat, *, since: datetime, after_id: int, limit: int
     ) -> list[tuple[int, int]]: ...
 
-    async def retire(self, listing_ids: list[int]) -> int: ...
+    async def retire(self, listing_ids: list[int], *, reason: str) -> int: ...
 
 
 @dataclass(slots=True)
@@ -123,12 +128,16 @@ class LivenessChecker:
             # читался бы. Эту пачку круг перечитает на следующем обороте.
             await self.store.save_cursor(chat, next_cursor)
             return 0
-        dead = [
+        deleted = [listing_id for listing_id, message in pairs if message is None]
+        closed = [
             listing_id
             for listing_id, message in pairs
-            if message is None or announces_closed(str(message.message or ""))
+            if message is not None and announces_closed(str(message.message or ""))
         ]
-        retired = await self.store.retire(dead) if dead else 0
+        retired = 0
+        for ids, reason in ((deleted, REASON_LIVENESS_DELETED), (closed, REASON_LIVENESS_CLOSED)):
+            if ids:
+                retired += await self.store.retire(ids, reason=reason)
         # Курсор сдвигается после снятия: упавшая проверка (исключение выше) пачку
         # не теряет, её возьмёт следующий оборот.
         await self.store.save_cursor(chat, next_cursor)

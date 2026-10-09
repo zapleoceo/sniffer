@@ -51,6 +51,7 @@ class Store:
     refs: dict[int, list[tuple[int, int]]]
     retired: list[int] = field(default_factory=list)
     cursors: dict[int, int] = field(default_factory=dict)
+    reasons: dict[int, str] = field(default_factory=dict)
 
     async def active_chats(self, *, limit: int) -> list[Chat]:
         return self.chats[:limit]
@@ -67,8 +68,9 @@ class Store:
         rows = sorted(r for r in self.refs.get(chat.tg_id, []) if r[0] > after_id)
         return rows[:limit]
 
-    async def retire(self, listing_ids: list[int]) -> int:
+    async def retire(self, listing_ids: list[int], *, reason: str) -> int:
         self.retired.extend(listing_ids)
+        self.reasons.update(dict.fromkeys(listing_ids, reason))
         return len(listing_ids)
 
 
@@ -288,3 +290,12 @@ async def test_an_all_gone_batch_still_advances_but_retires_nothing() -> None:
 
     assert store.retired == []
     assert store.cursors == {-1: 300}
+
+
+async def test_deleted_and_closed_posts_are_retired_with_different_reasons() -> None:
+    reader = Reader(alive={11: "Продам Honda Lead, 12 млн", 13: "ПРОДАНО Honda Vision"})
+    store = Store([chat(-1, "flea")], {-1: [(101, 11), (102, 12), (103, 13)]})
+
+    await LivenessChecker(reader=reader, store=store).run()
+
+    assert store.reasons == {102: "liveness_deleted", 103: "liveness_closed"}

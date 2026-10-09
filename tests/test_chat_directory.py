@@ -179,13 +179,15 @@ async def test_retiring_with_nothing_seen_touches_neither_database_nor_listings(
     import sniffer.db as db
 
     calls: list[set[str]] = []
+    reasons: list[str] = []
 
     class Repo:
         def __init__(self, session: object) -> None: ...
 
         async def retire_unseen(
-            self, source: str, *, city: str, category: str, seen: set[str]
+            self, source: str, *, city: str, category: str, seen: set[str], reason: str
         ) -> int:
+            reasons.append(reason)
             calls.append(seen)
             return 99
 
@@ -216,6 +218,7 @@ async def test_retiring_with_nothing_seen_touches_neither_database_nor_listings(
         == 99
     )
     assert calls == [{"a"}]
+    assert reasons == ["chotot_unseen"], "причина снятия называет источник"
 
 
 async def test_session_is_opened_and_closed_per_call() -> None:

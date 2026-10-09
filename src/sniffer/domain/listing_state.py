@@ -29,6 +29,20 @@ import re
 # никогда, и бот предлагал бы их наравне со вчерашними.
 LISTING_MAX_AGE_DAYS = 30
 
+# Почему карточка снята с выдачи (`listings.deactivated_reason`, миграция 022). Строки
+# пишутся в базу, поэтому менять их нельзя без миграции данных.
+REASON_EXPIRED = "expired"
+REASON_SCREEN = "screen"
+REASON_LIVENESS_DELETED = "liveness_deleted"
+REASON_LIVENESS_CLOSED = "liveness_closed"
+REASON_SUPERSEDED = "superseded"
+
+
+def unseen_reason(source: str) -> str:
+    """Живой источник перестал отдавать объявление: `chotot_unseen`."""
+    return f"{source}_unseen"
+
+
 # Пробел без перевода строки: «фраза» не должна перепрыгивать на следующую строку.
 _SP = r"[^\S\n]"
 

@@ -215,6 +215,9 @@ CREATE TABLE IF NOT EXISTS listings (
     is_active       BOOLEAN     NOT NULL DEFAULT TRUE,
     screened_at     TIMESTAMPTZ,            -- ИИ-проверка, см. 009_listing_screen.sql
     screen_note     TEXT,
+    -- Когда и почему снята с выдачи (022_deactivation_reason.sql); NULL = неизвестно.
+    deactivated_at     TIMESTAMPTZ,
+    deactivated_reason TEXT,
 
     search_tsv      tsvector,
     embedding       vector(1024),

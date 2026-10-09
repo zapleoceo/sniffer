@@ -12,7 +12,13 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sniffer.db import models
 from sniffer.db.mappers import to_listing
 from sniffer.db.repositories.base import Repository
+from sniffer.domain.listing_state import REASON_EXPIRED, REASON_SCREEN, REASON_SUPERSEDED
 from sniffer.domain.records import Listing, MatchFilter
+
+
+def deactivation(reason: str) -> dict[str, Any]:
+    """Значения колонок для снятия карточки: флаг, время и причина всегда вместе."""
+    return {"is_active": False, "deactivated_at": func.now(), "deactivated_reason": reason}
 
 
 class ListingRepository(Repository):
@@ -204,6 +210,10 @@ class ListingRepository(Repository):
         }
         # Текст сменился — прежний вердикт модели читал другой текст.
         values["screened_at"] = None
+        if replacement.is_active:
+            # Карточка снова в выдаче: прежняя причина снятия больше не про неё.
+            values["deactivated_at"] = None
+            values["deactivated_reason"] = None
         await self._session.execute(
             update(models.Listing).where(models.Listing.id == listing_id).values(**values)
         )
@@ -222,11 +232,15 @@ class ListingRepository(Repository):
             .scalar_subquery()
         )
         result = await self._session.execute(
-            update(models.Listing).where(models.Listing.id.in_(stale)).values(is_active=False)
+            update(models.Listing)
+            .where(models.Listing.id.in_(stale))
+            .values(**deactivation(REASON_EXPIRED))
         )
         return int(getattr(result, "rowcount", 0) or 0)
 
-    async def retire_unseen(self, source: str, *, city: str, category: str, seen: set[str]) -> int:
+    async def retire_unseen(
+        self, source: str, *, city: str, category: str, seen: set[str], reason: str
+    ) -> int:
         """Погасить карточки источника в городе и категории, которых нет в `seen`.
 
         Пустой `seen` гасит 0: условие «нет в пустом списке» истинно для каждой
@@ -241,7 +255,7 @@ class ListingRepository(Repository):
             models.Listing.is_active.is_(True),
         )
         statement = statement.where(models.Listing.external_id.not_in(sorted(seen)))
-        result = await self._session.execute(statement.values(is_active=False))
+        result = await self._session.execute(statement.values(**deactivation(reason)))
         return int(getattr(result, "rowcount", 0) or 0)
 
     async def live_archive_refs(
@@ -326,7 +340,7 @@ class ListingRepository(Repository):
         """Вердикт модели: мусор гасится, предложение получает уточнённые поля."""
         values: dict[str, Any] = {"screened_at": func.now(), "screen_note": note[:300]}
         if not keep:
-            values["is_active"] = False
+            values.update(deactivation(REASON_SCREEN))
         if category is not None:
             values["category"] = category
         if deal_type is not None:
@@ -342,19 +356,21 @@ class ListingRepository(Repository):
             update(models.Listing).where(models.Listing.id == listing_id).values(**values)
         )
 
-    async def deactivate_many(self, listing_ids: list[int]) -> int:
+    async def deactivate_many(self, listing_ids: list[int], *, reason: str) -> int:
         if not listing_ids:
             return 0
         result = await self._session.execute(
             update(models.Listing)
             .where(models.Listing.id.in_(listing_ids), models.Listing.is_active.is_(True))
-            .values(is_active=False)
+            .values(**deactivation(reason))
         )
         return int(getattr(result, "rowcount", 0) or 0)
 
-    async def deactivate(self, listing_id: int) -> None:
+    async def deactivate(self, listing_id: int, *, reason: str = REASON_SUPERSEDED) -> None:
         await self._session.execute(
-            update(models.Listing).where(models.Listing.id == listing_id).values(is_active=False)
+            update(models.Listing)
+            .where(models.Listing.id == listing_id)
+            .values(**deactivation(reason))
         )
 
 
