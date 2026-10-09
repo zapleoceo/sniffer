@@ -35,7 +35,7 @@ from typing import Protocol
 
 import structlog
 
-from sniffer.collector.ingest import HistoryReader, to_raw
+from sniffer.collector.ingest import HistoryReader, read_history, to_raw
 from sniffer.domain.records import Chat, RawMessage
 
 log = structlog.get_logger(__name__)
@@ -87,8 +87,8 @@ class HistoryBackfill:
             if page:
                 await asyncio.sleep(self.pause_s)
             try:
-                messages = await self.reader.history(
-                    chat.username or chat.tg_id, limit=self.page_size, max_id=cursor
+                messages = await read_history(
+                    self.reader, chat, limit=self.page_size, max_id=cursor
                 )
             except Exception as exc:
                 log.warning(

@@ -70,7 +70,7 @@ class HistorySyncer:
                     inserted=inserted,
                     discovered=discovered,
                 )
-            except Exception as exc:
+            except ValueError as exc:
                 # Один закрытый/удалённый чат не должен останавливать остальные.
                 # Курсор при ошибке не сдвинут: на следующем проходе дочитаем.
                 log.warning(
@@ -81,31 +81,41 @@ class HistorySyncer:
         return inserted
 
     async def _read(self, chat: Chat) -> Sequence[MessageLike]:
-        """История чата: по имени, а если имя протухло — по tg_id.
+        return await read_history(
+            self.reader, chat, limit=HISTORY_MESSAGES_PER_CHAT, min_id=chat.last_msg_id
+        )
 
-        Чат переименовывают, и реестр об этом не узнаёт: живой отказ
-        12.09.2026 — `arenda_nychang` отвечал «No user has … as username» на
-        каждом проходе, хотя аккаунт в чате состоит и по tg_id читает его
-        свободно. Имя — удобство для ссылки, идентичность чата — число.
-        """
+
+async def read_history(
+    reader: HistoryReader, chat: Chat, *, limit: int, min_id: int = 0, max_id: int = 0
+) -> Sequence[MessageLike]:
+    """История чата: сначала по tg_id, и лишь если он не разрешился — по имени.
+
+    Идентичность чата — число, имя — удобство для ссылки, и оно протухает:
+    чат переименовывают или имя снимают, реестр об этом не узнаёт. Живые отказы
+    12.09.2026 (догон) и 09.10.2026 (добор архива): `arenda_nychang` отвечал
+    «No user has … as username» на каждом проходе, хотя аккаунт в чате состоит
+    и по tg_id читает его свободно. Имя-первым означало ещё и лишний
+    `contacts.ResolveUsername` на каждый проход каждого чата — запрос, у
+    которого свой флуд-лимит. Один общий путь для догона и добора: добор
+    когда-то обошёлся без этого запасного хода, и курсор архива встал.
+    """
+    # Запасной ход — только на «сущность не разрешилась» (Telethon отвечает
+    # `ValueError`). FloodWait и прочие отказы сервера уходят наверх: второй
+    # запрос под флуд-лимитом — ровно тот ретрай, который CLAUDE.md запрещает.
+    try:
+        return await reader.history(chat.tg_id, limit=limit, min_id=min_id, max_id=max_id)
+    except ValueError as exc:
         if not chat.username:
-            return await self.reader.history(
-                chat.tg_id, limit=HISTORY_MESSAGES_PER_CHAT, min_id=chat.last_msg_id
-            )
-        try:
-            return await self.reader.history(
-                chat.username, limit=HISTORY_MESSAGES_PER_CHAT, min_id=chat.last_msg_id
-            )
-        except Exception as exc:
-            log.info(
-                "collector.username_stale",
-                chat=chat.tg_id,
-                username=chat.username,
-                error=f"{type(exc).__name__}: {exc}",
-            )
-            return await self.reader.history(
-                chat.tg_id, limit=HISTORY_MESSAGES_PER_CHAT, min_id=chat.last_msg_id
-            )
+            raise
+        log.info(
+            "collector.history_by_id_failed",
+            chat=chat.tg_id,
+            username=chat.username,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+    # Отказ по имени уходит наверх как есть: молча глотать его нельзя.
+    return await reader.history(chat.username, limit=limit, min_id=min_id, max_id=max_id)
 
 
 def to_raw(chat: Chat, messages: Sequence[MessageLike]) -> list[RawMessage]:

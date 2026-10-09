@@ -140,3 +140,35 @@ async def test_nothing_to_backfill_costs_no_requests() -> None:
     reader = FakeReader(ids=[1, 2, 3])
     assert await backfill(reader, FakeStore(None)).run() == 0
     assert reader.calls == []
+
+
+async def test_a_chat_with_a_vanished_username_is_backfilled_by_id() -> None:
+    """Живой отказ 09.10.2026: «No user has … as username», курсор 282796 стоял сутки."""
+
+    class StaleNameReader(FakeReader):
+        async def history(
+            self, entity: int | str, *, limit: int, min_id: int = 0, max_id: int = 0
+        ) -> list[Msg]:
+            self.requested.append(entity)
+            if isinstance(entity, str):
+                raise ValueError('No user has "flea" as username')
+            return await super().history(entity, limit=limit, min_id=min_id, max_id=max_id)
+
+        requested: list[int | str] = field(default_factory=list)
+
+    reader = StaleNameReader(ids=list(range(1, 300)))
+    reader.requested = []
+    store = FakeStore(a_chat(last=300, backfill=282))
+
+    await backfill(reader, store).run()
+
+    assert reader.requested and all(entity == -100123 for entity in reader.requested)
+    assert store.saved and store.saved[0][0] < 282  # курсор двинулся вниз, не сброшен
+
+
+async def test_a_failure_by_both_id_and_username_still_keeps_the_cursor() -> None:
+    reader = FakeReader(ids=[1, 2, 3], boom=ValueError("gone"), fail_after=0)
+    store = FakeStore(a_chat(last=300, backfill=282))
+
+    assert await backfill(reader, store).run() == 0
+    assert store.saved == []
