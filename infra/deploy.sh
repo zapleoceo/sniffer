@@ -162,6 +162,10 @@ schema_sentinels() {
 listings          source                 # миграция единого каталога, 02.09.2026
 listings          deactivated_reason     # 022: почему карточка снята с выдачи; NULL = неизвестно
 listings          deactivated_at         # 022: когда снята
+chat_candidates   preview_class          # 023: класс превью кандидата очереди; NULL = не снимали
+chat_candidates   preview_evidence       # 023: совпавшие маркеры класса
+chat_candidates   preview_snapshot       # 023: снимок og:title/og:description/участники
+chat_candidates   preview_checked_at     # 023: когда снято превью
 users             awaiting_new_request   # `/new`: следующее сообщение открывает поиск
 passports         last_used_at           # порядок списка поисков: выбор возвращает поиск
 subscriptions     last_scanned_at        # монитор: ротация обхода, кого не смотрели дольше всех

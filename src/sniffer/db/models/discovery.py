@@ -57,6 +57,12 @@ class ChatCandidate(BigIdMixin, Base):
     found_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=NOW
     )
+    # 023: снимок публичного превью и класс. Двигает порядок разбора и только его:
+    # NULL = превью не снимали, читается как unknown.
+    preview_class: Mapped[str | None] = mapped_column(Text)
+    preview_evidence: Mapped[str | None] = mapped_column(Text)
+    preview_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    preview_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class ChatReject(Base):

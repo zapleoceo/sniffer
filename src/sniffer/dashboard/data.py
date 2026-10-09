@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from sniffer.config import get_settings
 from sniffer.db.engine import session_scope
 from sniffer.db.repositories.broker_calls import BrokerCallRepository
 from sniffer.db.repositories.chats import ChatRepository
@@ -184,7 +185,9 @@ async def inventory(*, now: datetime | None = None) -> Inventory:
         return Inventory(
             stats=await StatsRepository(session).summary(),
             chats=[ChatRow(chat=chat, harvested=harvested.get(chat.tg_id, 0)) for chat in chats],
-            candidates=await CandidateRepository(session).snapshot(limit=INVENTORY_QUEUE),
+            candidates=await CandidateRepository(session).snapshot(
+                limit=INVENTORY_QUEUE, policy=get_settings().join_priority
+            ),
             candidate_counts=await CandidateRepository(session).counts_by_status(),
             joins=await JoinLedgerRepository(session).recent_events(limit=INVENTORY_TAIL),
             limits=limits,

@@ -9,6 +9,8 @@ from typing import Annotated, Literal
 from pydantic import BeforeValidator, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from sniffer.domain.join_priority import JoinPriorityPolicy
+
 
 def _empty_to_zero(v: object) -> object:
     """Пустое значение переменной окружения приводим к нулю."""
@@ -144,6 +146,20 @@ class Settings(BaseSettings):
     # эту льготу, дальше его отменяют (`outbox.status = 'cancelled'`), а не шлют
     # вчерашнее неплательщику. Новое после окончания не ставится вовсе — без льготы.
     monitor_lapse_grace_hours: int = Field(default=6, ge=0, le=168)
+    # Приоритизация очереди вступлений по тематике превью (docs/chats-nha-trang.md,
+    # «Приоритет очереди»). ВЫКЛЮЧЕНА: решение владельца о включении не принято.
+    # Выключено - порядок разбора ровно прежний, `(priority, found_at)`. Включено -
+    # relevant раньше, unknown посередине, off_topic / foreign_city позже; никого не
+    # отклоняет, а возраст в очереди со временем обгоняет штраф (нет голодания).
+    join_priority_enabled: bool = False
+    join_priority_unknown_penalty: int = Field(default=20, ge=0, le=1000)
+    join_priority_low_penalty: int = Field(default=60, ge=0, le=1000)
+    join_priority_aging_hours: int = Field(default=6, ge=1, le=720)
+    # Сбор снимков превью - ОТДЕЛЬНАЯ настройка, тоже выключена. Публичный веб-запрос
+    # t.me/<username>, не чаще одного в `interval` секунд и не больше `per_pass` за проход.
+    join_preview_scan_enabled: bool = False
+    join_preview_interval_s: int = Field(default=5, ge=2, le=600)
+    join_preview_per_pass: int = Field(default=20, ge=1, le=200)
     prefilter_batch: int = 20
     extract_batch: int = 10
     # Срок годности строки очереди доставки (notifier), в часах от времени, на
@@ -155,6 +171,17 @@ class Settings(BaseSettings):
     outbox_ttl_h: int = Field(default=24, ge=1)
     default_city: str = "nha_trang"
     log_level: str = "INFO"
+
+    @property
+    def join_priority(self) -> JoinPriorityPolicy | None:
+        """Политика очереди вступлений; `None` - прежний порядок, настройка выключена."""
+        if not self.join_priority_enabled:
+            return None
+        return JoinPriorityPolicy(
+            unknown_penalty=self.join_priority_unknown_penalty,
+            low_penalty=self.join_priority_low_penalty,
+            aging_hours_per_point=self.join_priority_aging_hours,
+        )
 
     @property
     def selling(self) -> bool:
