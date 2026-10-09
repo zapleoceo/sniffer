@@ -813,6 +813,11 @@ FROM passports WHERE is_current GROUP BY 1 HAVING count(*) > 1;
 актуальную, остальные перенумеровать или снять `is_current`. Молча удалять
 версии нельзя — на них ссылаются `passport_events` и подписки.
 
+#### Жёсткий фильтр подписки (018_subscription_hard_filter.sql)
+
+Одна колонка `subscriptions.hard_filter JSONB`, `NULL` по умолчанию: существующие подписки не меняются.
+Часовой — строка в `schema_sentinels`. Назначение и ручная выдача слежения — `docs/hard-filter.md`.
+
 ### 7.2 Миграции: имя файла и маска
 
 Цепочка схемы — файлы `infra/sql/NNN_имя.sql`: **трёхзначный номер**,

@@ -61,6 +61,9 @@ class Subscription(BigIdMixin, Base):
     # Порядок претензии на слот мониторинга (016_stars_slots.sql): слоты берут первые
     # по (priority, id); перенос слота — смена порядка, а не удаление мониторинга.
     priority: Mapped[int] = mapped_column(Integer, nullable=False, server_default=ZERO)
+    # Жёсткие условия подписки (018_subscription_hard_filter.sql, `domain.hard_filter`):
+    # NULL — обычный мягкий отбор, как у всех.
+    hard_filter: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=NOW
     )

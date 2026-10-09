@@ -12,13 +12,14 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import func, select, update
 
 from sniffer.db import models
 from sniffer.db.repositories.base import Repository
 from sniffer.db.repositories.billing import BillingRepository
+from sniffer.domain.hard_filter import HardFilter
 from sniffer.domain.slots import (
     Monitor,
     Outcome,
@@ -67,6 +68,53 @@ class SlotRepository(Repository):
             else:
                 await self._resume(existing.id)
         return outcome, await self._sync_locked(user_id, now)
+
+    async def grant(
+        self,
+        user_id: int,
+        root: int,
+        *,
+        hard_filter: HardFilter | None,
+        lookback: timedelta,
+        now: datetime,
+    ) -> int:
+        """Мониторинг без платежа и без срока (`expires_at IS NULL`): ручная выдача владельцем.
+
+        Единственный путь к такой строке в коде: платёж срок ставит всегда, «Следить» без
+        оплаченного слота не включается. Строка не занимает оплаченных слотов и пересчётом
+        сроков не трогается (`assign_expiry` пропускает `expires_at IS NULL`). Курсор встаёт на
+        последнюю карточку, опубликованную ДО `now - lookback`: окно «последние N часов» монитор
+        просмотрит на первом же проходе, остальное придёт как новое. Нулевое окно — только
+        новое. Возвращает id мониторинга.
+        """
+        await self._lock(user_id)
+        cursor_query = select(func.coalesce(func.max(models.Listing.id), 0))
+        if lookback > timedelta(0):
+            cursor_query = cursor_query.where(models.Listing.posted_at <= now - lookback)
+        cursor = int(await self._session.scalar(cursor_query) or 0)
+        monitors = await self.monitors(user_id)
+        existing = next((monitor for monitor in monitors if monitor.root == root), None)
+        stored = hard_filter.to_json() if hard_filter is not None else None
+        if existing is not None:
+            await self._session.execute(
+                update(models.Subscription)
+                .where(models.Subscription.id == existing.id)
+                .values(is_active=True, expires_at=None, hard_filter=stored, no_slot_since=None)
+            )
+            return existing.id
+        row = models.Subscription(
+            user_id=user_id,
+            passport_root=root,
+            is_active=True,
+            priority=max((monitor.priority for monitor in monitors), default=-1) + 1,
+            expires_at=None,
+            hard_filter=stored,
+            since_listing_id=cursor,
+            scan_listing_id=cursor,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return row.id
 
     async def move(self, user_id: int, *, to_root: int, from_root: int, now: datetime) -> bool:
         """Слот с `from_root` на `to_root`: порядок меняется, мониторинги остаются."""

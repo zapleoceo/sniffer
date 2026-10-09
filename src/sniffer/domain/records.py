@@ -18,6 +18,7 @@ from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any
 
+from sniffer.domain.hard_filter import HardFilter
 from sniffer.domain.passport import Passport
 from sniffer.domain.plans import MONITOR_CARDS_PER_DAY
 
@@ -367,6 +368,8 @@ class SubscriptionState:
     overflow_count: int = 0
     overflow_notified: bool = False
     no_slot_since: datetime | None = None
+    # Жёсткие условия подписки (`domain.hard_filter`). `None` — обычный мягкий отбор.
+    hard_filter: HardFilter | None = None
 
 
 @dataclass(frozen=True, slots=True)
