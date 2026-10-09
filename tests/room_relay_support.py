@@ -7,11 +7,12 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 import httpx
 
 from sniffer.domain.room_relay import RelayCandidate
+from sniffer.notifier.room_relay import Sessions
 
 TOKEN = "sniffer:0123456789abcdef0123456789abcdef-SECRET"
 URL = "https://room.example.test/mcp"
@@ -124,3 +125,7 @@ class FakeRepo:
 
     async def advance(self, subscription_id: int, notification_id: int) -> None:
         self.cursor[subscription_id] = max(self.cursor.get(subscription_id, 0), notification_id)
+
+
+# Фальшивая сессия вместо AsyncSession: репозиторий в этих тестах тоже подменён.
+SESSIONS = cast(Sessions, fake_sessions)

@@ -17,12 +17,12 @@ from sniffer.notifier.room_client import RoomClient, RoomError
 from sniffer.notifier.room_relay import RelayConfig, RoomRelay
 from tests.room_relay_support import (
     NOW,
+    SESSIONS,
     TOKEN,
     URL,
     FakeRepo,
     FakeRoomServer,
     candidate,
-    fake_sessions,
 )
 
 
@@ -47,13 +47,14 @@ def relay(server: FakeRoomServer, **overrides: object) -> RoomRelay:
     return RoomRelay(
         config,
         connect=lambda: RoomClient(URL, TOKEN, transport=server.transport),
-        sessions=fake_sessions,
+        sessions=SESSIONS,
         now=lambda: NOW,
     )
 
 
 def settings(**env: str) -> Settings:
-    return Settings(_env_file=None, **env)  # type: ignore[call-arg]
+    # model_validate не читает окружение и .env: тест не зависит от машины, где идёт.
+    return Settings.model_validate(env)
 
 
 @pytest.mark.parametrize(
@@ -72,7 +73,7 @@ async def test_without_token_url_or_subscriptions_nothing_is_sent(env: dict[str,
     disabled = RoomRelay(
         config,
         connect=lambda: RoomClient(URL, TOKEN, transport=server.transport),
-        sessions=fake_sessions,
+        sessions=SESSIONS,
     )
     assert not config.enabled
     assert await disabled.tick() == 0
