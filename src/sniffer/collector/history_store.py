@@ -66,9 +66,13 @@ class DatabaseHistoryStore:
 class DatabaseLivenessStore:
     """Каталог для проверки живости: чьи карточки перечитать и какие погасить."""
 
-    async def active_chats(self, *, limit: int) -> list[Chat]:
+    async def next_chat(self) -> Chat | None:
         async with _session() as session:
-            return await ChatRepository(session).list_active(limit=limit)
+            return await ChatRepository(session).next_for_liveness()
+
+    async def mark_checked(self, chat: Chat) -> None:
+        async with _session() as session:
+            await ChatRepository(session).mark_liveness_checked(chat.tg_id)
 
     async def live_refs(
         self, chat: Chat, *, since: datetime, after_id: int, limit: int

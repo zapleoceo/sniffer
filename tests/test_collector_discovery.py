@@ -72,10 +72,8 @@ class FakeBackfill:
 @dataclass
 class FakeLiveness:
     order: list[str] | None = None
-    position: int = 0
 
     async def run(self) -> int:
-        self.position += 1
         if self.order is not None:
             self.order.append("liveness")
         return 0

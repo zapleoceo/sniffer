@@ -62,6 +62,8 @@ class Chat(BigIdMixin, Base):
     liveness_listing_id: Mapped[int] = mapped_column(
         BigInteger, nullable=False, server_default=ZERO
     )
+    # Очередь круга проверки живости (024): самый давний первым, NULL — ни разу.
+    liveness_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Seller(BigIdMixin, Base):
