@@ -7,7 +7,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import cast
 
-from sniffer.collector.liveness import IDS_PER_CALL, LivenessChecker
+from structlog.testing import capture_logs
+
+from sniffer.collector.liveness import ALL_GONE_THRESHOLD, IDS_PER_CALL, LivenessChecker
 from sniffer.domain.records import Chat
 from sniffer.sources.telegram_discover_reference import MessageLike
 
@@ -66,6 +68,47 @@ async def test_deleted_and_sold_posts_are_retired_live_ones_stay() -> None:
     assert await LivenessChecker(reader=reader, store=store).run() == 2
 
     assert sorted(store.retired) == [102, 103], "12 удалён, 13 исправлен в «продано»"
+
+
+async def test_every_post_gone_at_once_is_a_read_failure_not_a_cleanup() -> None:
+    """Все номера чата вернули `None` — это сбой доступа, снимать нечего."""
+    refs = [(100 + n, n) for n in range(1, ALL_GONE_THRESHOLD + 1)]
+    store = Store([chat(-1, "flea")], {-1: refs})
+
+    with capture_logs() as logs:
+        retired = await LivenessChecker(reader=Reader(alive={}), store=store).run()
+
+    assert retired == 0
+    assert store.retired == []
+    warnings = [entry for entry in logs if entry["event"] == "collector.liveness_all_gone"]
+    assert len(warnings) == 1
+    assert warnings[0]["log_level"] == "warning" and warnings[0]["checked"] == len(refs)
+
+
+async def test_every_post_gone_across_several_batches_is_still_a_failure() -> None:
+    refs = [(n, n) for n in range(1, IDS_PER_CALL * 2 + 3)]
+    store = Store([chat(-1, "flea")], {-1: refs})
+
+    assert await LivenessChecker(reader=Reader(alive={}), store=store).run() == 0
+    assert store.retired == []
+
+
+async def test_a_few_posts_all_gone_is_below_the_failure_threshold() -> None:
+    """Чат с тремя карточками честно может потерять все три."""
+    refs = [(100 + n, n) for n in range(1, ALL_GONE_THRESHOLD)]
+    store = Store([chat(-1, "flea")], {-1: refs})
+
+    assert await LivenessChecker(reader=Reader(alive={}), store=store).run() == len(refs)
+    assert sorted(store.retired) == [listing for listing, _ in refs]
+
+
+async def test_a_partial_answer_retires_the_gone_ones_as_before() -> None:
+    refs = [(100 + n, n) for n in range(1, ALL_GONE_THRESHOLD + 3)]
+    reader = Reader(alive={1: "Продам Honda Lead, 12 млн"})
+    store = Store([chat(-1, "flea")], {-1: refs})
+
+    assert await LivenessChecker(reader=reader, store=store).run() == len(refs) - 1
+    assert 101 not in store.retired
 
 
 async def test_chats_are_checked_one_per_pass_in_a_circle() -> None:

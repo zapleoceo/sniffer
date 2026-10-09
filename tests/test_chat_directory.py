@@ -15,9 +15,14 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+import pytest
 from structlog.testing import capture_logs
 
-from sniffer.sources.chat_directory import CITY_OVERFETCH, RepositoryChatDirectory
+from sniffer.sources.chat_directory import (
+    CITY_OVERFETCH,
+    RepositoryChatDirectory,
+    retire_unseen_listings,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +170,52 @@ async def test_overfetch_hitting_the_ceiling_is_reported() -> None:
 
     assert found == []
     assert tight_warnings(logs), "запас упёрся в потолок — об этом надо сказать"
+
+
+async def test_retiring_with_nothing_seen_touches_neither_database_nor_listings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Пустой `seen` гасил бы весь город и категорию: гасим 0 и не открываем сессию."""
+    import sniffer.db as db
+
+    calls: list[set[str]] = []
+
+    class Repo:
+        def __init__(self, session: object) -> None: ...
+
+        async def retire_unseen(
+            self, source: str, *, city: str, category: str, seen: set[str]
+        ) -> int:
+            calls.append(seen)
+            return 99
+
+    class Session:
+        async def commit(self) -> None: ...
+
+    class Scope:
+        async def __aenter__(self) -> Session:
+            return Session()
+
+        async def __aexit__(self, *exc: object) -> None: ...
+
+    monkeypatch.setattr(db, "ListingRepository", Repo)
+    monkeypatch.setattr(db, "session_scope", Scope)
+
+    with capture_logs() as logs:
+        retired = await retire_unseen_listings(
+            "chotot", city="nha_trang", category="motorbike", seen=set()
+        )
+
+    assert retired == 0
+    assert calls == [], "пустой список дошёл до репозитория"
+    assert any(entry["event"] == "catalog.retire_unseen_skipped_empty" for entry in logs)
+
+    # С непустым списком путь рабочий — иначе тест выше проверял бы заглушку.
+    assert (
+        await retire_unseen_listings("chotot", city="nha_trang", category="motorbike", seen={"a"})
+        == 99
+    )
+    assert calls == [{"a"}]
 
 
 async def test_session_is_opened_and_closed_per_call() -> None:

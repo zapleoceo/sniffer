@@ -227,15 +227,20 @@ class ListingRepository(Repository):
         return int(getattr(result, "rowcount", 0) or 0)
 
     async def retire_unseen(self, source: str, *, city: str, category: str, seen: set[str]) -> int:
-        """Погасить карточки источника в городе и категории, которых нет в `seen`."""
+        """Погасить карточки источника в городе и категории, которых нет в `seen`.
+
+        Пустой `seen` гасит 0: условие «нет в пустом списке» истинно для каждой
+        строки, и один пустой ответ источника снял бы весь город и категорию.
+        """
+        if not seen:
+            return 0
         statement = update(models.Listing).where(
             models.Listing.source == source,
             models.Listing.city == city,
             models.Listing.category == category,
             models.Listing.is_active.is_(True),
         )
-        if seen:
-            statement = statement.where(models.Listing.external_id.not_in(sorted(seen)))
+        statement = statement.where(models.Listing.external_id.not_in(sorted(seen)))
         result = await self._session.execute(statement.values(is_active=False))
         return int(getattr(result, "rowcount", 0) or 0)
 

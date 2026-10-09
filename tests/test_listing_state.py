@@ -21,6 +21,15 @@ from sniffer.worker.expiry import Expiry
         "SOLD. Yamaha NVX",
         "Honda Vision đã bán",
         "Căn hộ đã cho thuê",
+        # Правка автора: слово в начале текста или строки, дальше что угодно.
+        "ПРОДАНО Honda Vision",
+        "Продам Honda Lead 2019, 12 млн, документы.\nПРОДАНО",
+        "❗️SOLD❗️ Yamaha NVX 2020, 25tr, blue card, full documents, helmet included",
+        "Đã bán! Honda Vision 2019, xe đẹp, giá 25tr, giấy tờ đầy đủ, còn bảo hành",
+        # Короткая реплика целиком, слово отдельной фразой.
+        "Xe đã bán rồi",
+        "Квартира сдана.",
+        "Yamaha NVX - sold out",
     ],
 )
 def test_the_seller_closing_the_offer_is_recognised(text: str) -> None:
@@ -37,6 +46,14 @@ def test_the_seller_closing_the_offer_is_recognised(text: str) -> None:
         # Свойство новостройки, а не закрытое объявление.
         "Дом сдан в эксплуатацию в 2023, сдам квартиру 2 спальни",
         "Аренда байков, продажа запчастей",
+        # Слово посреди предложения не закрывает его (раньше закрывало где угодно).
+        "Sold with helmet",
+        "Honda Vision 2020, 15tr. Sold with helmet and cover, full documents, great condition",
+        "Продаю, не sold out",
+        "Honda Lead 2019, 25 млн. Ещё не продано, звоните, документы в порядке, торг",
+        "Soldering iron, 100k",
+        "Honda Vision 2020, 15tr, xe đã bán bảo hiểm đầy đủ cho người mua, giá tốt, cho thuê",
+        "Продам байк, предыдущий владелец сдан в армию, поэтому недорого, документы есть",
     ],
 )
 def test_an_offer_is_not_mistaken_for_a_closed_one(text: str) -> None:

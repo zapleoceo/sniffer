@@ -196,7 +196,14 @@ async def retire_unseen_listings(source: str, *, city: str, category: str, seen:
     Зовётся только после обхода, дошедшего до КОНЦА выдачи: если доска отдала
     полную страницу, за ней могли остаться живые объявления, и гасить их по
     неполному списку значит снять с продажи то, что продаётся.
+
+    Пустой `seen` — не «доска опустела», а «ничего не прочитали»: гасится 0 и
+    пишется предупреждение. Иначе пустая выдача снимала бы весь город и
+    категорию разом.
     """
+    if not seen:
+        log.warning("catalog.retire_unseen_skipped_empty", source=source, city=city)
+        return 0
     from sniffer.db import ListingRepository, session_scope
 
     async with session_scope() as session:
