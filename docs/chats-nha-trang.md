@@ -219,5 +219,5 @@ python -m sniffer.worker.chat_exclusion restore --tg-id N --reason <почему
 трогает курсоры `last_msg_id` / `backfill_msg_id`: чтение продолжится с того же места.
 Возврат не проверяет потолок — вступлений он не делает.
 
-Миграция `019_chat_exclusion.sql`: три колонки в `chats` и таблица журнала; тело — и в
+Миграция `020_chat_exclusion.sql`: три колонки в `chats` и таблица журнала; тело — и в
 `001_init.sql`, часовые — в `infra/deploy.sh`.

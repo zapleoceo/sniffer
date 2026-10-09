@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS chats (
     backfill_done BOOLEAN     NOT NULL DEFAULT FALSE,
     last_synced_at TIMESTAMPTZ,
     added_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    -- Исключение по решению владельца (019_chat_exclusion.sql): обратимо, из группы не
+    -- Исключение по решению владельца (020_chat_exclusion.sql): обратимо, из группы не
     -- выходим. NULL в excluded_at — чат в обычной работе.
     excluded_at       TIMESTAMPTZ,
     excluded_reason   TEXT,

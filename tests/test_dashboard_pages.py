@@ -723,10 +723,10 @@ def test_an_unknown_reason_is_shown_as_unknown_with_its_code(
     assert "постоянный" not in body
 
 
-def test_the_rejects_block_adds_no_controls(
+def test_non_temporary_rejects_add_no_controls(
     owner: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Страница читает; повтор отклонённого кнопкой — отдельное решение владельца."""
+    """Кнопка повтора бывает только у временного отказа (test_dashboard_reject_retry.py)."""
     _serve(monkeypatch, _inventory_with_rejects({"unresolved": 3}))
     body = owner.get("/database").text
 

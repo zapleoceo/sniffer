@@ -212,7 +212,7 @@ class ChatJoiner:
             if not candidate.username:
                 return candidate
             if await self._registry.is_excluded(username=candidate.username):
-                # Кандидат встал в очередь до исключения (019): вступать в него нельзя, и
+                # Кандидат встал в очередь до исключения (020): вступать в него нельзя, и
                 # заново он не нужен — чат остаётся строкой реестра, restore вернёт его.
                 await self._queue.drop(candidate.key)
                 await self._rejected.reject(candidate.key, REJECT_EXCLUDED)
@@ -353,7 +353,7 @@ class ChatJoiner:
         if await self._registry.has_chat(tg_id=tg_id):
             # Вступили в чат, который в реестре уже есть, — приглашение или имя, по которым
             # его нельзя было узнать заранее. Вставка упала бы на UNIQUE(tg_id) или, хуже,
-            # вернула бы к работе исключённый (019). Строку не трогаем.
+            # вернула бы к работе исключённый (020). Строку не трогаем.
             await self._queue.drop(candidate.key)
             event = (
                 "discover.candidate_excluded"

@@ -29,15 +29,16 @@ JOIN_KIND = {
 }
 
 
-def inventory_page(view: data.Inventory) -> str:
+def inventory_page(view: data.Inventory, *, csrf: str, note: str = "") -> str:
     body = (
         "<main>"
+        + note
         + _filling(view)
         + _collection_deliveries(view)
         + _chats(view)
         + _queue(view)
         + _joins(view)
-        + rejects_view.section(view)
+        + rejects_view.section(view, csrf=csrf)
         + _raw(view)
         + "</main>"
     )

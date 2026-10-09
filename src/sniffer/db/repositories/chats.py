@@ -26,7 +26,7 @@ class ChatRepository(Repository):
         return bool(await self._session.scalar(statement))
 
     async def is_excluded(self, *, tg_id: int | None = None, username: str = "") -> bool:
-        """Исключён ли чат с этим Telegram id или публичным именем (019).
+        """Исключён ли чат с этим Telegram id или публичным именем (020).
 
         Отдельно от `has_identity`: та отвечает «строка есть», эта — «строка есть и владелец
         вывел её из сбора». Разведке нужны оба ответа: первый гасит кандидата, второй

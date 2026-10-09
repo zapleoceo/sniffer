@@ -14,7 +14,7 @@
 -- Он лежит ОТДЕЛЬНО от raw_messages: сырьё без карточки чистится через 90 дней, и по
 -- пропавшим строкам «ноль пользы» потом читался бы как «данных нет».
 --
--- Номер 019 может занять и другая открытая ветка (PR #20, 019_room_relay_cursor): кто
+-- Номер 020: 019 занят повтором отказов (PR #26), PR #20 перенумеруется при мерже.
 -- мержится позже, тот перенумеровывает файл, часового в deploy.sh и test_sql_numbers.py.
 ALTER TABLE chats ADD COLUMN IF NOT EXISTS excluded_at       TIMESTAMPTZ;
 ALTER TABLE chats ADD COLUMN IF NOT EXISTS excluded_reason   TEXT;

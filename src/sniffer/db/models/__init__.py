@@ -26,6 +26,7 @@ from sniffer.db.models.discovery import (
     ChatExclusionEvent,
     ChatJoinEvent,
     ChatReject,
+    ChatRejectRetry,
 )
 from sniffer.db.models.jobs import Job
 from sniffer.db.models.listings import Listing, ListingMedia
@@ -51,6 +52,7 @@ __all__ = [
     "ChatExclusionEvent",
     "ChatJoinEvent",
     "ChatReject",
+    "ChatRejectRetry",
     "ClientRequest",
     "DialogMessage",
     "Job",

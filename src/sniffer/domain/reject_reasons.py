@@ -63,7 +63,7 @@ REASONS: dict[str, RejectInfo] = {
     # Состояния, а не отказы по существу.
     "already_member": RejectInfo(_M, "мы уже в этом чате"),
     "already_inside": RejectInfo(_M, "оказалось, мы уже внутри"),
-    # Строка реестра осталась, сбор выключен владельцем (019): возврат — `chat_exclusion restore`.
+    # Строка реестра осталась, сбор выключен владельцем (020): возврат — `chat_exclusion restore`.
     "excluded": RejectInfo(_M, "чат исключён владельцем из сбора"),
     "join_request_sent": RejectInfo(_W, "заявка ушла модератору — ждём"),
     "request_needed": RejectInfo(_W, "вход только по заявке — нужно действие"),
@@ -79,6 +79,11 @@ REASONS: dict[str, RejectInfo] = {
 def classify(reason: str) -> RejectClass:
     info = REASONS.get(reason)
     return info.kind if info else RejectClass.UNKNOWN
+
+
+def reasons_of(kind: RejectClass) -> list[str]:
+    """Известные коды класса — для запроса «все отказы этого класса»."""
+    return sorted(code for code, info in REASONS.items() if info.kind is kind)
 
 
 def label(reason: str) -> str:
