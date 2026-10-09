@@ -133,6 +133,29 @@ class ChatRepository(Repository):
             )
         )
 
+    async def next_for_liveness(self) -> Chat | None:
+        """Чат, который дольше всех не проверяли: NULL (ни разу) первым, затем по tg_id.
+
+        Очередь живёт в БД, а не в памяти процесса: деплой перезапускает коллектор
+        каждый раз, и номер «по кругу» в памяти снова и снова начинал с первых чатов.
+        """
+        row = (
+            await self._session.scalars(
+                select(models.Chat)
+                .where(models.Chat.is_active.is_(True), models.Chat.excluded_at.is_(None))
+                .order_by(models.Chat.liveness_checked_at.asc().nullsfirst(), models.Chat.tg_id)
+                .limit(1)
+            )
+        ).first()
+        return to_chat(row) if row is not None else None
+
+    async def mark_liveness_checked(self, tg_id: int) -> None:
+        await self._session.execute(
+            update(models.Chat)
+            .where(models.Chat.tg_id == tg_id)
+            .values(liveness_checked_at=func.now())
+        )
+
     async def liveness_cursor(self, tg_id: int) -> int:
         """Докуда по listing.id дочитан круг проверки живости (0 — с начала)."""
         value = await self._session.scalar(

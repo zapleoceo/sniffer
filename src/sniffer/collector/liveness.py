@@ -10,7 +10,7 @@ Telegram»): никому не видно и под `PEER_FLOOD` не подпа
 (`domain.listing_state.announces_closed`) гасится. Исключение одно: если `None`
 вернулся на ВСЕ проверенные карточки чата (от `ALL_GONE_THRESHOLD`), это похоже
 на сбой или потерю доступа, и не гасится ничего — только предупреждение в лог.
-За проход — один чат по кругу:
+За проход — один чат по кругу (самый давно проверенный, `chats.liveness_checked_at`):
 пятьдесят чатов при проходе раз в пятнадцать минут дают полный круг за полсуток,
 и нагрузка на аккаунт — один-два запроса чтения за проход.
 
@@ -23,7 +23,7 @@ Telegram»): никому не видно и под `PEER_FLOOD` не подпа
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
@@ -58,7 +58,9 @@ class LivenessReader(Protocol):
 
 
 class LivenessStore(Protocol):
-    async def active_chats(self, *, limit: int) -> list[Chat]: ...
+    async def next_chat(self) -> Chat | None: ...
+
+    async def mark_checked(self, chat: Chat) -> None: ...
 
     async def cursor(self, chat: Chat) -> int: ...
 
@@ -75,16 +77,13 @@ class LivenessStore(Protocol):
 class LivenessChecker:
     reader: LivenessReader
     store: LivenessStore
-    chats_limit: int = 50
-    # Номер чата в круге переживает проходы: коллектор держит объект между ними.
-    position: int = field(default=0)
 
     async def run(self) -> int:
-        chats = await self.store.active_chats(limit=self.chats_limit)
-        if not chats:
+        # Очередь в БД (`chats.liveness_checked_at`), не в памяти: рестарт
+        # коллектора при деплое не сбрасывает круг на первые чаты.
+        chat = await self.store.next_chat()
+        if chat is None:
             return 0
-        chat = chats[self.position % len(chats)]
-        self.position += 1
         try:
             return await self._check(chat)
         except Exception as exc:
@@ -94,6 +93,10 @@ class LivenessChecker:
                 "collector.liveness_failed", chat=chat.tg_id, error=f"{type(exc).__name__}: {exc}"
             )
             return 0
+        finally:
+            # Отметка и после упавшего прохода: иначе недоступный чат, оставаясь
+            # «самым давним», блокировал бы круг навсегда.
+            await self.store.mark_checked(chat)
 
     async def _check(self, chat: Chat) -> int:
         since = datetime.now(UTC) - timedelta(days=LISTING_MAX_AGE_DAYS)

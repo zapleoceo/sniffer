@@ -41,7 +41,9 @@ CREATE TABLE IF NOT EXISTS chats (
     excluded_reason   TEXT,
     excluded_evidence JSONB,
     -- Курсор проверки живости (021_liveness_cursor.sql): докуда по listing.id перечитан круг.
-    liveness_listing_id BIGINT NOT NULL DEFAULT 0
+    liveness_listing_id BIGINT NOT NULL DEFAULT 0,
+    -- Когда чат последним проходил проверку живости (024_liveness_checked_at.sql); NULL — ни разу.
+    liveness_checked_at TIMESTAMPTZ
 );
 
 -- `CREATE TABLE IF NOT EXISTS` существующую таблицу НЕ трогает вовсе: на живой

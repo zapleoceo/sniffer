@@ -53,8 +53,18 @@ class Store:
     cursors: dict[int, int] = field(default_factory=dict)
     reasons: dict[int, str] = field(default_factory=dict)
 
-    async def active_chats(self, *, limit: int) -> list[Chat]:
-        return self.chats[:limit]
+    checked: dict[int, int] = field(default_factory=dict)
+    clock: int = 0
+
+    async def next_chat(self) -> Chat | None:
+        # Как в БД: самый давний первым, не проверявшийся (NULL) раньше всех, при равенстве tg_id.
+        if not self.chats:
+            return None
+        return min(self.chats, key=lambda c: (self.checked.get(c.tg_id, -1), c.tg_id))
+
+    async def mark_checked(self, chat: Chat) -> None:
+        self.clock += 1
+        self.checked[chat.tg_id] = self.clock
 
     async def cursor(self, chat: Chat) -> int:
         return self.cursors.get(chat.tg_id, 0)
@@ -136,7 +146,66 @@ async def test_chats_are_checked_one_per_pass_in_a_circle() -> None:
     for _ in range(3):
         await checker.run()
 
-    assert [entity for entity, _ in reader.calls] == [-1, -2, -1]
+    assert [entity for entity, _ in reader.calls] == [-2, -1, -2]  # по tg_id при равных отметках
+
+
+async def test_a_restart_continues_from_the_longest_unchecked_chat() -> None:
+    store = Store(
+        [chat(-1, "a"), chat(-2, "b"), chat(-3, "c")],
+        {-1: [(1, 1)], -2: [(2, 2)], -3: [(3, 3)]},
+    )
+    first = Reader(alive={})
+    old = LivenessChecker(reader=first, store=store)
+    await old.run()
+    await old.run()
+    # «Рестарт» коллектора: новый объект, память процесса пуста, очередь — в store.
+    reborn = Reader(alive={})
+    await LivenessChecker(reader=reborn, store=store).run()
+
+    assert [entity for entity, _ in first.calls] == [-3, -2]
+    assert [entity for entity, _ in reborn.calls] == [-1], "хвост не голодает после рестарта"
+
+
+async def test_a_failing_chat_is_marked_and_does_not_block_the_circle() -> None:
+    class Flaky(Reader):
+        async def messages_by_ids(
+            self, entity: int | str, ids: Sequence[int]
+        ) -> Sequence[MessageLike | None]:
+            self.calls.append((entity, list(ids)))
+            if entity == -2:
+                raise ConnectionError("telegram down")
+            return [None for _ in ids]
+
+    reader = Flaky(alive={})
+    store = Store([chat(-2), chat(-1, "b")], {-2: [(1, 1)], -1: [(2, 2)]})
+    checker = LivenessChecker(reader=reader, store=store)
+
+    for _ in range(3):
+        await checker.run()
+
+    # -2 упал, но получил отметку: следующим идёт -1, а не снова -2.
+    assert [entity for entity, _ in reader.calls] == [-2, -1, -2]
+    assert set(store.checked) == {-1, -2}
+
+
+async def test_a_never_checked_chat_goes_before_any_checked_one() -> None:
+    store = Store([chat(-1, "a"), chat(-2, "b")], {-1: [(1, 1)], -2: [(2, 2)]})
+    store.checked[-1] = 5
+    reader = Reader(alive={})
+
+    await LivenessChecker(reader=reader, store=store).run()
+
+    assert [entity for entity, _ in reader.calls] == [-2]
+
+
+async def test_equal_marks_are_ordered_by_tg_id() -> None:
+    store = Store([chat(-5, "e"), chat(-9, "i")], {-5: [(1, 1)], -9: [(2, 2)]})
+    store.checked.update({-5: 3, -9: 3})
+    reader = Reader(alive={})
+
+    await LivenessChecker(reader=reader, store=store).run()
+
+    assert [entity for entity, _ in reader.calls] == [-9]
 
 
 async def test_chats_are_read_by_id_first_without_resolving_the_name() -> None:
@@ -181,7 +250,7 @@ async def test_an_unreadable_chat_does_not_break_the_circle() -> None:
     checker = LivenessChecker(reader=Broken(alive={}), store=store)
 
     assert await checker.run() == 0
-    assert checker.position == 1
+    assert store.checked == {-1: 1}, "упавший чат получает отметку"
     assert store.retired == []
 
 

@@ -1659,6 +1659,28 @@ async def test_liveness_refs_follow_the_cursor_and_the_cursor_is_stored(
     assert await chats.liveness_cursor(-100) == after
 
 
+async def test_liveness_queue_takes_the_longest_unchecked_active_chat(
+    db_session: AsyncSession,
+) -> None:
+    """NULL первым, затем самый давний, при равенстве tg_id; исключённый не берётся (024)."""
+    chats = ChatRepository(db_session)
+    for tg_id in (-300, -200, -100):
+        await chats.add(Chat(tg_id=tg_id, title=f"чат {tg_id}", city="nha_trang"))
+    await db_session.commit()
+
+    first = await chats.next_for_liveness()
+    assert first is not None and first.tg_id == -300, "NULL равны - по tg_id"
+    await chats.mark_liveness_checked(-300)
+    await chats.mark_liveness_checked(-200)
+    await db_session.commit()
+    third = await chats.next_for_liveness()
+    assert third is not None and third.tg_id == -100, "не проверявшийся раньше проверенных"
+    await chats.mark_liveness_checked(-100)
+    await db_session.commit()
+    oldest = await chats.next_for_liveness()
+    assert oldest is not None and oldest.tg_id == -300, "дальше самый давний"
+
+
 async def test_every_deactivation_path_records_reason_and_time(db_session: AsyncSession) -> None:
     """Все пути снятия на живой базе пишут причину и время; нетронутая остаётся NULL (022)."""
     from sqlalchemy import select

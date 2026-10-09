@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sniffer.collector.alerts import session_unavailable
 from sniffer.collector.backfill import HistoryBackfill
 from sniffer.collector.history_store import DatabaseHistoryStore, DatabaseLivenessStore
-from sniffer.collector.ingest import HISTORY_CHATS_PER_TICK, HistorySyncer
+from sniffer.collector.ingest import HistorySyncer
 from sniffer.collector.liveness import LivenessChecker
 from sniffer.collector.preview_scan import scan_previews
 from sniffer.config import Settings, get_settings
@@ -174,8 +174,6 @@ class BackfillLike(Protocol):
 
 
 class LivenessLike(Protocol):
-    position: int
-
     async def run(self) -> int: ...
 
 
@@ -213,9 +211,6 @@ class DiscoveryRunner:
         self._history_factory = history_factory or self._new_history
         self._backfill_factory = backfill_factory or self._new_backfill
         self._liveness_factory = liveness_factory or self._new_liveness
-        # Номер чата в круге проверки живости. Клиент Telegram создаётся на
-        # проход заново, а круг обязан продолжаться с того места, где встал.
-        self._liveness_position = 0
         self._owner_alert = owner_alert
         self._unavailable_reported = False
 
@@ -263,10 +258,7 @@ class DiscoveryRunner:
             await self._backfill_factory(client).run()
             # Живость каталога — последней: это перечитывание уже известного,
             # и свежему посту и добору архива оно уступает место в проходе.
-            liveness = self._liveness_factory(client)
-            liveness.position = self._liveness_position
-            await liveness.run()
-            self._liveness_position = liveness.position
+            await self._liveness_factory(client).run()
             if joined is None:
                 return muted
             log.info("collector.chat_joined", tg_id=joined.tg_id, chat=joined.username)
@@ -302,9 +294,7 @@ class DiscoveryRunner:
         return HistoryBackfill(reader=client, store=DatabaseHistoryStore())
 
     def _new_liveness(self, client: TelegramJoiner) -> LivenessChecker:
-        return LivenessChecker(
-            reader=client, store=DatabaseLivenessStore(), chats_limit=HISTORY_CHATS_PER_TICK
-        )
+        return LivenessChecker(reader=client, store=DatabaseLivenessStore())
 
 
 def _candidate(candidate: ChatCandidate) -> DiscoveryCandidate:
