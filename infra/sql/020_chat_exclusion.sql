@@ -15,7 +15,6 @@
 -- пропавшим строкам «ноль пользы» потом читался бы как «данных нет».
 --
 -- Номер 020: 019 занят повтором отказов (PR #26), PR #20 перенумеруется при мерже.
--- мержится позже, тот перенумеровывает файл, часового в deploy.sh и test_sql_numbers.py.
 ALTER TABLE chats ADD COLUMN IF NOT EXISTS excluded_at       TIMESTAMPTZ;
 ALTER TABLE chats ADD COLUMN IF NOT EXISTS excluded_reason   TEXT;
 ALTER TABLE chats ADD COLUMN IF NOT EXISTS excluded_evidence JSONB;
