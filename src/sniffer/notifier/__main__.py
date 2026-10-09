@@ -25,6 +25,7 @@ from sniffer.bot.billing_telegram import AiogramBotApi
 from sniffer.config import Settings, get_settings
 from sniffer.notifier.delivery import Delivery, Sender, ThreadSender
 from sniffer.notifier.policy import policy_from
+from sniffer.notifier.room_relay import RelayConfig, RoomRelay
 from sniffer.runtime.service import Service, idle_loop, run_service
 from sniffer.telegram_env import bot_session
 
@@ -49,13 +50,17 @@ async def run(stop: asyncio.Event) -> None:
         _sender(bot), send_in_thread=_thread_sender(bot), policy=policy_from(settings)
     )
     reconciler = _reconciler(bot, settings)
+    relay = RoomRelay(RelayConfig.from_settings(settings))
+    relay.announce()
     every = Every(INTERVAL)
 
     async def tick() -> int:
         # Сверка платежей живёт здесь, потому что здесь уже есть Bot и база; ритм — раз в
         # четверть часа и сразу при старте. Её сбой доставку не останавливает: каждый
         # шаг сверки охраняется сам (`billing_guard.Flow`).
-        return await delivery.tick() + await every.run(reconciler.tick)
+        # Доставка в комнату агентов — третья, после клиентских сообщений: её сбой гасится
+        # внутри `RoomRelay.tick` и клиентов не задерживает. Выключена — ноль запросов.
+        return await delivery.tick() + await every.run(reconciler.tick) + await relay.tick()
 
     try:
         await idle_loop(stop, tick, service=NAME, poll_interval_s=POLL_INTERVAL_S)
