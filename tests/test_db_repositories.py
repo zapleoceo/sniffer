@@ -1624,3 +1624,27 @@ async def test_screening_reads_fresh_first_and_applies_the_verdict(
     await db_session.commit()
     again = await repo.unscreened("telegram_archive", limit=10)
     assert bike.id in {row.id for row in again}, "новый текст — новая проверка"
+
+
+async def test_liveness_refs_follow_the_cursor_and_the_cursor_is_stored(
+    db_session: AsyncSession,
+) -> None:
+    """Пачка — следующие по id после курсора; курсор лежит в строке чата (021)."""
+    chats = ChatRepository(db_session)
+    await chats.add(Chat(tg_id=-100, title="чат", city="nha_trang"))
+    repo = ListingRepository(db_session)
+    for n in range(1, 6):
+        await repo.upsert_external(_catalog_card(f"-100:{n}", posted_at=NOW))
+    await db_session.commit()
+    since = NOW - timedelta(days=30)
+
+    first = await repo.live_archive_refs(-100, since=since, limit=2)
+    assert [msg for _, msg in first] == [1, 2]
+    after = max(listing_id for listing_id, _ in first)
+    second = await repo.live_archive_refs(-100, since=since, limit=2, after_id=after)
+    assert [msg for _, msg in second] == [3, 4]
+
+    assert await chats.liveness_cursor(-100) == 0
+    await chats.set_liveness_cursor(-100, after)
+    await db_session.commit()
+    assert await chats.liveness_cursor(-100) == after

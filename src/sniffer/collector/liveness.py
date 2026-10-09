@@ -13,6 +13,11 @@ Telegram»): никому не видно и под `PEER_FLOOD` не подпа
 За проход — один чат по кругу:
 пятьдесят чатов при проходе раз в пятнадцать минут дают полный круг за полсуток,
 и нагрузка на аккаунт — один-два запроса чтения за проход.
+
+Внутри чата тоже круг: курсор `chats.liveness_listing_id` — докуда по возрастанию
+`listing.id` дочитано. Каждый проход берёт следующую пачку активных карточек после
+курсора, дошёл до конца — со следующего прохода с начала. Раньше читались 300
+НОВЕЙШИХ, и 80% активных каталога (18 448 из 22 936) не перечитывались никогда.
 """
 
 from __future__ import annotations
@@ -32,8 +37,8 @@ log = structlog.get_logger(__name__)
 
 # Столько номеров Telegram отдаёт одним `get_messages(ids=...)`.
 IDS_PER_CALL = 100
-# Потолок карточек одного чата за проход: самый плотный чат (Arenda_Nyachangg,
-# ~300 карточек в сутки) иначе съел бы проход целиком.
+# Пачка карточек одного чата за проход: самый плотный чат (Arenda_Nyachangg,
+# ~300 карточек в сутки) иначе съел бы проход целиком. Это размер шага курсора.
 REFS_PER_CHAT = 300
 # С такого числа проверенных карточек ответ «удалены все до одной» считается
 # сбоем, а не удалением. Меньше — выборка слишком мала: чат с тремя карточками
@@ -50,7 +55,13 @@ class LivenessReader(Protocol):
 class LivenessStore(Protocol):
     async def active_chats(self, *, limit: int) -> list[Chat]: ...
 
-    async def live_refs(self, chat: Chat, *, since: datetime) -> list[tuple[int, int]]: ...
+    async def cursor(self, chat: Chat) -> int: ...
+
+    async def save_cursor(self, chat: Chat, listing_id: int) -> None: ...
+
+    async def live_refs(
+        self, chat: Chat, *, since: datetime, after_id: int, limit: int
+    ) -> list[tuple[int, int]]: ...
 
     async def retire(self, listing_ids: list[int]) -> int: ...
 
@@ -81,9 +92,17 @@ class LivenessChecker:
 
     async def _check(self, chat: Chat) -> int:
         since = datetime.now(UTC) - timedelta(days=LISTING_MAX_AGE_DAYS)
-        refs = await self.store.live_refs(chat, since=since)
+        stored = await self.store.cursor(chat)
+        refs = await self.store.live_refs(chat, since=since, after_id=stored, limit=REFS_PER_CHAT)
+        if not refs and stored:
+            # Курсор стоял на последней карточке: круг замкнулся, не тратим проход.
+            refs = await self.store.live_refs(chat, since=since, after_id=0, limit=REFS_PER_CHAT)
         if not refs:
+            if stored:
+                await self.store.save_cursor(chat, 0)
             return 0
+        # Короткая пачка — конец круга: следующий проход начнёт с начала.
+        next_cursor = max(listing_id for listing_id, _ in refs) if len(refs) >= REFS_PER_CHAT else 0
         pairs: list[tuple[int, MessageLike | None]] = []
         for start in range(0, len(refs), IDS_PER_CALL):
             batch = refs[start : start + IDS_PER_CALL]
@@ -99,6 +118,10 @@ class LivenessChecker:
             # живой чат целиком; следующий круг прочитает его заново, а настоящие
             # удаления подберёт частичный ответ или возраст карточки.
             log.warning("collector.liveness_all_gone", chat=chat.tg_id, checked=len(pairs))
+            # Курсор идёт вперёд и здесь: иначе честно вычищенная пачка (чат убрал
+            # старые посты разом) держала бы круг на месте, и дальше него никто не
+            # читался бы. Эту пачку круг перечитает на следующем обороте.
+            await self.store.save_cursor(chat, next_cursor)
             return 0
         dead = [
             listing_id
@@ -106,6 +129,9 @@ class LivenessChecker:
             if message is None or announces_closed(str(message.message or ""))
         ]
         retired = await self.store.retire(dead) if dead else 0
+        # Курсор сдвигается после снятия: упавшая проверка (исключение выше) пачку
+        # не теряет, её возьмёт следующий оборот.
+        await self.store.save_cursor(chat, next_cursor)
         log.info("collector.liveness_checked", chat=chat.tg_id, checked=len(refs), retired=retired)
         return retired
 

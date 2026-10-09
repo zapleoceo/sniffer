@@ -199,6 +199,7 @@ chats             excluded_at            # 020: исключение групп�
 chats             excluded_reason        # 020: причина решения владельца
 chats             excluded_evidence      # 020: снимок доказательств решения (отдельно от raw_messages)
 chat_exclusion_events                    # 020: журнал exclude/restore, append-only
+chats             liveness_listing_id    # 021: курсор проверки живости по listing.id
 SENTINELS
 }
 

@@ -58,6 +58,10 @@ class Chat(BigIdMixin, Base):
     # `none_as_null`: без него Python-None ложится JSON-значением `null`, а не SQL NULL, и
     # `excluded_evidence IS NULL` после restore молча врёт.
     excluded_evidence: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    # Курсор проверки живости (021_liveness_cursor.sql): 0 — круг с начала.
+    liveness_listing_id: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=ZERO
+    )
 
 
 class Seller(BigIdMixin, Base):

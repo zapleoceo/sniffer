@@ -70,13 +70,21 @@ class DatabaseLivenessStore:
         async with _session() as session:
             return await ChatRepository(session).list_active(limit=limit)
 
-    async def live_refs(self, chat: Chat, *, since: datetime) -> list[tuple[int, int]]:
-        from sniffer.collector.liveness import REFS_PER_CHAT
-
+    async def live_refs(
+        self, chat: Chat, *, since: datetime, after_id: int, limit: int
+    ) -> list[tuple[int, int]]:
         async with _session() as session:
             return await ListingRepository(session).live_archive_refs(
-                chat.tg_id, since=since, limit=REFS_PER_CHAT
+                chat.tg_id, since=since, limit=limit, after_id=after_id
             )
+
+    async def cursor(self, chat: Chat) -> int:
+        async with _session() as session:
+            return await ChatRepository(session).liveness_cursor(chat.tg_id)
+
+    async def save_cursor(self, chat: Chat, listing_id: int) -> None:
+        async with _session() as session:
+            await ChatRepository(session).set_liveness_cursor(chat.tg_id, listing_id)
 
     async def retire(self, listing_ids: list[int]) -> int:
         async with _session() as session:
