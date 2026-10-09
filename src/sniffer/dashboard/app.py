@@ -12,15 +12,17 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import Annotated
 
 import structlog
-from fastapi import Cookie, FastAPI, Form, Request, Response
+from fastapi import Cookie, FastAPI, Form, Query, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from sniffer.config import get_settings
 from sniffer.dashboard import auth, data, inventory, reauth, views
 from sniffer.dashboard.html import error_page, esc, login_page
+from sniffer.domain.reject_retry import RetryCode, RetryResult, RetryStatus
 
 log = structlog.get_logger(__name__)
 
@@ -66,6 +68,22 @@ SECURITY_HEADERS = {
     # Страница с перепиской клиентов не должна лежать в кэше прокси или
     # оставаться в истории браузера после выхода.
     "Cache-Control": "no-store",
+}
+
+
+# Что сказать после успешного POST повтора. Ключи — закрытый набор: значение из
+# query-строки в страницу не попадает, только выбор из этих двух текстов.
+RETRY_NOTES = {
+    RetryStatus.CREATED.value: "Поставлено в очередь. Ничего не отправлено в Telegram: "
+    "вступит joiner по своим лимитам.",
+    RetryStatus.REPLAYED.value: "Эта форма уже была принята — вторая попытка не заведена.",
+}
+
+# Код отказа правила → статус ответа. Всё, чего здесь нет, — 409: «понятно, но нельзя».
+REFUSAL_STATUS = {
+    RetryCode.DAILY_LIMIT: 429,
+    RetryCode.NOT_FOUND: 404,
+    RetryCode.BAD_KEY: 400,
 }
 
 
@@ -137,10 +155,46 @@ def create_app() -> FastAPI:
         return _html(views.overview_page(await data.overview()))
 
     @app.get("/database", response_class=HTMLResponse)
-    async def database(sniffer_owner: OwnerCookie = None) -> HTMLResponse:
+    async def database(
+        retry: Annotated[str, Query()] = "", sniffer_owner: OwnerCookie = None
+    ) -> HTMLResponse:
         """Что накоплено в базе. Тот же страж владельца, что и у остальных."""
         _require_owner(sniffer_owner)
-        return _html(inventory.inventory_page(await data.inventory()))
+        text = RETRY_NOTES.get(retry)
+        note = f"<p class='good'>{esc(text)}</p>" if text else ""
+        return _html(
+            inventory.inventory_page(await data.inventory(), csrf=auth.issue_csrf(), note=note)
+        )
+
+    @app.post("/rejects/{key}/retry", response_class=HTMLResponse)
+    async def reject_retry(
+        key: str,
+        csrf: Annotated[str, Form()] = "",
+        request_id: Annotated[str, Form()] = "",
+        sniffer_owner: OwnerCookie = None,
+    ) -> Response:
+        """Повтор ОДНОГО временного отказа. Массового маршрута нет и не будет.
+
+        Порядок: сессия (401) → CSRF (403) → правила под замком в репозитории
+        (404/409/429). Каждое действие, в том числе отказанное, оставляет строку в логе.
+        """
+        _require_owner(sniffer_owner)
+        try:
+            _require_csrf(csrf)
+        except auth.AuthError:
+            log.warning("dashboard.reject_retry_denied", key=key, reason="csrf")
+            raise
+        result = await data.request_retry(
+            key, idempotency_key=request_id, requested_by=auth.owner_id()
+        )
+        log.info(
+            "dashboard.reject_retry",
+            key=key,
+            status=result.status.value,
+            code=result.decision.code.value,
+            attempt=result.record.id if result.record else None,
+        )
+        return _retry_response(result)
 
     @app.get("/auth/telegram", response_class=HTMLResponse)
     async def telegram_login(request: Request) -> Response:
@@ -248,6 +302,21 @@ def create_app() -> FastAPI:
         )
 
     return app
+
+
+def _retry_response(result: RetryResult) -> Response:
+    if result.status is not RetryStatus.REFUSED:
+        return RedirectResponse(f"/database?retry={result.status.value}", status_code=303)
+    status = REFUSAL_STATUS.get(result.decision.code, 409)
+    message = result.decision.message
+    headers = dict(SECURITY_HEADERS)
+    until = result.decision.available_at
+    if until is not None:
+        message += f" Доступно с {until:%Y-%m-%d %H:%M} UTC."
+        if status == 429:
+            wait = int((until - datetime.now(UTC)).total_seconds())
+            headers["Retry-After"] = str(max(wait, 1))
+    return HTMLResponse(error_page(status, message), status_code=status, headers=headers)
 
 
 def _require_csrf(token: str) -> None:

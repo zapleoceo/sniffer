@@ -25,10 +25,12 @@ from sniffer.db.repositories.discovery import (
     RejectRepository,
 )
 from sniffer.db.repositories.raw_messages import RawMessageRepository
+from sniffer.db.repositories.reject_retries import RejectRetryRepository
 from sniffer.db.repositories.requests import ClientRequestRepository
 from sniffer.db.repositories.stats import StatsRepository
 from sniffer.db.repositories.telegram_sessions import TelegramSessionRepository
 from sniffer.db.repositories.users import UserRepository
+from sniffer.domain import reject_reasons
 from sniffer.domain.records import (
     BrokerCall,
     CandidateState,
@@ -42,6 +44,8 @@ from sniffer.domain.records import (
     SessionState,
     User,
 )
+from sniffer.domain.reject_reasons import RejectClass
+from sniffer.domain.reject_retry import RetryOffer, RetryRecord, RetryResult
 
 # Потолок вступлений и окно — из единственного места, где они записаны
 # (правила CLAUDE.md переписаны в `telegram_discover_reference`). Это
@@ -49,7 +53,11 @@ from sniffer.domain.records import (
 # страница обязана показывать «2 из 10», а свой экземпляр числа 10 здесь
 # означал бы, что после смены лимита страница ещё месяц врёт уверенным тоном.
 # Модуль чистый — константы и протоколы, ни сети, ни базы (architecture.md, 5).
-from sniffer.sources.telegram_discover_reference import JOIN_WINDOW, MAX_JOINS_PER_DAY
+from sniffer.sources.telegram_discover_reference import (
+    JOIN_WINDOW,
+    MAX_JOINS_PER_DAY,
+    MAX_TRACKED_CHATS,
+)
 
 # Сколько строк лога показываем на обзоре. Больше на одну страницу не нужно, а
 # «показать всё» на растущей таблице — это способ уронить страницу через год.
@@ -61,6 +69,10 @@ DIALOG_TAIL = 60
 INVENTORY_CHATS = 200
 INVENTORY_QUEUE = 100
 INVENTORY_TAIL = 30
+# Временных отказов (кандидатов на повтор) показываем с запасом: их мало, а потерять
+# нужный за хвостом «последних 30» нельзя.
+INVENTORY_RETRYABLE = 50
+INVENTORY_RETRIES = 20
 
 
 @dataclass(slots=True)
@@ -112,6 +124,16 @@ class Inventory:
     # и по его длине считать нельзя: карточка «отклонено» годами показывала 30
     # при полутора тысячах строк в таблице.
     reject_counts: dict[str, int] = field(default_factory=dict)
+    # Повтор отказа (docs/dashboard.md, «Повтор отказа»): временные отказы целиком, а не
+    # только те, что попали в хвост; решение правила на каждый; журнал попыток.
+    temporary_rejects: list[RejectedCandidate] = field(default_factory=list)
+    retry_offers: dict[str, RetryOffer] = field(default_factory=dict)
+    retries: list[RetryRecord] = field(default_factory=list)
+    retries_today: int = 0
+    # Сколько чатов отслеживается и где потолок: предупреждение берётся отсюда, а не
+    # из зашитых чисел (потолок уже менялся с 50 до 200).
+    tracked_chats: int = 0
+    chat_cap: int = MAX_TRACKED_CHATS
     raw: list[RawMessage] = field(default_factory=list)
     collection_deliveries: list[CollectionDeliveryState] = field(default_factory=list)
 
@@ -154,13 +176,25 @@ async def inventory(*, now: datetime | None = None) -> Inventory:
     async with session_scope() as session:
         harvested = await RawMessageRepository(session).counts_by_chat()
         chats = await ChatRepository(session).list_all(limit=INVENTORY_CHATS)
+        limits = await JoinLedgerRepository(session).state(moment, window=JOIN_WINDOW)
+        temporary = await RejectRepository(session).by_reasons(
+            reject_reasons.reasons_of(RejectClass.TEMPORARY), limit=INVENTORY_RETRYABLE
+        )
+        retries = RejectRetryRepository(session)
         return Inventory(
             stats=await StatsRepository(session).summary(),
             chats=[ChatRow(chat=chat, harvested=harvested.get(chat.tg_id, 0)) for chat in chats],
             candidates=await CandidateRepository(session).snapshot(limit=INVENTORY_QUEUE),
             candidate_counts=await CandidateRepository(session).counts_by_status(),
             joins=await JoinLedgerRepository(session).recent_events(limit=INVENTORY_TAIL),
-            limits=await JoinLedgerRepository(session).state(moment, window=JOIN_WINDOW),
+            limits=limits,
+            temporary_rejects=temporary,
+            retry_offers=await retries.offers(
+                [(item.key, item.reason) for item in temporary], moment, limits.blocked_until
+            ),
+            retries=await retries.recent(limit=INVENTORY_RETRIES),
+            retries_today=await retries.used_in_window(moment),
+            tracked_chats=await ChatRepository(session).count(),
             rejects=await RejectRepository(session).recent(limit=INVENTORY_TAIL),
             reject_counts=await RejectRepository(session).counts_by_reason(),
             raw=await RawMessageRepository(session).recent(limit=INVENTORY_TAIL),
@@ -168,6 +202,23 @@ async def inventory(*, now: datetime | None = None) -> Inventory:
                 limit=INVENTORY_TAIL
             ),
         )
+
+
+async def request_retry(
+    key: str, *, idempotency_key: str, requested_by: int, now: datetime | None = None
+) -> RetryResult:
+    """Повтор одного отказа. Правила и замок — в репозитории; здесь граница транзакции.
+
+    Коммит и при отказе: «закрыть завершённые попытки» внутри запроса — настоящая
+    запись, а откат от исключения делает `session_scope`.
+    """
+    moment = now or datetime.now(UTC)
+    async with session_scope() as session:
+        result = await RejectRetryRepository(session).request(
+            key, idempotency_key=idempotency_key, requested_by=requested_by, now=moment
+        )
+        await session.commit()
+        return result
 
 
 async def request_detail(request_id: int) -> RequestDetail | None:

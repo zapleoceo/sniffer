@@ -194,6 +194,7 @@ payments          period_end_estimated   # 016_stars_slots: срок посчи�
 schema_proposals                         # хвост цепочки на момент введения таблицы (004)
 search_tabs                              # вкладки поиска и архив «Удалить поиск» (017)
 subscriptions     hard_filter            # 018: жёсткие условия подписки; NULL — обычный отбор
+chat_reject_retries                      # 019: журнал адресных повторов временных отказов
 SENTINELS
 }
 
