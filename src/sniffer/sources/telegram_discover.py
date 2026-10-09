@@ -149,8 +149,11 @@ class ChatDiscovery:
             return False
         if await self._rejected.is_rejected(candidate.key):
             return False
-        if candidate.username and await self._registry.has_chat(username=candidate.username):
-            return False
+        if candidate.username:
+            if await self._excluded(candidate, username=candidate.username):
+                return False
+            if await self._registry.has_chat(username=candidate.username):
+                return False
 
         if resolved is None:
             if self._flooded:
@@ -179,8 +182,11 @@ class ChatDiscovery:
         # Сверка по id — только когда id известен. У непройденного приглашения
         # он нулевой: до вступления Telegram id закрытого чата не отдаёт, и
         # `has_chat(tg_id=0)` спросил бы про несуществующий чат.
-        if resolved.tg_id and await self._registry.has_chat(tg_id=resolved.tg_id):
-            return False
+        if resolved.tg_id:
+            if await self._excluded(candidate, tg_id=resolved.tg_id):
+                return False
+            if await self._registry.has_chat(tg_id=resolved.tg_id):
+                return False
 
         reason = screen(resolved, city=self._city)
         if reason:
@@ -189,6 +195,19 @@ class ChatDiscovery:
             return False
         await self._queue.push(candidate)
         log.info("discover.queued", candidate=candidate.key, title=resolved.title)
+        return True
+
+    async def _excluded(
+        self, candidate: ChatCandidate, *, tg_id: int | None = None, username: str = ""
+    ) -> bool:
+        """Ссылка на чат, который владелец исключил: кандидата не заводим (020).
+
+        Не пишем в отклонённые: исключение обратимо, а запись в `chat_rejects` пережила бы
+        возврат чата и стала бы вторым источником правды о нём.
+        """
+        if not await self._registry.is_excluded(tg_id=tg_id, username=username):
+            return False
+        log.info("discover.candidate_excluded", candidate=candidate.key, tg_id=tg_id)
         return True
 
     async def _look(self, candidate: ChatCandidate) -> ResolvedChat | None:

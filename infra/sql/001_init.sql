@@ -34,7 +34,12 @@ CREATE TABLE IF NOT EXISTS chats (
     -- Telegram отдал пустую страницу: начало чата достигнуто, больше не ходим.
     backfill_done BOOLEAN     NOT NULL DEFAULT FALSE,
     last_synced_at TIMESTAMPTZ,
-    added_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    added_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- Исключение по решению владельца (020_chat_exclusion.sql): обратимо, из группы не
+    -- выходим. NULL в excluded_at — чат в обычной работе.
+    excluded_at       TIMESTAMPTZ,
+    excluded_reason   TEXT,
+    excluded_evidence JSONB
 );
 
 -- `CREATE TABLE IF NOT EXISTS` существующую таблицу НЕ трогает вовсе: на живой

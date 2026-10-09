@@ -45,6 +45,8 @@ class Chat:
     backfill_done: bool = False
     last_synced_at: datetime | None = None
     added_at: datetime | None = None
+    # Исключён владельцем (020): не читается сборщиками, не занимает место в потолке.
+    excluded_at: datetime | None = None
     id: int | None = None
 
 

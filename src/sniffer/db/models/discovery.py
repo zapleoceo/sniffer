@@ -13,9 +13,11 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Index, Integer, Text
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, Index, Integer, Text
 from sqlalchemy import text as sa_text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from sniffer.db.models.base import FALSE, NOW, Base, BigIdMixin
@@ -138,3 +140,22 @@ class ChatJoinEvent(BigIdMixin, Base):
     blocked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     muted: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=FALSE)
     mute_error: Mapped[str | None] = mapped_column(Text)
+
+
+class ChatExclusionEvent(BigIdMixin, Base):
+    """Журнал исключений и возвратов групп (020_chat_exclusion.sql). Только добавление."""
+
+    __tablename__ = "chat_exclusion_events"
+    __table_args__ = (
+        CheckConstraint("action IN ('exclude', 'restore')", name="chat_exclusion_action_check"),
+        Index("chat_exclusion_events_tg_idx", "tg_id", "at"),
+    )
+
+    tg_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    action: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    actor: Mapped[str] = mapped_column(Text, nullable=False)
+    at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=NOW
+    )

@@ -1141,6 +1141,14 @@ constraint matching the ON CONFLICT specification». На подделке ба�
 цена ошибки исходной проводки —
 [spec-v2, 4.4](spec-v2.md#44-telegram-группы--что-стоило-дорого-узнать).
 
+**Исключение группы из сбора** (`chats.excluded_*`, журнал `chat_exclusion_events`, команда
+`python -m sniffer.worker.chat_exclusion`) — обратимое решение владельца: строка чата остаётся,
+`is_active=false`, из группы не выходим, в Telegram не пишем. Исключённый не читается сборщиками,
+не занимает место в потолке `MAX_TRACKED_CHATS` (`ChatRepository.count`) и не возвращается
+разведкой (`ChatRegistry.is_excluded`, лог `discover.candidate_excluded`). Снимок доказательств
+хранится в записи и в журнале, а не вычисляется по `raw_messages`: сырьё чистится через 90 дней.
+Подробно — [`chats-nha-trang.md`](chats-nha-trang.md#исключение-группы-из-сбора).
+
 **Второй такой потребитель — разведка чатов.** Она пишет в `chat_candidates`,
 `chat_rejects` и `chat_join_events`; ORM-зеркало этих таблиц лежит в
 `db/models/discovery.py`. Знание о `db` к ней тоже не протекает: нужное описано

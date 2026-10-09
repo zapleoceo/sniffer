@@ -23,6 +23,7 @@ from sniffer.db.models.clients import Passport, PassportEvent, User
 from sniffer.db.models.delivery import Notification, Outbox, Payment, Subscription
 from sniffer.db.models.discovery import (
     ChatCandidate,
+    ChatExclusionEvent,
     ChatJoinEvent,
     ChatReject,
     ChatRejectRetry,
@@ -48,6 +49,7 @@ __all__ = [
     "BrokerCall",
     "Chat",
     "ChatCandidate",
+    "ChatExclusionEvent",
     "ChatJoinEvent",
     "ChatReject",
     "ChatRejectRetry",
