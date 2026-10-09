@@ -14,6 +14,7 @@ Telegram, проверяет не разведку, а связь, — и тра
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 import re
 import zlib
@@ -29,6 +30,7 @@ from telethon.errors import (
     ChannelsTooMuchError,
     FloodWaitError,
     InviteRequestSentError,
+    RpcCallFailError,
     UserAlreadyParticipantError,
     UsernameNotOccupiedError,
 )
@@ -311,6 +313,7 @@ class FakeTelegram:
     invites: dict[str, ResolvedChat] = field(default_factory=dict)
     search_results: dict[str, list[ResolvedChat]] = field(default_factory=dict)
     join_errors: dict[str, Exception] = field(default_factory=dict)
+    resolve_errors: dict[str, BaseException] = field(default_factory=dict)
     mute_errors: set[int] = field(default_factory=set)
     calls: list[str] = field(default_factory=list)
     joined: list[str] = field(default_factory=list)
@@ -324,6 +327,8 @@ class FakeTelegram:
 
     async def resolve_username(self, username: str) -> ResolvedChat | None:
         self.calls.append(f"resolve:{username}")
+        if username.lower() in self.resolve_errors:
+            raise self.resolve_errors[username.lower()]
         return self.known.get(username.lower())
 
     async def check_invite(self, invite_hash: str) -> ResolvedChat | None:
@@ -649,6 +654,94 @@ async def test_vocabulary_search_reuses_the_resolved_chat() -> None:
     assert client.calls == ["search:нячанг барахолка"]
     assert [row["key"] for row in db.candidates] == ["@baraholka_nachang"]
     assert db.rejects["@danang_baraholka"] == REJECT_FOREIGN_CITY
+
+
+class Boom(Exception):
+    """Тип, о котором разведка не знает: полноту держит он, а не список в `except`."""
+
+
+async def test_a_chat_that_does_not_exist_is_rejected_as_unresolved() -> None:
+    db = FakeDb()
+    client = FakeTelegram(
+        resolve_errors={"gone_chat": UsernameNotOccupiedError(request=None)},
+    )
+    added = await discovery(db, client).harvest([FakeMessage(1, "t.me/gone_chat")])
+
+    assert added == 0
+    assert db.rejects == {"@gone_chat": REJECT_UNRESOLVED}
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ValueError('No user has "gone_chat" as username'),
+        ValueError('Cannot find any entity corresponding to "gone_chat"'),
+    ],
+)
+async def test_telethons_not_found_wording_is_also_a_missing_chat(error: Exception) -> None:
+    db = FakeDb()
+    client = FakeTelegram(resolve_errors={"gone_chat": error})
+
+    await discovery(db, client).harvest([FakeMessage(1, "t.me/gone_chat")])
+
+    assert db.rejects == {"@gone_chat": REJECT_UNRESOLVED}
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ConnectionError("network is down"),
+        TimeoutError(),
+        FloodWaitError(request=None, capture=3600),
+        RpcCallFailError(request=None),
+        ValueError("unrelated programming error"),
+        Boom("unknown"),
+    ],
+    ids=lambda error: type(error).__name__,
+)
+async def test_a_failed_request_is_not_a_verdict_on_the_candidate(error: Exception) -> None:
+    """18.09.2026 за час записали 154 `unresolved`: сеть и флуд, а не чаты."""
+    db = FakeDb()
+    client = FakeTelegram(resolve_errors={"live_chat": error})
+
+    added = await discovery(db, client).harvest([FakeMessage(1, "t.me/live_chat")])
+
+    assert added == 0
+    assert db.rejects == {}, "кандидат остаётся и будет рассмотрен при следующей встрече"
+    assert db.candidates == []
+
+
+async def test_a_failed_request_leaves_the_candidate_eligible_next_time() -> None:
+    db = FakeDb()
+    first = FakeTelegram(resolve_errors={"live_chat": TimeoutError()})
+    await discovery(db, first).harvest([FakeMessage(1, "t.me/live_chat")])
+
+    second = FakeTelegram(known={"live_chat": group("live_chat", "Барахолка Нячанг")})
+    added = await discovery(db, second).harvest([FakeMessage(2, "t.me/live_chat")])
+
+    assert added == 1
+    assert [row["key"] for row in db.candidates] == ["@live_chat"]
+
+
+async def test_after_a_flood_wait_the_pass_asks_telegram_nothing_more() -> None:
+    db = FakeDb()
+    client = FakeTelegram(resolve_errors={"first_chat": FloodWaitError(request=None, capture=60)})
+
+    await discovery(db, client).harvest([FakeMessage(1, "t.me/first_chat t.me/second_chat")])
+
+    assert client.calls == ["resolve:first_chat"], "второй запрос под флудом — тот же ретрай"
+    assert db.rejects == {}
+
+
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt(), asyncio.CancelledError()])
+async def test_an_interrupt_is_not_swallowed_as_a_failed_lookup(interrupt: BaseException) -> None:
+    db = FakeDb()
+    client = FakeTelegram(resolve_errors={"live_chat": interrupt})
+
+    with pytest.raises(type(interrupt)):
+        await discovery(db, client).harvest([FakeMessage(1, "t.me/live_chat")])
+
+    assert db.rejects == {}
 
 
 # ── очередь вступлений ──────────────────────────────────────────────────────
