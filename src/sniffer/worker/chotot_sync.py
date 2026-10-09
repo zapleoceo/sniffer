@@ -139,7 +139,13 @@ class ChototSync:
                     break
         finally:
             await adapter.aclose()
-        if complete:
+        if complete and not found:
+            # Полный обход, не принёсший ни одного объявления, не доказывает, что
+            # доска опустела: в живой категории Нячанга их десятки. Это пустой
+            # ответ (сбой разбора, смена формата, блокировка), и пустой «увиденный»
+            # список в `retire` означал «не увидено ничего — гасим всё».
+            log.warning("chotot.sync_empty_sweep", city=city, category=category.value)
+        elif complete:
             retired = await self._retire(
                 SOURCE_NAME,
                 city=city,

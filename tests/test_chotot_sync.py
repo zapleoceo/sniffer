@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from structlog.testing import capture_logs
 
 from sniffer.domain.passport import Category
 from sniffer.domain.records import Listing
@@ -38,12 +39,15 @@ class Board:
     requests: list[dict[str, str]] = field(default_factory=list)
     broken: bool = False
     ads: list[dict[str, Any]] | None = None
+    empty: bool = False
 
     def source(self) -> ChototSource:
         def handle(request: httpx.Request) -> httpx.Response:
             self.requests.append(dict(request.url.params))
             if self.broken:
                 return httpx.Response(503)
+            if self.empty:
+                return httpx.Response(200, json={"ads": []})
             return httpx.Response(200, json={"ads": self.ads or payload()["ads"]})
 
         return ChototSource(client=httpx.AsyncClient(transport=httpx.MockTransport(handle)))
@@ -203,6 +207,17 @@ async def test_a_full_page_retires_nothing() -> None:
     await sync(board, store, clock=lambda: 0.0, retired=retired).tick()
 
     assert retired.calls == []
+
+
+async def test_an_empty_sweep_retires_nothing_and_warns() -> None:
+    """Пустой «увиденный» список не значит, что доска пуста: гасить нечего."""
+    board, store, retired = Board(empty=True), Store(), Retired()
+
+    with capture_logs() as logs:
+        await sync(board, store, clock=lambda: 0.0, retired=retired).tick()
+
+    assert retired.calls == []
+    assert any(entry["event"] == "chotot.sync_empty_sweep" for entry in logs)
 
 
 async def test_a_dead_board_retires_nothing() -> None:

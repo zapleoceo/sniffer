@@ -7,7 +7,10 @@
 Telegram»): никому не видно и под `PEER_FLOOD` не подпадает.
 
 Удалённое (Telegram отдаёт `None`) и отредактированное в «продано/сдано»
-(`domain.listing_state.announces_closed`) гасится. За проход — один чат по кругу:
+(`domain.listing_state.announces_closed`) гасится. Исключение одно: если `None`
+вернулся на ВСЕ проверенные карточки чата (от `ALL_GONE_THRESHOLD`), это похоже
+на сбой или потерю доступа, и не гасится ничего — только предупреждение в лог.
+За проход — один чат по кругу:
 пятьдесят чатов при проходе раз в пятнадцать минут дают полный круг за полсуток,
 и нагрузка на аккаунт — один-два запроса чтения за проход.
 """
@@ -32,6 +35,10 @@ IDS_PER_CALL = 100
 # Потолок карточек одного чата за проход: самый плотный чат (Arenda_Nyachangg,
 # ~300 карточек в сутки) иначе съел бы проход целиком.
 REFS_PER_CHAT = 300
+# С такого числа проверенных карточек ответ «удалены все до одной» считается
+# сбоем, а не удалением. Меньше — выборка слишком мала: чат с тремя карточками
+# честно может потерять все три.
+ALL_GONE_THRESHOLD = 5
 
 
 class LivenessReader(Protocol):
@@ -77,13 +84,27 @@ class LivenessChecker:
         refs = await self.store.live_refs(chat, since=since)
         if not refs:
             return 0
-        dead: list[int] = []
+        pairs: list[tuple[int, MessageLike | None]] = []
         for start in range(0, len(refs), IDS_PER_CALL):
             batch = refs[start : start + IDS_PER_CALL]
             messages = await self._read(chat, [msg_id for _, msg_id in batch])
-            for (listing_id, _), message in zip(batch, messages, strict=False):
-                if message is None or announces_closed(str(message.message or "")):
-                    dead.append(listing_id)
+            pairs.extend(
+                (listing_id, message)
+                for (listing_id, _), message in zip(batch, messages, strict=False)
+            )
+        if len(pairs) >= ALL_GONE_THRESHOLD and all(message is None for _, message in pairs):
+            # Все номера разом «удалены» — это не массовая уборка в чате, а
+            # сбой чтения или потеря доступа (кикнули, сессия, смена чата): Telegram
+            # отдаёт `None` и за закрытый доступ. Снять сейчас значит погасить
+            # живой чат целиком; следующий круг прочитает его заново, а настоящие
+            # удаления подберёт частичный ответ или возраст карточки.
+            log.warning("collector.liveness_all_gone", chat=chat.tg_id, checked=len(pairs))
+            return 0
+        dead = [
+            listing_id
+            for listing_id, message in pairs
+            if message is None or announces_closed(str(message.message or ""))
+        ]
         retired = await self.store.retire(dead) if dead else 0
         log.info("collector.liveness_checked", chat=chat.tg_id, checked=len(refs), retired=retired)
         return retired

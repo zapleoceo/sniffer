@@ -1547,6 +1547,26 @@ async def test_catalog_expiry_retirement_and_liveness_refs(db_session: AsyncSess
     assert {row.external_id for row in active} == {"-100:1", "-200:3", "c-live"}
 
 
+async def test_retire_unseen_with_an_empty_seen_retires_nothing(
+    db_session: AsyncSession,
+) -> None:
+    """Пустой полный обход не должен снять весь город и категорию."""
+    repo = ListingRepository(db_session)
+    for ext in ("c-1", "c-2"):
+        await repo.upsert_external(_catalog_card(ext, source="chotot"))
+    await db_session.commit()
+
+    assert (
+        await repo.retire_unseen("chotot", city="nha_trang", category="motorbike", seen=set()) == 0
+    )
+    await db_session.commit()
+
+    from sniffer.domain.records import MatchFilter
+
+    active = await repo.search_catalog(MatchFilter(city="nha_trang", category="motorbike"))
+    assert {row.external_id for row in active} == {"c-1", "c-2"}
+
+
 async def test_screening_reads_fresh_first_and_applies_the_verdict(
     db_session: AsyncSession,
 ) -> None:
