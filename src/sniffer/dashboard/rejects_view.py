@@ -17,6 +17,8 @@ from sniffer.domain.reject_reasons import RejectClass
 CLASS_CSS = {
     RejectClass.PERMANENT: "mute",
     RejectClass.TEMPORARY: "bad",
+    RejectClass.MEMBERSHIP: "mute",
+    RejectClass.PENDING: "bad",
     RejectClass.UNKNOWN: "bad",
 }
 

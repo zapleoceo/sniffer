@@ -19,6 +19,10 @@ from enum import StrEnum
 class RejectClass(StrEnum):
     TEMPORARY = "temporary"
     PERMANENT = "permanent"
+    # Не отказ по существу, а состояние: мы уже внутри, либо ждём модератора или
+    # действия человека. Слепой повтор здесь бессмыслен — показывается отдельно.
+    MEMBERSHIP = "membership"
+    PENDING = "pending"
     UNKNOWN = "unknown"
 
 
@@ -31,31 +35,41 @@ class RejectInfo:
 CLASS_LABEL: dict[RejectClass, str] = {
     RejectClass.TEMPORARY: "временный",
     RejectClass.PERMANENT: "постоянный",
+    RejectClass.MEMBERSHIP: "уже участник",
+    RejectClass.PENDING: "ожидание / нужно действие",
     RejectClass.UNKNOWN: "неизвестно",
 }
 
 _T = RejectClass.TEMPORARY
 _P = RejectClass.PERMANENT
+_M = RejectClass.MEMBERSHIP
+_W = RejectClass.PENDING
+_U = RejectClass.UNKNOWN
 
 # Ключи — те же строки, что пишет разведка (`REJECT_*` в
 # sources/telegram_discover_reference.py). Домен не импортирует `sources`
 # (обратное ребро слоёв), поэтому строки продублированы, а их совпадение с
 # источником сторожит тест.
 REASONS: dict[str, RejectInfo] = {
-    # Сбой, а не суждение о чате: адрес не разрешился либо вступление много раз
-    # подряд кончалось неизвестным исходом.
-    "unresolved": RejectInfo(_T, "не удалось определить чат"),
+    # Вступление много раз подряд кончалось неизвестным исходом — сбой, а не
+    # суждение о чате.
     "too_many_attempts": RejectInfo(_T, "слишком много неудачных попыток"),
+    # `unresolved` сам по себе не доказывает сетевой сбой: до 10.2026 он
+    # писался и на «такого чата нет», и на сеть/таймаут/FloodWait. Старые записи
+    # неоднозначны — честно «неизвестно», а не «временный».
+    "unresolved": RejectInfo(_U, "чат не найден или сбой при проверке"),
+    # Город по чату не определился — это незнание, а не вердикт.
+    "city_unknown": RejectInfo(_U, "город чата не виден"),
+    # Состояния, а не отказы по существу.
+    "already_member": RejectInfo(_M, "мы уже в этом чате"),
+    "already_inside": RejectInfo(_M, "оказалось, мы уже внутри"),
+    "join_request_sent": RejectInfo(_W, "заявка ушла модератору — ждём"),
+    "request_needed": RejectInfo(_W, "вход только по заявке — нужно действие"),
     # Суждение о самом чате или известный исход запроса.
     "user": RejectInfo(_P, "это человек, а не группа"),
     "channel": RejectInfo(_P, "канал, а не группа"),
     "bot": RejectInfo(_P, "бот"),
     "foreign_city": RejectInfo(_P, "чат другого города"),
-    "city_unknown": RejectInfo(_P, "город чата не виден"),
-    "already_member": RejectInfo(_P, "мы уже в этом чате"),
-    "already_inside": RejectInfo(_P, "оказалось, мы уже внутри"),
-    "join_request_sent": RejectInfo(_P, "заявка ушла модератору"),
-    "request_needed": RejectInfo(_P, "вход только по заявке"),
     "join_refused": RejectInfo(_P, "Telegram отказал во вступлении"),
 }
 

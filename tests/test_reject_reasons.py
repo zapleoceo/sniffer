@@ -21,10 +21,28 @@ def _written_reasons() -> set[str]:
     }
 
 
-@pytest.mark.parametrize("reason", ["unresolved", "too_many_attempts"])
-def test_failures_are_temporary(reason: str) -> None:
-    assert reject_reasons.classify(reason) is RejectClass.TEMPORARY
-    assert reject_reasons.class_label(reason) == "временный"
+def test_repeated_unknown_outcomes_are_temporary() -> None:
+    assert reject_reasons.classify("too_many_attempts") is RejectClass.TEMPORARY
+    assert reject_reasons.class_label("too_many_attempts") == "временный"
+
+
+@pytest.mark.parametrize("reason", ["unresolved", "city_unknown"])
+def test_ambiguous_records_are_unknown_not_temporary(reason: str) -> None:
+    """Старый `unresolved` писался и на «нет такого чата», и на сбой сети."""
+    assert reject_reasons.classify(reason) is RejectClass.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    ("reason", "kind"),
+    [
+        ("already_member", RejectClass.MEMBERSHIP),
+        ("already_inside", RejectClass.MEMBERSHIP),
+        ("join_request_sent", RejectClass.PENDING),
+        ("request_needed", RejectClass.PENDING),
+    ],
+)
+def test_states_are_not_called_rejections(reason: str, kind: RejectClass) -> None:
+    assert reject_reasons.classify(reason) is kind
 
 
 @pytest.mark.parametrize(
@@ -34,10 +52,7 @@ def test_failures_are_temporary(reason: str) -> None:
         "channel",
         "bot",
         "foreign_city",
-        "city_unknown",
-        "already_member",
-        "join_request_sent",
-        "request_needed",
+        "join_refused",
     ],
 )
 def test_verdicts_about_the_chat_are_permanent(reason: str) -> None:
@@ -61,10 +76,17 @@ def test_every_reason_the_scout_writes_is_classified() -> None:
 
 
 def test_totals_by_class_add_up() -> None:
-    counts = {"user": 5, "unresolved": 2, "too_many_attempts": 1, "weird": 4}
+    counts = {
+        "user": 5,
+        "unresolved": 2,
+        "too_many_attempts": 1,
+        "weird": 4,
+        "already_member": 7,
+    }
     by_class = reject_reasons.totals_by_class(counts)
 
     assert by_class[RejectClass.PERMANENT] == 5
-    assert by_class[RejectClass.TEMPORARY] == 3
-    assert by_class[RejectClass.UNKNOWN] == 4
+    assert by_class[RejectClass.TEMPORARY] == 1
+    assert by_class[RejectClass.UNKNOWN] == 6
+    assert by_class[RejectClass.MEMBERSHIP] == 7
     assert sum(by_class.values()) == sum(counts.values())

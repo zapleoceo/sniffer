@@ -706,10 +706,10 @@ def test_rejects_are_broken_down_by_reason_with_a_class(
     body = owner.get("/database").text
 
     assert "это человек, а не группа" in body and "<td class='num'>1500</td>" in body
-    assert "не удалось определить чат" in body
-    # Временных 70 (60 + 10): видно на карточке.
-    assert "отклонено (временных: 70)" in body
-    assert "постоянный" in body and "временный" in body
+    assert "чат не найден или сбой при проверке" in body
+    # Временный только too_many_attempts (10); старый unresolved — «неизвестно».
+    assert "отклонено (временных: 10)" in body
+    assert "постоянный" in body and "временный" in body and "неизвестно" in body
 
 
 def test_an_unknown_reason_is_shown_as_unknown_with_its_code(
