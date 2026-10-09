@@ -661,3 +661,74 @@ def test_a_stuck_candidate_is_visible_by_its_attempts(owner: TestClient) -> None
     assert "попыток" in body
     assert "claimed" not in body, "исход показываем словами, а не строкой из БД"
     assert "слот занят, исхода нет" in body
+
+
+# ── отклонённые: настоящий счёт, а не длина хвоста ──────────────────────────
+
+
+def _inventory_with_rejects(counts: dict[str, int], tail: int = 30) -> data.Inventory:
+    return data.Inventory(
+        stats={"chats": 1, "chats_active": 1, "raw_messages": 1},
+        rejects=[
+            RejectedCandidate(key=f"@c{index}", reason="unresolved", rejected_at=NOW)
+            for index in range(tail)
+        ],
+        reject_counts=counts,
+    )
+
+
+def _serve(monkeypatch: pytest.MonkeyPatch, view: data.Inventory) -> None:
+    async def fixed(**_: Any) -> data.Inventory:
+        return view
+
+    monkeypatch.setattr(data, "inventory", fixed)
+
+
+def test_rejected_card_shows_the_real_total_not_the_tail_length(
+    owner: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """В таблице 30 строк, в базе 1570: карточка обязана сказать 1570."""
+    _serve(monkeypatch, _inventory_with_rejects({"user": 1500, "unresolved": 70}))
+    body = owner.get("/database").text
+
+    assert "<b>1570</b><span>отклонено" in body
+    assert "<b>30</b><span>отклонено" not in body
+    assert "последние 30 из 1570" in body
+
+
+def test_rejects_are_broken_down_by_reason_with_a_class(
+    owner: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _serve(
+        monkeypatch,
+        _inventory_with_rejects({"user": 1500, "unresolved": 60, "too_many_attempts": 10}),
+    )
+    body = owner.get("/database").text
+
+    assert "это человек, а не группа" in body and "<td class='num'>1500</td>" in body
+    assert "не удалось определить чат" in body
+    # Временных 70 (60 + 10): видно на карточке.
+    assert "отклонено (временных: 70)" in body
+    assert "постоянный" in body and "временный" in body
+
+
+def test_an_unknown_reason_is_shown_as_unknown_with_its_code(
+    owner: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _serve(monkeypatch, _inventory_with_rejects({"novel_code": 3}, tail=0))
+    body = owner.get("/database").text
+
+    assert "novel_code" in body
+    assert "неизвестно" in body
+    assert "постоянный" not in body
+
+
+def test_the_rejects_block_adds_no_controls(
+    owner: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Страница читает; повтор отклонённого кнопкой — отдельное решение владельца."""
+    _serve(monkeypatch, _inventory_with_rejects({"unresolved": 3}))
+    body = owner.get("/database").text
+
+    assert "<form" not in body.lower()
+    assert "<button" not in body.lower()

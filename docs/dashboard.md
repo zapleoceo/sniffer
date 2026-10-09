@@ -324,6 +324,27 @@ Fernet не отличает «другой ключ» от «подменённ
 коллектор и разведка — `chats`, `raw_messages`, `chat_candidates`,
 `chat_join_events`, `chat_rejects`.
 
+**Карточка «отклонено» — настоящий `count(*)` из `chat_rejects`** (сумма
+разбивки по причинам, `RejectRepository.counts_by_reason`), а не длина хвоста.
+Хвост в 30 строк (`INVENTORY_TAIL`) остаётся таблицей «последние 30 из N»;
+до правки карточка показывала `len(хвоста)`, то есть всегда 30 при полутора
+тысячах строк в базе. Над таблицей — разбивка по причинам, у каждой причины
+класс:
+
+| Класс | Причины (`chat_rejects.reason`) | Смысл |
+|---|---|---|
+| временный | `unresolved`, `too_many_attempts` | сбой, а не суждение о чате: кандидат мог бы пройти |
+| постоянный | `user`, `channel`, `bot`, `foreign_city`, `city_unknown`, `already_member`, `already_inside`, `join_request_sent`, `request_needed`, `join_refused` | суждение о чате или известный исход запроса |
+| неизвестно | всё, чего нет в словаре | код показывается как есть; «постоянным» не считается |
+
+Словарь классов и русские названия — `domain/reject_reasons.py`, единственное
+место; тест сверяет его с `REJECT_*` из `sources/telegram_discover_reference.py`,
+так что новая причина без записи не проходит молча. `already_inside` и
+`join_refused` в исходной постановке не перечислены; отнесены к постоянным,
+потому что кандидат в этих случаях выброшен из очереди (`drop`) с точным
+исходом. Блок только читает: кнопок повтора и POST-маршрутов нет, модель угроз
+раздела 3 не меняется.
+
 Репозитории: `db/repositories/requests.py`, `dialog.py`, `broker_calls.py`,
 `telegram_sessions.py`, `stats.py`, `chats.py`, `raw_messages.py`,
 `discovery.py`. SQL, как и раньше, только в `db/`.

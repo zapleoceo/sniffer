@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from sniffer.dashboard import data
+from sniffer.dashboard import data, rejects_view
 from sniffer.dashboard.html import Cell, cards, cell, moment, num, page, table
 from sniffer.domain.records import CandidateState, JoinEvent, RawMessage
 
@@ -37,7 +37,7 @@ def inventory_page(view: data.Inventory) -> str:
         + _chats(view)
         + _queue(view)
         + _joins(view)
-        + _rejects(view)
+        + rejects_view.section(view)
         + _raw(view)
         + "</main>"
     )
@@ -98,7 +98,7 @@ def _filling(view: data.Inventory) -> str:
                 ("сообщений собрано", stats.get("raw_messages", 0)),
                 ("карточек", f"{stats.get('listings_fresh', 0)}/{stats.get('listings', 0)}"),
                 ("кандидатов в очереди", view.candidate_counts.get("queued", 0)),
-                ("отклонено", len(view.rejects)),
+                (rejects_view.card_label(view), rejects_view.total(view)),
                 ("вступлений за сутки", joins),
                 ("следующее можно", moment(None if limits is None else limits.next_allowed_at)),
                 ("стоп до", moment(None if limits is None else limits.blocked_until)),
@@ -204,17 +204,6 @@ def _join_row(event: JoinEvent) -> list[Cell]:
         cell(moment(event.next_allowed_at)),
         cell(moment(event.blocked_until), css="bad" if event.blocked_until else ""),
     ]
-
-
-def _rejects(view: data.Inventory) -> str:
-    rows = [
-        [cell(item.key), cell(item.reason), cell(moment(item.rejected_at))] for item in view.rejects
-    ]
-    return (
-        "<section><h2>Отклонённые</h2>"
-        + table(["кандидат", "причина", "когда"], rows)
-        + "</section>"
-    )
 
 
 def _raw(view: data.Inventory) -> str:

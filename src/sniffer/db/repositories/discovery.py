@@ -116,6 +116,13 @@ class RejectRepository(Repository):
             for row in rows
         ]
 
+    async def counts_by_reason(self) -> dict[str, int]:
+        """Сколько отклонено по каждой причине — настоящий счёт, а не длина хвоста."""
+        rows = await self._session.execute(
+            select(models.ChatReject.reason, func.count()).group_by(models.ChatReject.reason)
+        )
+        return {str(reason): int(total) for reason, total in rows}
+
     async def reject(self, key: str, reason: str) -> None:
         await self._session.execute(
             insert(models.ChatReject)
