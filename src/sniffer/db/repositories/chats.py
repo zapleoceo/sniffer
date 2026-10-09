@@ -133,6 +133,20 @@ class ChatRepository(Repository):
             )
         )
 
+    async def liveness_cursor(self, tg_id: int) -> int:
+        """Докуда по listing.id дочитан круг проверки живости (0 — с начала)."""
+        value = await self._session.scalar(
+            select(models.Chat.liveness_listing_id).where(models.Chat.tg_id == tg_id)
+        )
+        return int(value or 0)
+
+    async def set_liveness_cursor(self, tg_id: int, listing_id: int) -> None:
+        await self._session.execute(
+            update(models.Chat)
+            .where(models.Chat.tg_id == tg_id)
+            .values(liveness_listing_id=listing_id)
+        )
+
     async def add(self, chat: Chat) -> Chat:
         row = models.Chat(
             tg_id=chat.tg_id,

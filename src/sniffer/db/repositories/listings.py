@@ -245,9 +245,13 @@ class ListingRepository(Repository):
         return int(getattr(result, "rowcount", 0) or 0)
 
     async def live_archive_refs(
-        self, chat_tg_id: int, *, since: datetime, limit: int
+        self, chat_tg_id: int, *, since: datetime, limit: int, after_id: int = 0
     ) -> list[tuple[int, int]]:
-        """Активные карточки чата: (id карточки, id сообщения) для перечитывания."""
+        """Следующая пачка активных карточек чата: (id карточки, id сообщения).
+
+        По возрастанию id и строго после `after_id`: курсор проверки живости идёт
+        по кругу по всем активным карточкам, а не по 300 новейшим.
+        """
         prefix = f"{chat_tg_id}:"
         rows = await self._session.execute(
             select(models.Listing.id, models.Listing.external_id)
@@ -255,9 +259,10 @@ class ListingRepository(Repository):
                 models.Listing.source == "telegram_archive",
                 models.Listing.is_active.is_(True),
                 models.Listing.posted_at >= since,
+                models.Listing.id > after_id,
                 models.Listing.external_id.startswith(prefix),
             )
-            .order_by(models.Listing.posted_at.desc())
+            .order_by(models.Listing.id)
             .limit(limit)
         )
         refs: list[tuple[int, int]] = []
