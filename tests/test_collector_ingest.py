@@ -7,7 +7,9 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import cast
 
-from sniffer.collector.ingest import HISTORY_CHATS_PER_TICK, HistorySyncer
+import pytest
+
+from sniffer.collector.ingest import HISTORY_CHATS_PER_TICK, HistorySyncer, read_history
 from sniffer.domain.records import Chat, RawMessage
 from sniffer.sources.telegram_discover_reference import MAX_TRACKED_CHATS, MessageLike
 
@@ -142,3 +144,24 @@ async def test_a_chat_unknown_by_id_falls_back_to_its_username() -> None:
     store = FakeStore([chat])
     assert await HistorySyncer(reader=reader, store=store, discover=discover).sync() == 1
     assert reader.calls == [(-10042, 200, 10), ("flea", 200, 10)]
+
+
+async def test_a_server_refusal_by_id_is_not_retried_by_username() -> None:
+    """FloodWait и прочие отказы сервера — не «id не разрешился»: второго запроса нет."""
+
+    class FloodWait(Exception):
+        pass
+
+    class FloodedReader(FakeReader):
+        async def history(
+            self, entity: int | str, *, limit: int, min_id: int = 0, max_id: int = 0
+        ) -> Sequence[MessageLike]:
+            self.calls.append((entity, limit, min_id))
+            raise FloodWait("A wait of 30 seconds is required")
+
+    chat = Chat(tg_id=-10042, username="flea", title="Барахолка", city="nha_trang", last_msg_id=10)
+    reader = FloodedReader([])
+
+    with pytest.raises(FloodWait):
+        await read_history(reader, chat, limit=200, min_id=10)
+    assert reader.calls == [(-10042, 200, 10)]

@@ -70,7 +70,7 @@ class HistorySyncer:
                     inserted=inserted,
                     discovered=discovered,
                 )
-            except Exception as exc:
+            except ValueError as exc:
                 # Один закрытый/удалённый чат не должен останавливать остальные.
                 # Курсор при ошибке не сдвинут: на следующем проходе дочитаем.
                 log.warning(
@@ -100,9 +100,12 @@ async def read_history(
     которого свой флуд-лимит. Один общий путь для догона и добора: добор
     когда-то обошёлся без этого запасного хода, и курсор архива встал.
     """
+    # Запасной ход — только на «сущность не разрешилась» (Telethon отвечает
+    # `ValueError`). FloodWait и прочие отказы сервера уходят наверх: второй
+    # запрос под флуд-лимитом — ровно тот ретрай, который CLAUDE.md запрещает.
     try:
         return await reader.history(chat.tg_id, limit=limit, min_id=min_id, max_id=max_id)
-    except Exception as exc:
+    except ValueError as exc:
         if not chat.username:
             raise
         log.info(
