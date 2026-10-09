@@ -16,7 +16,7 @@ from sniffer.domain.join_priority import JoinPriorityPolicy, QueueEntry, order_q
 from sniffer.domain.records import DiscoveryCandidate
 from sniffer.sources import telegram_discover_reference as reference
 
-NOW = datetime(2026, 10, 10, 12, tzinfo=UTC)
+NOW = datetime.now(UTC)
 POLICY = JoinPriorityPolicy(unknown_penalty=20, low_penalty=60, aging_hours_per_point=6)
 
 
