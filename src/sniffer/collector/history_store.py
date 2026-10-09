@@ -86,6 +86,6 @@ class DatabaseLivenessStore:
         async with _session() as session:
             await ChatRepository(session).set_liveness_cursor(chat.tg_id, listing_id)
 
-    async def retire(self, listing_ids: list[int]) -> int:
+    async def retire(self, listing_ids: list[int], *, reason: str) -> int:
         async with _session() as session:
-            return await ListingRepository(session).deactivate_many(listing_ids)
+            return await ListingRepository(session).deactivate_many(listing_ids, reason=reason)

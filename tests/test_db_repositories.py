@@ -1547,7 +1547,13 @@ async def test_catalog_expiry_retirement_and_liveness_refs(db_session: AsyncSess
 
     assert await repo.expire(older_than=NOW - timedelta(days=30), limit=100) == 1
     assert (
-        await repo.retire_unseen("chotot", city="nha_trang", category="motorbike", seen={"c-live"})
+        await repo.retire_unseen(
+            "chotot",
+            city="nha_trang",
+            category="motorbike",
+            seen={"c-live"},
+            reason="chotot_unseen",
+        )
         == 1
     )
     await db_session.commit()
@@ -1568,7 +1574,10 @@ async def test_retire_unseen_with_an_empty_seen_retires_nothing(
     await db_session.commit()
 
     assert (
-        await repo.retire_unseen("chotot", city="nha_trang", category="motorbike", seen=set()) == 0
+        await repo.retire_unseen(
+            "chotot", city="nha_trang", category="motorbike", seen=set(), reason="chotot_unseen"
+        )
+        == 0
     )
     await db_session.commit()
 
@@ -1648,3 +1657,43 @@ async def test_liveness_refs_follow_the_cursor_and_the_cursor_is_stored(
     await chats.set_liveness_cursor(-100, after)
     await db_session.commit()
     assert await chats.liveness_cursor(-100) == after
+
+
+async def test_every_deactivation_path_records_reason_and_time(db_session: AsyncSession) -> None:
+    """Все пути снятия на живой базе пишут причину и время; нетронутая остаётся NULL (022)."""
+    from sqlalchemy import select
+
+    from sniffer.db import models
+
+    repo = ListingRepository(db_session)
+    for ext in ("old", "screen", "gone", "closed", "unseen", "replaced", "untouched"):
+        posted = NOW - timedelta(days=40) if ext == "old" else NOW
+        source = "chotot" if ext == "unseen" else "telegram_archive"
+        await repo.upsert_external(_catalog_card(ext, source=source, posted_at=posted))
+    await db_session.commit()
+
+    found = await db_session.execute(select(models.Listing.external_id, models.Listing.id))
+    by_ext = {str(ext): int(listing_id) for ext, listing_id in found}
+    assert await repo.expire(older_than=NOW - timedelta(days=30), limit=10) == 1
+    await repo.apply_screen(by_ext["screen"], keep=False, note="мусор")
+    await repo.deactivate_many([by_ext["gone"]], reason="liveness_deleted")
+    await repo.deactivate_many([by_ext["closed"]], reason="liveness_closed")
+    await repo.retire_unseen(
+        "chotot", city="nha_trang", category="motorbike", seen={"other"}, reason="chotot_unseen"
+    )
+    await repo.deactivate(by_ext["replaced"])
+    await db_session.commit()
+
+    rows = {row.external_id: row for row in (await db_session.scalars(select(models.Listing)))}
+    reasons = {ext: row.deactivated_reason for ext, row in rows.items()}
+    assert reasons == {
+        "old": "expired",
+        "screen": "screen",
+        "gone": "liveness_deleted",
+        "closed": "liveness_closed",
+        "unseen": "chotot_unseen",
+        "replaced": "superseded",
+        "untouched": None,
+    }
+    assert all(rows[ext].deactivated_at is not None for ext, why in reasons.items() if why)
+    assert rows["untouched"].is_active and rows["untouched"].deactivated_at is None

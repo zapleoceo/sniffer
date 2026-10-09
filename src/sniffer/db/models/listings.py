@@ -93,6 +93,9 @@ class Listing(BigIdMixin, Base):
     # ИИ-проверка (009_listing_screen.sql): пусто — модель карточку не читала.
     screened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     screen_note: Mapped[str | None] = mapped_column(Text)
+    # Когда и почему снята с выдачи (022_deactivation_reason.sql); NULL = неизвестно.
+    deactivated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deactivated_reason: Mapped[str | None] = mapped_column(Text)
     search_tsv: Mapped[str | None] = mapped_column(TSVECTOR)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIM))
 

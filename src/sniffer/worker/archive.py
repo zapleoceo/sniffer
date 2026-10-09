@@ -21,6 +21,7 @@ from sniffer.db.repositories.chats import ChatRepository
 from sniffer.db.repositories.listings import ListingRepository
 from sniffer.db.repositories.raw_messages import RawMessageRepository
 from sniffer.domain.fingerprint import fingerprint
+from sniffer.domain.listing_state import REASON_SUPERSEDED
 from sniffer.domain.records import RawMessage
 from sniffer.pipeline.archive import (
     STAGE_DUPLICATE,
@@ -128,7 +129,7 @@ class ArchivePipeline:
                 # A newly detected direction/category is a real correction, not
                 # another notification-free repost.  Give it a new cursor id so
                 # existing subscriptions can see the repaired offer.
-                await listings.deactivate(existing.id)
+                await listings.deactivate(existing.id, reason=REASON_SUPERSEDED)
                 await listings.add(candidate)
             elif raw.posted_at > existing.posted_at:
                 await listings.refresh(existing.id, candidate)

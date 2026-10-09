@@ -160,6 +160,8 @@ require_column() {
 schema_sentinels() {
   cat <<'SENTINELS'
 listings          source                 # миграция единого каталога, 02.09.2026
+listings          deactivated_reason     # 022: почему карточка снята с выдачи; NULL = неизвестно
+listings          deactivated_at         # 022: когда снята
 users             awaiting_new_request   # `/new`: следующее сообщение открывает поиск
 passports         last_used_at           # порядок списка поисков: выбор возвращает поиск
 subscriptions     last_scanned_at        # монитор: ротация обхода, кого не смотрели дольше всех
