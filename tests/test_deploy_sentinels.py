@@ -76,7 +76,6 @@ LEGACY_TABLES_WITHOUT_SENTINEL = frozenset(
         "catalog_coverage",
         "catalog_observations",
         "catalog_publications",
-        "chat_candidates",
         "chat_join_events",
         "chat_rejects",
         # chats охраняется колонками excluded_* (020), поэтому из списка ушёл

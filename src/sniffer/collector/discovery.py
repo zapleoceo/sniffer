@@ -22,6 +22,7 @@ from sniffer.collector.backfill import HistoryBackfill
 from sniffer.collector.history_store import DatabaseHistoryStore, DatabaseLivenessStore
 from sniffer.collector.ingest import HISTORY_CHATS_PER_TICK, HistorySyncer
 from sniffer.collector.liveness import LivenessChecker
+from sniffer.collector.preview_scan import scan_previews
 from sniffer.config import Settings, get_settings
 from sniffer.db.engine import session_scope
 from sniffer.db.repositories.chats import ChatRepository
@@ -90,7 +91,7 @@ class DatabaseQueue:
 
     async def reserve(self) -> ChatCandidate | None:
         async with _session() as session:
-            candidate = await CandidateRepository(session).reserve()
+            candidate = await CandidateRepository(session).reserve(get_settings().join_priority)
         return _source_candidate(candidate) if candidate is not None else None
 
     async def release(self, key: str) -> int:
@@ -219,6 +220,16 @@ class DiscoveryRunner:
         self._unavailable_reported = False
 
     async def tick(self) -> int:
+        moved = await self._telegram_tick()
+        # Превью - после вступления и без Telegram: выключено по умолчанию, а сбой
+        # публичного веб-запроса не должен ронять проход коллектора.
+        try:
+            await scan_previews(self._settings)
+        except Exception as exc:
+            log.warning("collector.preview_scan_failed", error=f"{type(exc).__name__}: {exc}")
+        return moved
+
+    async def _telegram_tick(self) -> int:
         client: TelegramJoiner | None = None
         try:
             client = self._client_factory(self._settings)

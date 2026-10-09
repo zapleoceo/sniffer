@@ -85,7 +85,13 @@ CREATE TABLE IF NOT EXISTS chat_candidates (
     -- слота бессрочно — очередь за ним не двигалась, а наружу уходило по три
     -- бесполезных join в день (замер: 21 за семь суток).
     attempts     INT         NOT NULL DEFAULT 0,
-    found_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+    found_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- 023: превью t.me/<username> и класс (relevant | off_topic | foreign_city |
+    -- unknown; NULL = не снимали). Только двигает порядок разбора, не отклоняет.
+    preview_class      TEXT,
+    preview_evidence   TEXT,
+    preview_snapshot   JSONB,
+    preview_checked_at TIMESTAMPTZ
 );
 
 CREATE INDEX IF NOT EXISTS chat_candidates_queue_idx

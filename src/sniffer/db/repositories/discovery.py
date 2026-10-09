@@ -7,13 +7,15 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 
 from sniffer.db import models
 from sniffer.db.repositories.base import Repository
+from sniffer.domain.join_priority import JoinPriorityPolicy, QueueEntry, order_queue
 from sniffer.domain.records import (
     CandidateState,
     DiscoveryCandidate,
@@ -41,7 +43,10 @@ class CandidateRepository(Repository):
             .on_conflict_do_nothing(index_elements=[models.ChatCandidate.key])
         )
 
-    async def reserve(self) -> DiscoveryCandidate | None:
+    async def reserve(self, policy: JoinPriorityPolicy | None = None) -> DiscoveryCandidate | None:
+        """Следующий кандидат. `policy=None` - прежний запрос, без изменений."""
+        if policy is not None:
+            return await self._reserve_ranked(policy)
         row = await self._session.scalar(
             select(models.ChatCandidate)
             .where(models.ChatCandidate.status == "queued")
@@ -54,6 +59,65 @@ class CandidateRepository(Repository):
         row.status = "joining"
         await self._session.flush()
         return _candidate(row)
+
+    async def _reserve_ranked(self, policy: JoinPriorityPolicy) -> DiscoveryCandidate | None:
+        """Порядок считает чистая функция домена; замок берётся на выбранной строке.
+
+        Занятую другим воркером строку пропускаем и берём следующую по рангу -
+        так же, как `skip_locked` в прежнем запросе. Лимиты вступлений тут не
+        участвуют: они проверяются позже, в `claim_slot`.
+        """
+        for entry in order_queue(await self._queued_entries(), datetime.now(UTC), policy):
+            row = await self._session.scalar(
+                select(models.ChatCandidate)
+                .where(models.ChatCandidate.id == entry.id, models.ChatCandidate.status == "queued")
+                .with_for_update(skip_locked=True)
+            )
+            if row is not None:
+                row.status = "joining"
+                await self._session.flush()
+                return _candidate(row)
+        return None
+
+    async def _queued_entries(self) -> list[QueueEntry]:
+        rows = await self._session.execute(
+            select(
+                models.ChatCandidate.id,
+                models.ChatCandidate.priority,
+                models.ChatCandidate.found_at,
+                models.ChatCandidate.preview_class,
+            ).where(models.ChatCandidate.status == "queued")
+        )
+        return [QueueEntry(i, p, f, c) for i, p, f, c in rows]
+
+    async def unchecked(self, *, limit: int) -> list[tuple[str, str]]:
+        """Кандидаты с публичным именем, у которых превью ещё не снимали."""
+        rows = await self._session.execute(
+            select(models.ChatCandidate.key, models.ChatCandidate.username)
+            .where(
+                models.ChatCandidate.status == "queued",
+                models.ChatCandidate.username.is_not(None),
+                models.ChatCandidate.preview_checked_at.is_(None),
+            )
+            .order_by(models.ChatCandidate.priority, models.ChatCandidate.found_at)
+            .limit(limit)
+        )
+        return [(str(key), str(username)) for key, username in rows]
+
+    async def save_preview(
+        self, key: str, *, cls: str, evidence: str, snapshot: dict[str, Any]
+    ) -> None:
+        """Класс и снимок лежат у кандидата. Порядок очереди это не меняет без политики."""
+        await self._session.execute(
+            update(models.ChatCandidate)
+            .where(models.ChatCandidate.key == key)
+            .values(
+                preview_class=cls,
+                preview_evidence=evidence,
+                preview_snapshot=snapshot,
+                preview_checked_at=datetime.now(UTC),
+            )
+        )
 
     async def release(self, key: str) -> int:
         row = await self._session.scalar(
@@ -77,13 +141,22 @@ class CandidateRepository(Repository):
             )
         )
 
-    async def snapshot(self, *, limit: int = 100) -> list[CandidateState]:
+    async def snapshot(
+        self, *, limit: int = 100, policy: JoinPriorityPolicy | None = None
+    ) -> list[CandidateState]:
         """Очередь так, как её разбирает `reserve()`: приоритет, потом возраст.
 
         Порядок здесь не украшение. Владелец смотрит на эту таблицу, чтобы
         понять, кто следующий и почему очередь не двигается, — а не двигается
-        она ровно тогда, когда первый по этому порядку копит `attempts`.
+        она ровно тогда, когда первый по этому порядку копит `attempts`. С
+        политикой (приоритизация включена) порядок тот же, что у `reserve()`.
         """
+        if policy is not None:
+            all_rows = list(await self._session.scalars(select(models.ChatCandidate)))
+            by_id = {row.id: row for row in all_rows}
+            entries = [QueueEntry(r.id, r.priority, r.found_at, r.preview_class) for r in all_rows]
+            ranked = order_queue(entries, datetime.now(UTC), policy)
+            return [_state(by_id[e.id]) for e in ranked[:limit]]
         rows = await self._session.scalars(
             select(models.ChatCandidate)
             .order_by(models.ChatCandidate.priority, models.ChatCandidate.found_at)
