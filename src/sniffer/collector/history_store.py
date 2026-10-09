@@ -36,8 +36,10 @@ class DatabaseHistoryStore:
     async def store(self, chat: Chat, messages: Sequence[RawMessage], cursor: int) -> int:
         async with _session() as session:
             inserted = await RawMessageRepository(session).add_many(messages)
-            if cursor > chat.last_msg_id:
-                await ChatRepository(session).mark_synced(chat.tg_id, cursor)
+            # Пустой проход тоже отмечается: «сходили и не нашли нового» — это
+            # время, которое видит /database. Курсор при этом не отъезжает:
+            # `mark_synced` берёт `greatest`. До исключения сюда не доходим.
+            await ChatRepository(session).mark_synced(chat.tg_id, cursor)
             return len(inserted)
 
     async def next_backfill(self) -> Chat | None:
