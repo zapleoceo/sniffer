@@ -67,7 +67,7 @@ async def test_history_is_deduplicable_stored_before_cursor_and_feeds_cross_link
     synced = await HistorySyncer(reader=reader, store=store, discover=discover).sync()
 
     assert synced == 2
-    assert reader.calls == [("nha_flea", 200, 10)]
+    assert reader.calls == [(-10042, 200, 10)]
     assert len(store.saved) == 1
     _, raw, cursor = store.saved[0]
     assert [message.msg_id for message in raw] == [11, 13]
@@ -120,4 +120,25 @@ async def test_a_renamed_chat_is_read_by_id_when_its_username_is_stale() -> None
         return 0
 
     assert await HistorySyncer(reader=reader, store=store, discover=discover).sync() == 1
-    assert reader.calls == [("old_name", 200, 10), (-10042, 200, 10)]
+    assert reader.calls == [(-10042, 200, 10)]
+
+
+async def test_a_chat_unknown_by_id_falls_back_to_its_username() -> None:
+    class IdUnknownReader(FakeReader):
+        async def history(
+            self, entity: int | str, *, limit: int, min_id: int = 0, max_id: int = 0
+        ) -> Sequence[MessageLike]:
+            self.calls.append((entity, limit, min_id))
+            if isinstance(entity, int):
+                raise ValueError("Could not find the input entity")
+            return cast(Sequence[MessageLike], self.messages)
+
+    chat = Chat(tg_id=-10042, username="flea", title="Барахолка", city="nha_trang", last_msg_id=10)
+    reader = IdUnknownReader([FakeMessage(11, "Продам байк", datetime(2026, 9, 1, tzinfo=UTC))])
+
+    async def discover(messages: Sequence[MessageLike], found_in: str) -> int:
+        return 0
+
+    store = FakeStore([chat])
+    assert await HistorySyncer(reader=reader, store=store, discover=discover).sync() == 1
+    assert reader.calls == [(-10042, 200, 10), ("flea", 200, 10)]
