@@ -79,6 +79,17 @@ class Settings(BaseSettings):
     broker_model_extraction: str = ""
     broker_model_guard: str = ""
 
+    # Серверная доставка кандидатов слежения в комнату агентов vera-room (notifier/room_relay).
+    # ВЫКЛЮЧЕНА, пока не заданы все три: URL, токен и список подписок. Токен — секрет Веры
+    # (запись `sniffer:<hex>` в её ROOM_TOKENS), в логи и в репозиторий не попадает.
+    room_mcp_url: str = ""
+    room_token: str = ""
+    # Id подписок через запятую. Строкой, а не списком: pydantic-settings разбирает список из
+    # окружения как JSON, и `1` или пустая строка ронят процесс ещё до старта.
+    room_relay_subscriptions: str = ""
+    room_relay_to: str = "dot"
+    room_relay_task_id: str = "sniffer-housing-watch"
+
     # Cloudflare R2 — пусто означает «медиа не сохраняем»
     r2_account_id: str = ""
     r2_access_key_id: str = ""

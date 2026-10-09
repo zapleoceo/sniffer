@@ -155,3 +155,17 @@ class Outbox(BigIdMixin, Base):
     # клиент заблокировал бота), `failed` — отказ Telegram или кончились попытки.
     # Без причины их не различить, глядя в базу.
     last_error: Mapped[str | None] = mapped_column(Text)
+
+
+class RoomRelayCursor(Base):
+    """Курсор доставки в комнату агентов: ORM-зеркало `019_room_relay_cursor.sql`."""
+
+    __tablename__ = "room_relay_cursor"
+
+    subscription_id: Mapped[int] = mapped_column(
+        ForeignKey("subscriptions.id", ondelete="CASCADE"), primary_key=True
+    )
+    last_notification_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=NOW
+    )

@@ -877,6 +877,27 @@ FROM passports WHERE is_current GROUP BY 1 HAVING count(*) > 1;
 правит — она гоняется на каждом деплое. Единственное, что журнал удаляет в
 рантайме, — зависшие резервы диалога старше десяти минут (`worker/quota_sweep.py`).
 
+### 7.4 Доставка кандидатов в комнату агентов — как включить
+
+Код выключен, пока в `.env` Sniffer нет трёх значений. Порядок:
+
+1. Дмитрий выдаёт токен: запись `sniffer:<hex ≥ 32>` в `ROOM_TOKENS` Веры (формат — `docs/agent-room.md`
+   в репозитории Веры). Токен создаёт и хранит он; в репозиторий и в чат токен не попадает.
+2. Дмитрий кладёт в `/var/www/sniffer/.env`: `ROOM_TOKEN=<токен>`, `ROOM_MCP_URL=<адрес /mcp комнаты>`,
+   `ROOM_RELAY_SUBSCRIPTIONS=1` (id подписок через запятую). `ROOM_RELAY_TO` (по умолчанию `dot`)
+   и `ROOM_RELAY_TASK_ID` (по умолчанию `sniffer-housing-watch`) менять не обязательно.
+3. Перезапуск нотифаера: `docker compose up -d notifier`. В логе одно из событий:
+   `room_relay.enabled` (с подписками) или `room_relay.disabled`.
+4. Проверка: `docker compose logs --tail 50 notifier | grep room_relay` — `room_relay.delivered`
+   с `notification_id`; курсор — `select * from room_relay_cursor;` в БД. Первое включение
+   отправит и накопленные уведомления (по 5 за тик): повтор уже доставленного опросом из
+   сессии комната отбросит по `message_id`.
+5. Выключить: убрать `ROOM_TOKEN` (или подписки) из `.env` и перезапустить нотифаер.
+
+Отказ комнаты (`room_relay.failed`) доставку клиентам не задерживает; курсор стоит на месте,
+следующий тик повторит. Миграция `019_room_relay_cursor.sql` — таблица, часовой —
+строка `room_relay_cursor` в `schema_sentinels`.
+
 ### 7.3 Проход догона `enrich` — разово, после деплоя
 
 Нужен после деплоя, который меняет правила разбора текста объявлений: разбор
