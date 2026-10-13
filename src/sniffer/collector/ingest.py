@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from typing import Protocol
 
 import structlog
+from telethon import errors
 
 from sniffer.domain.fingerprint import fingerprint
 from sniffer.domain.records import Chat, RawMessage
@@ -30,6 +31,23 @@ log = structlog.get_logger(__name__)
 # мы обязаны и читать.
 HISTORY_CHATS_PER_TICK = MAX_TRACKED_CHATS
 HISTORY_MESSAGES_PER_CHAT = 200
+
+
+# Ответы СЕРВЕРА «к этому чату доступа нет»: закрыт, нас забанили или кикнули, он удалён,
+# имя снято. Это свойство одного чата, а не сбой процесса. Закрытый список здесь намеренно:
+# `FloodWaitError` и прочие отказы сервера в него НЕ входят и уходят наверх (CLAUDE.md
+# запрещает ретрай под флуд-лимитом). Тот же тип `RPCError` целиком ловить нельзя — под ним
+# и флуд, и сломанная сессия, которые обязаны быть видны.
+CHAT_ACCESS_REFUSED = (
+    errors.ChannelPrivateError,
+    errors.ChannelBannedError,
+    errors.ChatAdminRequiredError,
+    errors.ChannelInvalidError,
+    errors.ChatForbiddenError,
+    errors.UsernameNotOccupiedError,
+    errors.UsernameInvalidError,
+    errors.PeerIdInvalidError,
+)
 
 
 class HistoryReader(Protocol):
@@ -70,12 +88,15 @@ class HistorySyncer:
                     inserted=inserted,
                     discovered=discovered,
                 )
-            except ValueError as exc:
+            except (ValueError, *CHAT_ACCESS_REFUSED) as exc:
                 # Один закрытый/удалённый чат не должен останавливать остальные.
+                # Без `CHAT_ACCESS_REFUSED` `ChannelPrivateError` пробивал проход и ронял
+                # коллектор (crash-loop, курсор на месте, чаты за ним голодали).
                 # Курсор при ошибке не сдвинут: на следующем проходе дочитаем.
                 log.warning(
                     "collector.history_failed",
                     chat=chat.tg_id,
+                    username=chat.username,
                     error=f"{type(exc).__name__}: {exc}",
                 )
         return inserted

@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import cast
 
 import pytest
+from telethon import errors
 
 from sniffer.collector.ingest import HISTORY_CHATS_PER_TICK, HistorySyncer, read_history
 from sniffer.domain.records import Chat, RawMessage
@@ -165,3 +166,75 @@ async def test_a_server_refusal_by_id_is_not_retried_by_username() -> None:
     with pytest.raises(FloodWait):
         await read_history(reader, chat, limit=200, min_id=10)
     assert reader.calls == [(-10042, 200, 10)]
+
+
+@dataclass
+class RefusingReader:
+    """Читатель, у которого одни чаты закрыты (RPC-отказ), а остальные читаются."""
+
+    refusals: dict[int, Exception]
+    messages: list[FakeMessage]
+    calls: list[int | str] = field(default_factory=list)
+
+    async def history(
+        self, entity: int | str, *, limit: int, min_id: int = 0, max_id: int = 0
+    ) -> Sequence[MessageLike]:
+        self.calls.append(entity)
+        if isinstance(entity, int) and entity in self.refusals:
+            raise self.refusals[entity]
+        return cast(Sequence[MessageLike], self.messages)
+
+
+def _refusals() -> list[Exception]:
+    request = None
+    return [
+        errors.ChannelPrivateError(request),
+        errors.ChannelBannedError(request),
+        errors.ChatAdminRequiredError(request),
+        errors.ChannelInvalidError(request),
+        errors.ChatForbiddenError(request),
+        errors.UsernameNotOccupiedError(request),
+        errors.UsernameInvalidError(request),
+        errors.PeerIdInvalidError(request),
+    ]
+
+
+@pytest.mark.parametrize("refusal", _refusals(), ids=lambda exc: type(exc).__name__)
+async def test_a_chat_refused_by_telegram_is_skipped_and_the_rest_are_still_read(
+    refusal: Exception,
+) -> None:
+    """Отказ доступа к одному чату не роняет процесс коллектора и не голодит соседей.
+
+    Живой случай: `ChannelPrivateError` из `get_messages` пробивал `sync()`, тик падал,
+    коллектор рестартовал каждые ~45 с, а чаты за закрытым стояли в очереди вечно.
+    """
+    closed = Chat(tg_id=-1, username=None, title="Закрылся", city="nha_trang", last_msg_id=5)
+    open_chat = Chat(tg_id=-2, username=None, title="Открыт", city="nha_trang", last_msg_id=5)
+    reader = RefusingReader(
+        refusals={-1: refusal},
+        messages=[FakeMessage(6, "Сдам байк", datetime(2026, 9, 1, tzinfo=UTC))],
+    )
+    store = FakeStore([closed, open_chat])
+
+    async def discover(messages: Sequence[MessageLike], found_in: str) -> int:
+        return 0
+
+    synced = await HistorySyncer(reader=reader, store=store, discover=discover).sync()
+
+    assert reader.calls == [-1, -2]
+    assert synced == 1
+    assert [(chat.tg_id, cursor) for chat, _, cursor in store.saved] == [(-2, 6)], (
+        "курсор закрытого чата не сдвигается, открытый дочитан"
+    )
+
+
+async def test_flood_wait_is_not_swallowed_by_the_access_guard() -> None:
+    """Флуд-лимит — не отказ доступа к чату: он уходит наверх, ретрая в цикле нет."""
+    chat = Chat(tg_id=-1, username=None, title="Любой", city="nha_trang", last_msg_id=5)
+    reader = RefusingReader(refusals={-1: errors.FloodWaitError(None, capture=30)}, messages=[])
+
+    async def discover(messages: Sequence[MessageLike], found_in: str) -> int:
+        return 0
+
+    with pytest.raises(errors.FloodWaitError):
+        await HistorySyncer(reader=reader, store=FakeStore([chat]), discover=discover).sync()
