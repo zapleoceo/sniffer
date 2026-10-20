@@ -20,7 +20,7 @@ import structlog
 
 from sniffer.collector.auth import EXIT_OK, EXIT_USAGE, run_auth
 from sniffer.collector.console import Console, tell
-from sniffer.collector.discovery import DiscoveryRunner
+from sniffer.collector.discovery import TELEGRAM_POLL_INTERVAL_S, DiscoveryRunner
 from sniffer.config import Settings
 from sniffer.runtime.service import Service, idle_loop, run_service
 
@@ -36,7 +36,7 @@ AUTH_COMMAND = "auth"
 # Лимит разрешает одно вступление не чаще чем раз в час; проверять его каждые
 # 15 минут достаточно, а держать второе MTProto-подключение постоянно нельзя:
 # в момент живого поиска сессией пользуется адаптер Telegram-групп.
-POLL_INTERVAL_S = 15 * 60.0
+POLL_INTERVAL_S = TELEGRAM_POLL_INTERVAL_S
 
 
 def missing_settings(settings: Settings) -> list[str]:

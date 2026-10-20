@@ -12,10 +12,12 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime
+from time import monotonic
 from typing import Protocol
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
+from telethon import errors
 
 from sniffer.collector.alerts import session_unavailable
 from sniffer.collector.backfill import HistoryBackfill
@@ -183,6 +185,11 @@ BackfillFactory = Callable[[TelegramJoiner], BackfillLike]
 LivenessFactory = Callable[[TelegramJoiner], LivenessLike]
 ClientFactory = Callable[[Settings], TelegramJoiner]
 OwnerAlert = Callable[[Settings, str], Awaitable[None]]
+PreviewScanner = Callable[[Settings], Awaitable[int]]
+Clock = Callable[[], float]
+
+TELEGRAM_POLL_INTERVAL_S = 15 * 60.0
+TELEGRAM_FLOOD_BACKOFF_CAP_S = 12 * 60 * 60.0
 
 
 class DiscoveryRunner:
@@ -204,6 +211,8 @@ class DiscoveryRunner:
         backfill_factory: BackfillFactory | None = None,
         liveness_factory: LivenessFactory | None = None,
         owner_alert: OwnerAlert = session_unavailable,
+        preview_scanner: PreviewScanner = scan_previews,
+        clock: Clock = monotonic,
     ) -> None:
         self._settings = settings or get_settings()
         self._client_factory = client_factory
@@ -212,14 +221,43 @@ class DiscoveryRunner:
         self._backfill_factory = backfill_factory or self._new_backfill
         self._liveness_factory = liveness_factory or self._new_liveness
         self._owner_alert = owner_alert
+        self._preview_scanner = preview_scanner
+        self._clock = clock
+        self._telegram_flood_streak = 0
+        self._telegram_blocked_until = 0.0
         self._unavailable_reported = False
 
     async def tick(self) -> int:
-        moved = await self._telegram_tick()
-        # Превью - после вступления и без Telegram: выключено по умолчанию, а сбой
-        # публичного веб-запроса не должен ронять проход коллектора.
+        if self._clock() < self._telegram_blocked_until:
+            moved = 0
+        else:
+            try:
+                moved = await self._telegram_tick()
+            except errors.FloodWaitError as exc:
+                # Не повторяем Telegram-запрос до большего из серверного срока и
+                # экспоненциальной паузы. Состояние живёт в долгоживущем runner;
+                # публичные web-превью от Telegram не зависят и не голодают.
+                self._telegram_flood_streak += 1
+                backoff = min(
+                    TELEGRAM_POLL_INTERVAL_S * 2 ** (self._telegram_flood_streak - 1),
+                    TELEGRAM_FLOOD_BACKOFF_CAP_S,
+                )
+                pause = max(float(exc.seconds), backoff)
+                self._telegram_blocked_until = self._clock() + pause
+                log.warning(
+                    "collector.telegram_flood_wait",
+                    seconds=exc.seconds,
+                    pause_seconds=pause,
+                    streak=self._telegram_flood_streak,
+                )
+                moved = 0
+            else:
+                self._telegram_flood_streak = 0
+                self._telegram_blocked_until = 0.0
+        # Превью - после Telegram-части, но без зависимости от её FloodWait: сбой
+        # публичного веб-запроса также не должен ронять проход коллектора.
         try:
-            await scan_previews(self._settings)
+            await self._preview_scanner(self._settings)
         except Exception as exc:
             log.warning("collector.preview_scan_failed", error=f"{type(exc).__name__}: {exc}")
         return moved
