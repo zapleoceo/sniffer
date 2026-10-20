@@ -1,5 +1,7 @@
 """Public catalogue rollout is an explicit, reviewable compose contract."""
 
+import json
+import os
 import re
 import shutil
 import subprocess
@@ -42,6 +44,62 @@ def test_hourly_collector_is_enabled_in_its_profile() -> None:
 
     assert 'profiles: ["agent-catalog"]' in collector
     assert 'AGENT_COLLECTOR_ENABLED: "true"' in collector
+
+
+def test_join_preview_and_priority_are_enabled_with_a_reversible_compose_default() -> None:
+    collector = _service_block("collector")
+    dashboard = _service_block("dashboard")
+
+    for service in (collector, dashboard):
+        assert 'JOIN_PRIORITY_ENABLED: "${JOIN_PRIORITY_ENABLED:-true}"' in service
+        assert 'JOIN_PREVIEW_SCAN_ENABLED: "${JOIN_PREVIEW_SCAN_ENABLED:-true}"' in service
+
+
+@pytest.mark.skipif(shutil.which("docker") is None, reason="нужен Docker Compose")
+@pytest.mark.parametrize("override, expected", [(None, "true"), ("false", "false")])
+def test_join_rollout_renders_the_default_and_explicit_rollback(
+    tmp_path: Path, override: str | None, expected: str
+) -> None:
+    """Проверяем итог Compose, а не только текст YAML и наследование якорей."""
+    docker = shutil.which("docker")
+    assert docker is not None
+    compose = tmp_path / "docker-compose.yml"
+    shutil.copyfile(COMPOSE, compose)
+    # `env_file: .env` относится к каталогу compose-файла. Изолированная копия
+    # не зависит от секретного или отсутствующего `.env` рабочего checkout.
+    blank_env = tmp_path / ".env"
+    blank_env.write_text("", encoding="utf-8")
+    env = os.environ.copy()
+    for key in ("JOIN_PRIORITY_ENABLED", "JOIN_PREVIEW_SCAN_ENABLED"):
+        if override is None:
+            env.pop(key, None)
+        else:
+            env[key] = override
+    done = subprocess.run(  # noqa: S603
+        [
+            docker,
+            "compose",
+            "--env-file",
+            str(blank_env),
+            "-f",
+            str(compose),
+            "config",
+            "--format",
+            "json",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=env,
+        timeout=60,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    services = json.loads(done.stdout)["services"]
+    for service_name in ("collector", "dashboard"):
+        rendered = services[service_name]["environment"]
+        assert rendered["JOIN_PRIORITY_ENABLED"] == expected
+        assert rendered["JOIN_PREVIEW_SCAN_ENABLED"] == expected
 
 
 def test_deploy_includes_profile_and_rejects_idle_public_collector() -> None:
