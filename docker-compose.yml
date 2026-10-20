@@ -66,6 +66,12 @@ services:
     <<: *app
     container_name: sniffer-collector
     command: python -m sniffer.collector
+    # Owner decision 20.10.2026: collect previews and use their bounded,
+    # starvation-free score for the join queue. Keep the rollback switches in
+    # `.env`, but make the reviewed production compose default explicit.
+    environment:
+      JOIN_PRIORITY_ENABLED: "${JOIN_PRIORITY_ENABLED:-true}"
+      JOIN_PREVIEW_SCAN_ENABLED: "${JOIN_PREVIEW_SCAN_ENABLED:-true}"
     mem_limit: ${SNIFFER_MEM_COLLECTOR:-320m}
 
   # Broker/MCP agent that fills the verified catalog. The profile keeps manual
@@ -118,6 +124,10 @@ services:
     <<: *app
     container_name: sniffer-dashboard
     command: python -m sniffer.dashboard
+    # Show the queue in the same order in which the collector reserves it.
+    environment:
+      JOIN_PRIORITY_ENABLED: "${JOIN_PRIORITY_ENABLED:-true}"
+      JOIN_PREVIEW_SCAN_ENABLED: "${JOIN_PREVIEW_SCAN_ENABLED:-true}"
     ports:
       # ТОЛЬКО 127.0.0.1: снаружи ходит nginx, а не браузер. Опубликуй это на
       # 0.0.0.0 — и страница с перепиской клиентов станет доступна по IP машины

@@ -147,15 +147,17 @@ class Settings(BaseSettings):
     # вчерашнее неплательщику. Новое после окончания не ставится вовсе — без льготы.
     monitor_lapse_grace_hours: int = Field(default=6, ge=0, le=168)
     # Приоритизация очереди вступлений по тематике превью (docs/chats-nha-trang.md,
-    # «Приоритет очереди»). ВЫКЛЮЧЕНА: решение владельца о включении не принято.
-    # Выключено - порядок разбора ровно прежний, `(priority, found_at)`. Включено -
+    # «Приоритет очереди»). Кодовый fallback выключен; production Compose включает
+    # обе настройки по решению владельца от 20.10.2026. Выключено - порядок разбора
+    # ровно прежний, `(priority, found_at)`. Включено -
     # relevant раньше, unknown посередине, off_topic / foreign_city позже; никого не
     # отклоняет, а возраст в очереди со временем обгоняет штраф (нет голодания).
     join_priority_enabled: bool = False
     join_priority_unknown_penalty: int = Field(default=20, ge=0, le=1000)
     join_priority_low_penalty: int = Field(default=60, ge=0, le=1000)
     join_priority_aging_hours: int = Field(default=6, ge=1, le=720)
-    # Сбор снимков превью - ОТДЕЛЬНАЯ настройка, тоже выключена. Публичный веб-запрос
+    # Сбор снимков превью - ОТДЕЛЬНАЯ настройка с таким же выключенным fallback.
+    # Публичный веб-запрос
     # t.me/<username>, не чаще одного в `interval` секунд и не больше `per_pass` за проход.
     join_preview_scan_enabled: bool = False
     join_preview_interval_s: int = Field(default=5, ge=2, le=600)
