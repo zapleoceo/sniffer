@@ -22,6 +22,10 @@ STAGE_REJECTED = "rejected"
 # а не `rejected`: сообщение не мусор, просто карточка у него уже есть, и
 # разбираться в отклонённых потом придётся именно по этой разнице.
 STAGE_DUPLICATE = "duplicate"
+# Сообщение старше LISTING_MAX_AGE_DAYS: карточка из него родилась бы уже
+# погашенной (или оживила бы погашенную через `refresh`), а разбор текста и
+# дальнейшая ИИ-проверка стоили бы денег впустую. Ни гейта, ни модели.
+STAGE_STALE = "stale"
 
 
 def offer_deal_type(intent: Intent | None, category: Category | None = None) -> str:

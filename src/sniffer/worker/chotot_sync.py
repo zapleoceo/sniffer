@@ -26,12 +26,14 @@ from __future__ import annotations
 
 import time
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Protocol
 
 import structlog
 
 from sniffer.config import get_settings
+from sniffer.domain.listing_state import is_stale
 from sniffer.domain.passport import Category
 from sniffer.domain.records import Listing
 from sniffer.search.intake_rules import parse_query
@@ -67,6 +69,7 @@ class Retire(Protocol):
 
 SourceFactory = Callable[[], Source]
 Clock = Callable[[], float]
+Now = Callable[[], datetime]
 
 # Обратные таблицы к справочнику доски: код поля → значение паспорта. Piaggio
 # и Vespa делят код 3, обратно это Piaggio — марка, Vespa у неё модельный ряд.
@@ -87,6 +90,7 @@ class ChototSync:
         store: Store = store_listings,
         retire: Retire = retire_unseen_listings,
         clock: Clock = time.monotonic,
+        now: Now = lambda: datetime.now(UTC),
     ) -> None:
         self._interval = (
             float(get_settings().chotot_sync_interval_s) if interval_s is None else interval_s
@@ -95,6 +99,7 @@ class ChototSync:
         self._store = store
         self._retire = retire
         self._clock = clock
+        self._now = now
         # Первый обход — сразу при старте процесса: деплой не должен оставлять
         # каталог без доски на полчаса.
         self._due_at = 0.0
@@ -154,10 +159,15 @@ class ChototSync:
             )
             if retired:
                 log.info("chotot.retired", city=city, category=category.value, retired=retired)
+        # Карточку старше LISTING_MAX_AGE_DAYS не заводим: она родилась бы
+        # погашенной, а `upsert_external` (DO NOTHING) не даст ей потом ожить.
+        # В `retire` такие объявления всё равно попали (`seen` выше): доска их
+        # ещё показывает, гасить нечего.
+        moment = self._now()
         listings = [
             listing_from_ad(item, city=city, category=category)
             for item in found
-            if item.posted_at is not None
+            if item.posted_at is not None and not is_stale(item.posted_at, moment)
         ]
         if not listings:
             return 0

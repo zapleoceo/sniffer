@@ -23,11 +23,30 @@
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime, timedelta
 
 # Сколько живёт карточка без переопубликации. Замер 18.09.2026: из 8578
 # «активных» карточек 2433 были старше 30 дней — ни одна из них не гасла
 # никогда, и бот предлагал бы их наравне со вчерашними.
 LISTING_MAX_AGE_DAYS = 30
+
+
+def listing_cutoff(now: datetime) -> datetime:
+    """Граница актуальности: всё, что опубликовано РАНЬШЕ неё, устарело.
+
+    Одна функция для гашения, воронки, обхода доски, ИИ-проверки и уборки:
+    сравнение строгое (`posted_at < cutoff`), на самой границе карточка жива —
+    так же, как в `ListingRepository.expire`. Наивное время считается UTC.
+    """
+    moment = now if now.tzinfo is not None else now.replace(tzinfo=UTC)
+    return moment.astimezone(UTC) - timedelta(days=LISTING_MAX_AGE_DAYS)
+
+
+def is_stale(posted_at: datetime, now: datetime) -> bool:
+    """Старше `LISTING_MAX_AGE_DAYS` на момент `now`. Сравниваются МОМЕНТЫ, не часы стены."""
+    moment = posted_at if posted_at.tzinfo is not None else posted_at.replace(tzinfo=UTC)
+    return moment < listing_cutoff(now)
+
 
 # Почему карточка снята с выдачи (`listings.deactivated_reason`, миграция 022). Строки
 # пишутся в базу, поэтому менять их нельзя без миграции данных.

@@ -33,16 +33,19 @@ from sniffer.worker.recategorize import Recategorize
 from sniffer.worker.retention import Retention
 from sniffer.worker.screening import Screening
 from sniffer.worker.slot_ledger import LedgerSlots
+from sniffer.worker.stale_cleanup import run_stale_cleanup
 
 log = structlog.get_logger(__name__)
 
 NAME = "worker"
 
 ENRICH_COMMAND = "enrich"
+STALE_CLEANUP_COMMAND = "stale-cleanup"
 USAGE = (
     "Использование: python -m sniffer.worker [enrich [--dry-run] [--limit N] [--since-id ID]]\n"
     "  без аргументов — обычный процесс воркера;\n"
-    f"  {ENRICH_COMMAND} — разовый проход догона по накопленным карточкам."
+    f"  {ENRICH_COMMAND} — разовый проход догона по накопленным карточкам;\n"
+    f"  {STALE_CLEANUP_COMMAND} — уборка карточек старше срока (по умолчанию сухой прогон)."
 )
 
 
@@ -168,6 +171,8 @@ def main(argv: Sequence[str]) -> int:
         return EXIT_OK
     if argv[0] == ENRICH_COMMAND:
         return run_enrich(argv[1:])
+    if argv[0] == STALE_CLEANUP_COMMAND:
+        return run_stale_cleanup(argv[1:])
     print(f"Неизвестная подкоманда: {argv[0]!r}.\n{USAGE}", file=sys.stderr)
     return EXIT_USAGE
 

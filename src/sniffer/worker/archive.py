@@ -13,6 +13,9 @@ VND» дало 21.5 триллиона донгов, вставка упала �
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from datetime import UTC, datetime
+
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,12 +24,13 @@ from sniffer.db.repositories.chats import ChatRepository
 from sniffer.db.repositories.listings import ListingRepository
 from sniffer.db.repositories.raw_messages import RawMessageRepository
 from sniffer.domain.fingerprint import fingerprint
-from sniffer.domain.listing_state import REASON_SUPERSEDED
+from sniffer.domain.listing_state import REASON_SUPERSEDED, is_stale
 from sniffer.domain.records import RawMessage
 from sniffer.pipeline.archive import (
     STAGE_DUPLICATE,
     STAGE_EXTRACTED,
     STAGE_REJECTED,
+    STAGE_STALE,
     classify,
     listing_from,
     offer_deal_type,
@@ -39,7 +43,13 @@ log = structlog.get_logger(__name__)
 BATCH_SIZE = 50
 
 
+Now = Callable[[], datetime]
+
+
 class ArchivePipeline:
+    def __init__(self, *, now: Now = lambda: datetime.now(UTC)) -> None:
+        self._now = now
+
     async def tick(self) -> int:
         async with session_scope() as session:
             repo = RawMessageRepository(session)
@@ -79,6 +89,12 @@ class ArchivePipeline:
     async def _one(self, raw: RawMessage, session: AsyncSession) -> int:
         repo = RawMessageRepository(session)
         assert raw.id is not None
+        if is_stale(raw.posted_at, self._now()):
+            # Старше срока актуальности: ни карточки, ни `refresh` (он перезаписал
+            # бы `posted_at` и оживил погашенную), ни обращения к модели. Догон
+            # истории чата приносит такое тысячами. Сырьё остаётся (90 дней).
+            await repo.set_stage([raw.id], STAGE_STALE, gate_signals={"reason": "stale"})
+            return 1
         # Знание «какими словами/марками/моделями зовётся категория» внедряем из
         # поиска: воркер — процесс, композирующий слои, и он же берёт отсюда
         # `parse_query`. Это не ребро pipeline→search, а его отсутствие.

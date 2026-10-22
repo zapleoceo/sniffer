@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 import pytest
 
@@ -54,7 +54,9 @@ def recorder(monkeypatch: pytest.MonkeyPatch) -> type[_Recorder]:
 
 
 async def test_gate_rejection_stores_only_the_reason(recorder: type[_Recorder]) -> None:
-    await module.ArchivePipeline()._one(_raw("Ищу байк в аренду на месяц, бюджет 100$"), None)  # type: ignore[arg-type]
+    await module.ArchivePipeline(now=lambda: datetime(2026, 9, 2, tzinfo=UTC))._one(
+        _raw("Ищу байк в аренду на месяц, бюджет 100$"), cast(Any, None)
+    )
 
     assert recorder.calls == [
         {"ids": [5], "stage": "rejected", "gate_signals": {"reason": "demand_not_offer"}}
@@ -62,7 +64,9 @@ async def test_gate_rejection_stores_only_the_reason(recorder: type[_Recorder]) 
 
 
 async def test_unknown_chat_rejection_stores_only_the_reason(recorder: type[_Recorder]) -> None:
-    await module.ArchivePipeline()._one(_raw("Продам Honda Vision 2021, цена 15.000.000 VND"), None)  # type: ignore[arg-type]
+    await module.ArchivePipeline(now=lambda: datetime(2026, 9, 2, tzinfo=UTC))._one(
+        _raw("Продам Honda Vision 2021, цена 15.000.000 VND"), cast(Any, None)
+    )
 
     assert recorder.calls == [
         {"ids": [5], "stage": "rejected", "gate_signals": {"reason": "unknown_chat"}}
@@ -71,6 +75,8 @@ async def test_unknown_chat_rejection_stores_only_the_reason(recorder: type[_Rec
 
 async def test_rejection_touches_only_stage_and_signals(recorder: type[_Recorder]) -> None:
     """Текст и отпечаток не трогаются: уходят лишь стадия и `reason`."""
-    await module.ArchivePipeline()._one(_raw("Ищу байк в аренду на месяц, бюджет 100$"), None)  # type: ignore[arg-type]
+    await module.ArchivePipeline(now=lambda: datetime(2026, 9, 2, tzinfo=UTC))._one(
+        _raw("Ищу байк в аренду на месяц, бюджет 100$"), cast(Any, None)
+    )
 
     assert set(recorder.calls[0]) == {"ids", "stage", "gate_signals"}
