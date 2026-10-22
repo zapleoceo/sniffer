@@ -1028,7 +1028,7 @@ async def test_archive_source_recovers_rental_hidden_behind_a_sale_card(
 async def test_reprocessing_a_new_row_rewrites_minimal_signals_to_full(
     db_session: AsyncSession,
 ) -> None:
-    """Строка в `new` с минимальными сигналами после воронки несёт полный набор."""
+    """Строка в `pending` с минимальными сигналами после воронки несёт полный набор."""
     from sniffer.worker.archive import ArchivePipeline
 
     chat = Chat(tg_id=-100123, title="Байки", city="nha_trang", username="bikes_nha")
@@ -1047,7 +1047,7 @@ async def test_reprocessing_a_new_row_rewrites_minimal_signals_to_full(
     )
     await db_session.commit()
     row = await RawMessageRepository(db_session).get_by_key(chat.tg_id, 1)
-    assert row is not None and row.stage == "new"
+    assert row is not None and row.stage == "pending"
     assert row.gate_signals == {"reason": "unknown_chat"}
 
     assert await ArchivePipeline()._one(row, db_session) == 1
