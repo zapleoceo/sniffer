@@ -84,7 +84,7 @@ class ArchivePipeline:
         # `parse_query`. Это не ребро pipeline→search, а его отсутствие.
         result = classify(raw, category_hints=vocabulary.category_hints)
         if not result.passed:
-            await repo.set_stage([raw.id], STAGE_REJECTED, gate_signals=result.as_signals())
+            await repo.set_stage([raw.id], STAGE_REJECTED, gate_signals=result.as_reject_signals())
             return 1
 
         chat = await ChatRepository(session).get_by_tg_id(raw.chat_tg_id)
@@ -93,7 +93,7 @@ class ArchivePipeline:
             await repo.set_stage(
                 [raw.id],
                 STAGE_REJECTED,
-                gate_signals={**result.as_signals(), "reason": "unknown_chat"},
+                gate_signals={"reason": "unknown_chat"},
             )
             return 1
 

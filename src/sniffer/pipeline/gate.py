@@ -98,6 +98,16 @@ class GateResult:
             "reason": self.reason,
         }
 
+    def as_reject_signals(self) -> dict[str, object]:
+        """Минимум для отклонённой строки: только `reason`.
+
+        Остальные ключи (`has_price`, `is_offer`, `is_demand`, `categories`) у
+        отклонённых никто не читает: `collection_sources` смотрит `categories`
+        только при `stage IN ('extracted','duplicate')`, а `reason` остаётся для
+        перетюнинга гейта (см. докстринг модуля).
+        """
+        return {"reason": self.reason}
+
 
 MIN_LENGTH = 25
 MAX_LENGTH = 4000

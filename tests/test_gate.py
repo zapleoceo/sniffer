@@ -118,3 +118,16 @@ def test_the_detector_widens_category_not_the_rest_of_the_gate() -> None:
     priceless = gate("Honda Lead 2019, отличное состояние, один хозяин", category_hints=DETECTOR)
     assert not priceless.passed
     assert priceless.reason == "no_price_no_offer_verb"
+
+
+def test_rejected_signals_keep_only_the_reason() -> None:
+    """Отклонённым строкам нужен лишь `reason` (перетюнинг гейта); остальное — шум."""
+    rejected = gate("Ищу байк в аренду на месяц, бюджет до 100$")
+    assert not rejected.passed
+    assert rejected.as_reject_signals() == {"reason": "demand_not_offer"}
+
+
+def test_passed_signals_are_unchanged_by_the_reject_shape() -> None:
+    """extracted/duplicate по-прежнему несут полный набор: `categories` читает поиск."""
+    signals = gate(OFFERS[0]).as_signals()
+    assert set(signals) == {"has_price", "is_offer", "is_demand", "categories", "reason"}
