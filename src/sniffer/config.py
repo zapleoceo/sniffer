@@ -186,6 +186,21 @@ class Settings(BaseSettings):
         )
 
     @property
+    def owner_tg_id(self) -> int | None:
+        """Telegram-id владельца или `None`, если владелец не задан."""
+        return self.owner_chat_id or None
+
+    def is_owner(self, tg_user_id: int) -> bool:
+        """Этот клиент — владелец бота.
+
+        Пределы клиента (карточки за период, число поисков, слоты слежения) считаются
+        от покупок, а владелец бота своему же боту не платит: проверять живую систему
+        ему нужно тем же путём, которым ходит клиент. Ноль означает «владелец не
+        задан» — тогда безлимита не получает никто.
+        """
+        return self.owner_tg_id is not None and tg_user_id == self.owner_chat_id
+
+    @property
     def selling(self) -> bool:
         """Подписку предлагают людям: флаг включён И есть кому отвечать за возвраты.
 

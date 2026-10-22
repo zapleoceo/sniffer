@@ -14,6 +14,7 @@ from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sniffer.bot.quota import Account
+from sniffer.config import get_settings
 from sniffer.db.engine import session_scope
 from sniffer.db.repositories.billing import BillingRepository
 from sniffer.db.repositories.delivery import DeliveryRepository
@@ -42,13 +43,23 @@ class DbSlots:
             return state
 
     async def enable(self, tg_user_id: int, root: int, now: datetime) -> Outcome:
-        """Включить слежение на ветке клиента. Чужая ветка — как «слота нет»: не включается."""
+        """Включить слежение на ветке клиента. Чужая ветка — как «слота нет»: не включается.
+
+        Владельцу слежение даётся без слота и без срока: он проверяет бота на живой
+        системе, а купить слот у самого себя ему не у кого. Это тот же мониторинг с
+        `expires_at IS NULL`, что выдаёт `worker/grant_watch`, — не второй путь в обход
+        права, а тот же самый, просто с кнопки.
+        """
         async with self._sessions() as session:
             user_id = await self._user_id(session, tg_user_id)
             owns = await DeliveryRepository(session).owns_chain(user_id=user_id, passport_root=root)
             if not owns:
                 return Outcome.NO_FREE_SLOT
-            outcome, _ = await SlotRepository(session).enable(user_id, root, now)
+            slots = SlotRepository(session)
+            if get_settings().is_owner(tg_user_id):
+                outcome = await slots.grant_watch(user_id, root, now=now)
+            else:
+                outcome, _ = await slots.enable(user_id, root, now)
             await session.commit()
             return outcome
 

@@ -13,13 +13,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sniffer.bot.billing_slots import DbSlots
 from sniffer.bot.store import Client
 from sniffer.bot.watch_panel import PanelView, limit_text
+from sniffer.config import get_settings
 from sniffer.db.engine import session_scope
 from sniffer.db.repositories import PassportRepository, UserRepository
 from sniffer.db.repositories.billing import BillingRepository
 from sniffer.db.repositories.slots import SlotRepository
 from sniffer.db.repositories.tabs import TabRepository
 from sniffer.db.repositories.watch import WatchRepository
-from sniffer.domain.plans import search_cap
+from sniffer.domain.plans import PAID_SEARCHES, search_cap
 from sniffer.domain.records import QueryOverview
 
 # Столько поисков показывает панель: верхний из возможных пределов (платный). Меньший
@@ -33,6 +34,15 @@ async def _user_id(session: AsyncSession, client: Client) -> int | None:
     return user.id
 
 
+def _cap(paid: int, *, owner: bool) -> int:
+    """Предел поисков. Владельцу — платный: покупать слот у самого себя ему не у кого.
+
+    Не «сколько угодно»: панель показывает `PANEL_LIMIT` поисков, и предел выше неё
+    означал бы поиски, которых человек не видит и не может убрать.
+    """
+    return PAID_SEARCHES if owner else search_cap(paid)
+
+
 async def panel(client: Client, *, now: datetime | None = None) -> PanelView | None:
     moment = now or datetime.now(UTC)
     async with session_scope() as session:
@@ -44,7 +54,8 @@ async def panel(client: Client, *, now: datetime | None = None) -> PanelView | N
         watch = WatchRepository(session)
         slots = await watch.live_slots(user_id, moment)
         used = await watch.count_searches(user_id)
-    return PanelView(items, paid, len(slots), used, search_cap(paid))
+    owner = get_settings().is_owner(client.tg_user_id)
+    return PanelView(items, paid, len(slots), used, _cap(paid, owner=owner))
 
 
 class DbSearchLimit:
@@ -55,9 +66,14 @@ class DbSearchLimit:
         async with session_scope() as session:
             paid = await BillingRepository(session).live_subscriptions(user_id, moment)
             used = await WatchRepository(session).count_searches(user_id)
-        if used < search_cap(paid):
+            # Здесь известен только внутренний id, а владелец задан телеграмным:
+            # сравнивать не с чем, пока не прочитана строка клиента.
+            account = await UserRepository(session).get(user_id)
+        owner = account is not None and get_settings().is_owner(account.tg_user_id)
+        cap = _cap(paid, owner=owner)
+        if used < cap:
             return None
-        view = PanelView([], paid, 0, used, search_cap(paid))
+        view = PanelView([], paid, 0, used, cap)
         return limit_text(view)
 
 

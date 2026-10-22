@@ -91,5 +91,5 @@ def new_quota() -> QuotaService:
     return QuotaService(
         SqlLedger(),
         entitlements=LedgerEntitlements(),
-        owner_tg_id=get_settings().owner_chat_id or None,
+        owner_tg_id=get_settings().owner_tg_id,
     )
