@@ -116,6 +116,33 @@ class SlotRepository(Repository):
         await self._session.flush()
         return row.id
 
+    async def grant_watch(self, user_id: int, root: int, *, now: datetime) -> Outcome:
+        """«Следить» без платежа: мониторинг без срока. Путь владельца, он себе не платит.
+
+        Отдельный метод, а не флаг в `enable`: там исход считает `decide_enable` по числу
+        оплаченных слотов, а здесь слотов нет вовсе и считать нечего. Уже работающий
+        мониторинг — оплаченный или выданный — не трогаем: иначе нажатие «Следить» на
+        оплаченной ветке молча обнулило бы её срок, то есть отдало бы чужой слот.
+        Остановленный возобновляем на месте, не через `grant`: тот перезаписал бы
+        жёсткий фильтр ручной выдачи, о котором кнопка ничего не знает.
+        """
+        await self._lock(user_id)
+        monitors = await self.monitors(user_id)
+        existing = next((monitor for monitor in monitors if monitor.root == root), None)
+        if existing is None:
+            await self.grant(user_id, root, hard_filter=None, lookback=timedelta(0), now=now)
+            return Outcome.ENABLE
+        if existing.is_active and (existing.expires_at is None or existing.holds_slot(now)):
+            return Outcome.ALREADY_ON
+        await self._session.execute(
+            update(models.Subscription)
+            .where(models.Subscription.id == existing.id)
+            # `no_slot_since` снимаем вместе со сроком: отметка «слота нет с такого-то»
+            # осталась бы висеть на мониторинге, который снова работает.
+            .values(is_active=True, expires_at=None, no_slot_since=None)
+        )
+        return Outcome.ENABLE
+
     async def move(self, user_id: int, *, to_root: int, from_root: int, now: datetime) -> bool:
         """Слот с `from_root` на `to_root`: порядок меняется, мониторинги остаются."""
         await self._lock(user_id)

@@ -57,8 +57,14 @@ class PanelView:
 
 
 def limit_text(view: PanelView) -> str:
-    """Отказ открыть ещё один поиск: сколько их уже и что с этим делать."""
-    upgrade = "" if view.paid_slots else UPGRADE.format(paid=PAID_SEARCHES)
+    """Отказ открыть ещё один поиск: сколько их уже и что с этим делать.
+
+    Подписку предлагаем, только если она поднимет предел. Спрашивать про неё того,
+    у кого предел уже платный, — значит продавать то, что у человека есть: так было
+    бы у владельца, которому платный предел дан без покупки.
+    """
+    raised = view.paid_slots > 0 or view.cap >= PAID_SEARCHES
+    upgrade = "" if raised else UPGRADE.format(paid=PAID_SEARCHES)
     return LIMIT_REACHED.format(used=view.used, noun=plural(view.used, _NOUN), upgrade=upgrade)
 
 
