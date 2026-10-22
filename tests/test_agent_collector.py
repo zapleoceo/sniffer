@@ -223,6 +223,7 @@ async def test_archive_query_is_narrowed_before_bounded_originals_are_read() -> 
     sql = str(statement)
     assert not sql.lstrip().startswith("#"), "Python lint comments are not SQL"
     assert "LEFT JOIN listings" in sql
+    assert "r.stage IN ('extracted','duplicate')" in sql, "rejected rows are never read"
     assert "r.gate_signals @>" in sql and "r.text ~* :rental_pattern" in sql
     assert "l.attributes @>" in sql and "l.district = ANY" in sql
     assert "PARTITION BY r.text_hash" in sql
