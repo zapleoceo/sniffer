@@ -608,7 +608,7 @@ def test_database_page_shows_what_is_accumulated(owner: TestClient) -> None:
     """Главный вопрос страницы: есть ли чему отвечать на запрос клиента."""
     body = owner.get("/database").text
 
-    assert "Ответы после сбора" in body
+    assert "Ответы клиентам после сбора" in body
     assert "sent" in body
     assert str(OWNER) in body
 
@@ -732,3 +732,110 @@ def test_non_temporary_rejects_add_no_controls(
 
     assert "<form" not in body.lower()
     assert "<button" not in body.lower()
+
+
+# ── таблицы: прокрутка, подпись, подсказки ──────────────────────────────────
+
+SECTION_LABELS = [
+    "Ответы клиентам после сбора",
+    "Чаты реестра",
+    "Очередь вступлений",
+    "Журнал вступлений",
+    "Последнее сырьё",
+]
+
+
+def test_every_database_table_is_a_labelled_keyboard_reachable_region(owner: TestClient) -> None:
+    body = owner.get("/database").text
+
+    for label in SECTION_LABELS:
+        expected = f"<div class='scroll' tabindex='0' role='region' aria-label='Таблица: {label}'>"
+        assert expected in body, label
+
+
+def test_other_pages_still_render_their_tables(owner: TestClient) -> None:
+    for path in ("/", "/requests/3", "/users/7"):
+        response = owner.get(path)
+        assert response.status_code == 200
+        assert "<table>" in response.text, path
+        # Без подписи область не размечаем: безымянный region только мешает.
+        assert "role='region'" not in response.text
+
+
+def test_table_label_is_escaped() -> None:
+    from sniffer.dashboard.html import cell, table
+
+    out = table(["a"], [[cell("x")]], label="\"'><script>")
+
+    assert "<script>" not in out
+    assert "aria-label='Таблица: &quot;&#x27;&gt;&lt;script&gt;'" in out
+
+
+def test_small_tables_get_no_forced_height_and_the_header_is_sticky() -> None:
+    from sniffer.dashboard.html import STYLE
+
+    # max-height, а не height: короткая таблица не получает полосу прокрутки.
+    assert ".scroll { max-height:min(420px, 60vh); overflow:auto; }" in STYLE
+    assert "position:sticky; top:0" in STYLE
+    assert "box-shadow:inset 0 -1px 0 var(--line)" in STYLE
+
+
+def test_rank_column_is_renamed_and_explained(owner: TestClient) -> None:
+    body = owner.get("/database").text
+
+    assert (
+        "<th title='меньше — раньше; все найденные разведкой чаты получают 500, "
+        "курируемые ≤100'>порядок чтения</th>" in body
+    )
+    assert "<th>ранг</th>" not in body
+
+
+def test_collection_block_has_a_user_facing_hint(owner: TestClient) -> None:
+    body = owner.get("/database").text
+
+    assert (
+        "Ответ клиенту доставлен, если в колонке «доставка» стоит sent и заполнено время "
+        "«отправлен». Строки с failed, cancelled или «не создан» требуют внимания." in body
+    )
+    assert "Задание завершено только тогда" not in body
+
+
+# ── статика ─────────────────────────────────────────────────────────────────
+
+
+def test_database_page_loads_its_script_from_self(owner: TestClient) -> None:
+    body = owner.get("/database").text
+
+    assert '<script src="/static/database.js" defer></script>' in body
+    assert "<script>" not in body
+
+
+def test_static_script_is_javascript_with_security_headers(client: TestClient) -> None:
+    response = client.get("/static/database.js")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/javascript")
+    assert "fetch(form.action" in response.text
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert "script-src 'self'" in response.headers["content-security-policy"]
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_static_route_serves_only_the_one_file(client: TestClient) -> None:
+    assert client.get("/static/other.js").status_code == 404
+    assert client.get("/static/..%2Fapp.py").status_code == 404
+
+
+def test_collection_block_is_collapsed_by_default_with_a_counter(owner: TestClient) -> None:
+    body = owner.get("/database").text
+
+    start = body.index("<details>")
+    end = body.index("</details>")
+    block = body[start:end]
+    assert "<details>" in body and "<details open" not in body
+    assert "<summary>Ответы клиентам после сбора — заданий: " in block
+    assert "доставлено: " in block and "без ответа: " in block
+    # Таблица и подсказка остаются внутри, ничего не удалено.
+    assert "aria-label='Таблица: Ответы клиентам после сбора'" in block
+    assert "Ответ клиенту доставлен, если" in block
+    assert str(OWNER) in block

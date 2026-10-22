@@ -31,6 +31,7 @@ CLASS_CSS = {
 }
 
 RETRY_PATH = "/rejects/{key}/retry"
+SCRIPT_PATH = "/static/database.js"
 
 # Исход попытки → слова. Неизвестный показываем как есть.
 OUTCOME = {
@@ -58,6 +59,7 @@ def section(view: data.Inventory, *, csrf: str) -> str:
         + table(
             ["кандидат", "причина", "класс", "когда", "повтор"],
             [_row(item) for item in view.rejects],
+            label="Отклонённые кандидаты",
         )
         + "</section>"
         + _retry_section(view, csrf)
@@ -69,6 +71,7 @@ def _breakdown(view: data.Inventory) -> str:
     return table(
         ["причина", "класс", "всего"],
         [[_reason(reason), _class(reason), num(count)] for reason, count in ordered],
+        label="Отклонённые по причинам",
     )
 
 
@@ -108,7 +111,11 @@ def _retry_section(view: data.Inventory, csrf: str) -> str:
         f"{reject_retry.MAX_RETRIES_PER_KEY}, между попытками — {hours} ч. Повтор ничего "
         "не отправляет в Telegram: он только возвращает ключ в очередь, а вступает тот "
         f"же joiner по своим лимитам (не больше {MAX_JOINS_PER_DAY} в сутки).</p>"
-        + table(["кандидат", "причина", "когда", "попыток", "действие"], rows)
+        + table(
+            ["кандидат", "причина", "когда", "попыток", "действие"],
+            rows,
+            label="Повтор временных отказов",
+        )
         + "<h3>Журнал попыток</h3>"
         + _history(view.retries)
         + "</section>"
@@ -157,7 +164,8 @@ def _action(key: str, offer: RetryOffer | None, csrf: str) -> Cell:
         f"<td><form method='post' action='{esc(action)}'>"
         f"<input type='hidden' name='csrf' value='{esc(csrf)}'>"
         f"<input type='hidden' name='request_id' value='{esc(token)}'>"
-        "<button type='submit'>Повторить</button></form></td>"
+        "<button type='submit'>Повторить</button></form>"
+        "<span class='retry-status mute' role='status'></span></td>"
     )
 
 
@@ -165,6 +173,7 @@ def _history(records: list[RetryRecord]) -> str:
     return table(
         ["запрошено", "кандидат", "был отказ", "состояние", "следующая попытка с"],
         [_history_row(record) for record in records],
+        label="Журнал попыток повтора",
     )
 
 

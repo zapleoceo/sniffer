@@ -43,12 +43,14 @@ h2 { font-size:16px; margin:0 0 12px; color:var(--mute);
         padding:14px 18px; min-width:150px; }
 .card b { display:block; font-size:22px; font-weight:600; }
 .card span { color:var(--mute); font-size:13px; }
-.scroll { overflow-x:auto; }
+.scroll { max-height:min(420px, 60vh); overflow:auto; }
+.scroll:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
 table { border-collapse:collapse; width:100%; background:var(--panel);
         border:1px solid var(--line); border-radius:12px; }
 th, td { padding:9px 12px; text-align:left; border-bottom:1px solid var(--line);
          vertical-align:top; font-size:14px; }
-th { color:var(--mute); font-weight:600; white-space:nowrap; }
+th { color:var(--mute); font-weight:600; white-space:nowrap; position:sticky; top:0;
+     background:var(--panel); box-shadow:inset 0 -1px 0 var(--line); }
 tr:last-child td { border-bottom:none; }
 td.num { text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums; }
 .msg { white-space:pre-wrap; word-break:break-word; max-width:720px; }
@@ -62,6 +64,12 @@ td.num { text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums
 input { width:100%; padding:10px 12px; margin:6px 0 14px; border-radius:8px;
         border:1px solid var(--line); background:var(--bg); color:var(--text);
         font-size:15px; }
+summary { cursor:pointer; font-size:16px; margin:0 0 12px; color:var(--mute);
+          text-transform:uppercase; letter-spacing:.06em; }
+summary:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+button:disabled { opacity:.5; cursor:not-allowed; }
+.retry-status { display:block; font-size:13px; margin-top:4px; }
+[aria-busy="true"] button { opacity:.6; }
 button { padding:9px 18px; border:none; border-radius:8px; background:var(--accent);
          color:#08111c; font-weight:600; font-size:15px; cursor:pointer; }
 .center { min-height:100vh; display:flex; align-items:center; justify-content:center; }
@@ -73,7 +81,8 @@ def esc(value: object) -> str:
     return escape("" if value is None else str(value), quote=True)
 
 
-def page(title: str, body: str, *, nav: bool = True) -> str:
+def page(title: str, body: str, *, nav: bool = True, script: str | None = None) -> str:
+    """`script` — путь к своему файлу (`/static/...`): inline-скриптов CSP не пускает."""
     header = (
         f"<header><h1>{esc(title)}</h1><nav>"
         '<a href="/">Обзор</a><a href="/database">База</a>'
@@ -82,6 +91,7 @@ def page(title: str, body: str, *, nav: bool = True) -> str:
         if nav
         else ""
     )
+    tag = f'<script src="{esc(script)}" defer></script>' if script else ""
     return (
         '<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
@@ -90,7 +100,7 @@ def page(title: str, body: str, *, nav: bool = True) -> str:
         '<meta name="robots" content="noindex, nofollow">'
         '<meta name="referrer" content="no-referrer">'
         f"<title>{esc(title)}</title><style>{STYLE}</style></head><body>"
-        f"{header}{body}</body></html>"
+        f"{header}{body}{tag}</body></html>"
     )
 
 
@@ -145,13 +155,32 @@ class Cell:
     html: str
 
 
-def table(headers: list[str], rows: list[list[Cell]]) -> str:
-    """Заголовки и ячейки экранированы: `Cell` иначе не собрать."""
+def table(
+    headers: list[str],
+    rows: list[list[Cell]],
+    *,
+    label: str | None = None,
+    titles: dict[str, str] | None = None,
+) -> str:
+    """Заголовки и ячейки экранированы: `Cell` иначе не собрать.
+
+    С `label` прокручиваемый контейнер становится именованной областью, доступной
+    с клавиатуры: без `tabindex` длинную таблицу нельзя прокрутить стрелками.
+    Без `label` область не размечается: безымянный `role=region` только мешает.
+    `titles` — подсказки к заголовкам колонок (атрибут `title`).
+    """
     if not rows:
         return "<p class='mute'>пусто</p>"
-    head = "".join(f"<th>{esc(name)}</th>" for name in headers)
+    hints = titles or {}
+    head = "".join(
+        f"<th title='{esc(hints[name])}'>{esc(name)}</th>"
+        if name in hints
+        else f"<th>{esc(name)}</th>"
+        for name in headers
+    )
     body = "".join("<tr>" + "".join(_html_of(item) for item in row) + "</tr>" for row in rows)
-    return f"<div class='scroll'><table><tr>{head}</tr>{body}</table></div>"
+    attrs = f" tabindex='0' role='region' aria-label='{esc('Таблица: ' + label)}'" if label else ""
+    return f"<div class='scroll'{attrs}><table><tr>{head}</tr>{body}</table></div>"
 
 
 def _html_of(item: Cell) -> str:
