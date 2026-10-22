@@ -1025,6 +1025,93 @@ async def test_archive_source_recovers_rental_hidden_behind_a_sale_card(
     assert [row["msg_id"] for row in rows] == [7]
 
 
+async def test_reprocessing_a_new_row_rewrites_minimal_signals_to_full(
+    db_session: AsyncSession,
+) -> None:
+    """Строка в `new` с минимальными сигналами после воронки несёт полный набор."""
+    from sniffer.worker.archive import ArchivePipeline
+
+    chat = Chat(tg_id=-100123, title="Байки", city="nha_trang", username="bikes_nha")
+    await ChatRepository(db_session).add(chat)
+    await RawMessageRepository(db_session).add_many(
+        [
+            RawMessage(
+                chat_tg_id=chat.tg_id,
+                msg_id=1,
+                text="Продам Honda Vision 2021, цена 15.000.000 VND, документы есть",
+                text_hash="regate",
+                posted_at=NOW,
+                gate_signals={"reason": "unknown_chat"},
+            )
+        ]
+    )
+    await db_session.commit()
+    row = await RawMessageRepository(db_session).get_by_key(chat.tg_id, 1)
+    assert row is not None and row.stage == "new"
+    assert row.gate_signals == {"reason": "unknown_chat"}
+
+    assert await ArchivePipeline()._one(row, db_session) == 1
+    await db_session.commit()
+
+    done = await RawMessageRepository(db_session).get_by_key(chat.tg_id, 1)
+    assert done is not None and done.stage == "extracted"
+    assert set(done.gate_signals) == {"has_price", "is_offer", "is_demand", "categories", "reason"}
+    assert done.gate_signals["reason"] == "ok"
+    assert "motorbike" in done.gate_signals["categories"]
+
+
+async def test_archive_source_never_returns_rejected_rows(db_session: AsyncSession) -> None:
+    """Отклонённые (минимальные и полные сигналы) не выбираются; extracted — выбирается."""
+    chat = Chat(tg_id=-100123, title="Байки", city="nha_trang", username="bikes_nha")
+    await ChatRepository(db_session).add(chat)
+    text = "АРЕНДА БАЙКОВ в Нячанге, Honda PCX от 150.000 VND в день"
+    minimal, full, extracted = await RawMessageRepository(db_session).add_many(
+        [
+            RawMessage(
+                chat_tg_id=chat.tg_id, msg_id=msg_id, text=text, text_hash=digest, posted_at=NOW
+            )
+            for msg_id, digest in ((1, "rej-min"), (2, "rej-full"), (3, "ok-row"))
+        ]
+    )
+    repo = RawMessageRepository(db_session)
+    await repo.set_stage([minimal], "rejected", gate_signals={"reason": "no_category_hint"})
+    await repo.set_stage(
+        [full],
+        "rejected",
+        gate_signals={
+            "has_price": True,
+            "is_offer": True,
+            "is_demand": False,
+            "categories": ["motorbike"],
+            "reason": "unknown_chat",
+        },
+    )
+    await repo.set_stage(
+        [extracted],
+        "extracted",
+        gate_signals={
+            "has_price": True,
+            "is_offer": True,
+            "is_demand": False,
+            "categories": ["motorbike"],
+            "reason": "ok",
+        },
+    )
+    await db_session.commit()
+
+    rows = await CollectionSourceRepository(db_session).archive(
+        {
+            "city": "nha_trang",
+            "category": "motorbike",
+            "deal_type": "rent_out",
+            "criteria": {"key": "a" * 64},
+        },
+        limit=6,
+    )
+
+    assert [row["msg_id"] for row in rows] == [3]
+
+
 # ── подписки и доставка ─────────────────────────────────────────────────────
 
 

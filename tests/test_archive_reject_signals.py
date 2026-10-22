@@ -7,7 +7,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, ClassVar
 
@@ -75,18 +74,3 @@ async def test_rejection_touches_only_stage_and_signals(recorder: type[_Recorder
     await module.ArchivePipeline()._one(_raw("Ищу байк в аренду на месяц, бюджет 100$"), None)  # type: ignore[arg-type]
 
     assert set(recorder.calls[0]) == {"ids", "stage", "gate_signals"}
-
-
-def test_regating_reads_the_text_not_the_stored_signals() -> None:
-    """Возврат строки в `new` пересчитывает гейт по тексту; прежние сигналы не нужны."""
-    from sniffer.pipeline.archive import classify
-    from sniffer.search import vocabulary
-
-    text = "Продам Honda Vision 2021, цена 15.000.000 VND, документы есть"
-    plain = _raw(text)
-    with_minimal = replace(_raw(text), gate_signals={"reason": "unknown_chat"})
-
-    a = classify(plain, category_hints=vocabulary.category_hints)
-    b = classify(with_minimal, category_hints=vocabulary.category_hints)
-    assert a.passed and b.passed
-    assert a.as_signals() == b.as_signals()
