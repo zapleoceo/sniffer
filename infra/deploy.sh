@@ -39,6 +39,9 @@ deploy.sh [--check] [--force-build] [--summary] [DEPLOY_PATH] [TARGET_REF]
 
   DEPLOY_PATH    по умолчанию /var/www/sniffer
   TARGET_REF     коммит или ветка, по умолчанию origin/master
+
+  SNIFFER_SERVER_BACKUP=on  вернуть серверный cron-дамп БД (по умолчанию выключен:
+                            копия идёт через NAS-поток)
 USAGE
       exit 0
       ;;
@@ -238,12 +241,30 @@ check_schema_sentinels() {
 # 03:00 по часам сервера (он в UTC: 10:00 по Вьетнаму), пользователь root
 # (доступ к сокету docker и право chgrp на verabackup).
 backup_cron_content() {
+  local job="0 3 * * * root bash ${DEPLOY_PATH}/infra/backup/sniffer-pg-backup.sh >>/var/log/sniffer-backup.log 2>&1"
+  echo "# Управляется infra/deploy.sh (шаг «резервная копия БД»): ручные правки перезапишет следующий деплой."
+  if backup_cron_enabled; then
+    echo "# Серверный дамп БД ВКЛЮЧЁН явно (SNIFFER_SERVER_BACKUP=on)."
+  else
+    cat <<'OFF'
+# Серверный дамп БД ВЫКЛЮЧЕН: дамп БД перенесён в NAS-поток (stream sniffer).
+# Включить обратно: SNIFFER_SERVER_BACKUP=on при запуске деплоя (docs/deploy.md, раздел 10).
+# Скрипт и прежние дампы в /var/backups/vera/sniffer не тронуты.
+OFF
+    job="# ${job}"
+  fi
   cat <<CRON
-# Управляется infra/deploy.sh (шаг «резервная копия БД»): ручные правки перезапишет следующий деплой.
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-0 3 * * * root bash ${DEPLOY_PATH}/infra/backup/sniffer-pg-backup.sh >>/var/log/sniffer-backup.log 2>&1
+${job}
 CRON
+}
+
+# Включён ли старый серверный дамп. По умолчанию НЕТ (с 23.10.2026 копию БД ведёт
+# NAS-поток): включает только явное SNIFFER_SERVER_BACKUP=on, любое другое значение
+# или пустота означают «выключено».
+backup_cron_enabled() {
+  [ "${SNIFFER_SERVER_BACKUP:-off}" = "on" ]
 }
 
 # Идемпотентная установка расписания. Возвращает 0 или 1 и называет причину отказа
@@ -256,8 +277,10 @@ install_backup_cron() {
   target="${dir}/sniffer-backup"
 
   # Расписание на несуществующий скрипт тихо падало бы каждую ночь: без скрипта
-  # файл не пишется вовсе.
-  if [ ! -f "$script" ]; then
+  # файл не пишется вовсе. В выключенном режиме задания в файле нет, поэтому
+  # отсутствие скрипта не мешает записать «закомментированный» файл (иначе
+  # старая активная строка осталась бы работать).
+  if backup_cron_enabled && [ ! -f "$script" ]; then
     echo "   нет скрипта резервной копии: ${script}" >&2
     return 1
   fi
@@ -297,7 +320,11 @@ install_backup_cron() {
     echo "   ${target} после записи не совпал с ожидаемым" >&2
     return 1
   fi
-  info "cron резервной копии: ${state} (ежедневно 03:00 UTC, ${target})"
+  if backup_cron_enabled; then
+    info "cron резервной копии: ${state} (ежедневно 03:00 UTC, ${target})"
+  else
+    info "cron резервной копии: ${state}, задание ВЫКЛЮЧЕНО — дамп идёт через NAS-поток (вернуть: SNIFFER_SERVER_BACKUP=on, ${target})"
+  fi
 }
 
 # ── 0. Замок: два деплоя одновременно перетрут друг другу рабочее дерево ─────

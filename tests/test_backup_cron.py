@@ -27,13 +27,17 @@ BACKUP = ROOT / "infra" / "backup" / "sniffer-pg-backup.sh"
 LOG = "/var/log/sniffer-backup.log"
 
 
-def _program(body: str, *, cron_dir: bool = True, has_script: bool = True) -> str:
+def _program(
+    body: str, *, cron_dir: bool = True, has_script: bool = True, mode: str | None = "on"
+) -> str:
     """Подставной корень: `$root/etc/cron.d` и `$root/deploy/infra/backup/<скрипт>`."""
     return "\n".join(
         [
             'info() { echo "INFO: $*"; }',
+            function_source(script(), "backup_cron_enabled"),
             function_source(script(), "backup_cron_content"),
             function_source(script(), "install_backup_cron"),
+            f"export SNIFFER_SERVER_BACKUP={mode}" if mode else "unset SNIFFER_SERVER_BACKUP",
             'root="$(mktemp -d)"',
             """trap 'rm -rf "$root"' EXIT""",
             'export FS_ROOT="$root"',
@@ -47,8 +51,10 @@ def _program(body: str, *, cron_dir: bool = True, has_script: bool = True) -> st
     )
 
 
-def _run(body: str, **kwargs: bool) -> Ran:
-    done = run(_program(body, **kwargs))
+def _run(
+    body: str, *, cron_dir: bool = True, has_script: bool = True, mode: str | None = "on"
+) -> Ran:
+    done = run(_program(body, cron_dir=cron_dir, has_script=has_script, mode=mode))
     assert done is not None
     return done
 
@@ -80,19 +86,21 @@ def test_the_installer_writes_the_cron_file() -> None:
 def test_cron_gets_a_full_path_before_the_job_line() -> None:
     """У cron PATH урезан до /usr/bin:/bin; `docker` и утилиты скрипта должны находиться."""
     lines = function_source(script(), "backup_cron_content").splitlines()
-    paths = [line for line in lines if line.startswith("PATH=")]
+    paths = [line.strip() for line in lines if line.strip().startswith("PATH=")]
 
     assert len(paths) == 1, "в cron-файле должна быть ровно одна строка PATH"
     dirs = paths[0].removeprefix("PATH=").split(":")
     assert {"/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"} <= set(dirs)
-    job = next(i for i, line in enumerate(lines) if "sniffer-pg-backup.sh" in line)
-    assert lines.index(paths[0]) < job, "PATH объявлен после задания и на него не действует"
+    job = next(i for i, line in enumerate(lines) if line.strip() == "${job}")
+    assert next(i for i, line in enumerate(lines) if line.strip() == paths[0]) < job, (
+        "PATH объявлен после задания и на него не действует"
+    )
 
 
 def test_the_job_runs_at_03_00_server_time_utc() -> None:
     content = function_source(script(), "backup_cron_content")
 
-    assert re.search(r"^0 3 \* \* \* root ", content, re.MULTILINE)
+    assert re.search(r'local job="0 3 \* \* \* root ', content, re.MULTILINE)
 
 
 @needs_bash
@@ -127,6 +135,91 @@ def test_nothing_is_staged_after_an_install() -> None:
     done = _run('install_backup_cron >/dev/null; ls -A "$root/etc/cron.d"')
 
     assert done.stdout.split() == ["sniffer-backup"], "во временном файле остался мусор"
+
+
+# ── режим выключено (по умолчанию) и явное включение ─────────────────────────
+
+
+@needs_bash
+@pytest.mark.parametrize("mode", [None, "off", "", "yes", "1"])
+def test_by_default_the_job_line_is_commented_out(mode: str | None) -> None:
+    """Любое значение, кроме точного `on`, оставляет задание выключенным."""
+    done = _run("install_backup_cron; " + SHOW, mode=mode)
+
+    head, content, mode_bits = done.stdout.split("---\n")
+    lines = content.splitlines()
+    assert "RC=0" in head and "ВЫКЛЮЧЕНО" in head
+    active = [
+        ln for ln in lines if ln.strip() and not ln.lstrip().startswith("#") and "=" not in ln
+    ]
+    assert active == [], f"в выключенном файле осталась активная строка: {active}"
+    assert not any(re.match(r"^\s*\d+ \d+ ", ln) for ln in lines)
+    assert any(
+        ln.startswith("# 0 3 * * * root bash ") and "sniffer-pg-backup.sh" in ln for ln in lines
+    )
+    assert "NAS-поток" in content and "SNIFFER_SERVER_BACKUP=on" in content
+    assert mode_bits.strip() == "644"
+
+
+@needs_bash
+def test_an_active_job_is_turned_off_by_the_next_deploy() -> None:
+    """Главное требование: уже стоящий боевой файл заменяется закомментированным."""
+    body = "\n".join(
+        [
+            "SNIFFER_SERVER_BACKUP=on install_backup_cron >/dev/null",
+            'grep -c "^0 3 " "$CRON" || true',
+            "unset SNIFFER_SERVER_BACKUP",
+            'install_backup_cron; echo "RC=$?"',
+            'echo "ACTIVE=$(grep -c "^0 3 " "$CRON" || true)"',
+        ]
+    )
+
+    done = _run(body, mode=None)
+
+    assert "RC=0" in done.stdout and "cron резервной копии: обновлён" in done.stdout
+    assert "ACTIVE=0" in done.stdout
+
+
+@needs_bash
+def test_the_off_state_is_idempotent() -> None:
+    body = "\n".join(
+        [
+            "install_backup_cron >/dev/null",
+            """touch -d '2020-01-01 00:00:00' "$CRON"; before="$(stat -c %Y "$CRON")" """,
+            'install_backup_cron; echo "RC=$?"',
+            'echo "SAME=$([ "$before" = "$(stat -c %Y "$CRON")" ] && echo yes || echo no)"',
+        ]
+    )
+
+    done = _run(body, mode=None)
+
+    assert "RC=0" in done.stdout and "SAME=yes" in done.stdout
+    assert "cron резервной копии: актуален" in done.stdout
+
+
+@needs_bash
+def test_off_mode_does_not_need_the_script_and_still_disables_an_old_job() -> None:
+    """Нет скрипта — задание и так не запускается; старая активная строка всё равно должна уйти."""
+    body = "\n".join(
+        [
+            'echo "0 3 * * * root bash /x/sniffer-pg-backup.sh" > "$CRON"',
+            'install_backup_cron; echo "RC=$?"',
+            'echo "ACTIVE=$(grep -c "^0 3 " "$CRON" || true)"',
+        ]
+    )
+
+    done = _run(body, mode=None, has_script=False)
+
+    assert "RC=0" in done.stdout and "ACTIVE=0" in done.stdout
+
+
+@needs_bash
+def test_the_opt_in_keeps_the_old_active_line() -> None:
+    done = _run("install_backup_cron; " + SHOW, mode="on")
+
+    _, content, _ = done.stdout.split("---\n")
+    assert "ВЫКЛЮЧЕН" not in content
+    assert re.search(r"^0 3 \* \* \* root bash \S+/sniffer-pg-backup\.sh ", content, re.MULTILINE)
 
 
 # ── отказы: громко, кодом возврата, и ничего за собой ────────────────────────
@@ -274,6 +367,7 @@ def test_the_real_installer_without_cron_does_not_abort_the_step() -> None:
     """Те же условия, что на машине без cron: настоящая функция под `set -e`."""
     program = "\n".join(
         [
+            function_source(script(), "backup_cron_enabled"),
             function_source(script(), "backup_cron_content"),
             function_source(script(), "install_backup_cron"),
             'info() { echo "INFO: $*"; }',
