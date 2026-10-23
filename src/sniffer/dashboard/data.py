@@ -74,6 +74,8 @@ INVENTORY_TAIL = 30
 # нужный за хвостом «последних 30» нельзя.
 INVENTORY_RETRYABLE = 50
 INVENTORY_RETRIES = 20
+# Потолок строк скрытого блока (на проде 217 на 23.10); число в заголовке — настоящий count.
+INVENTORY_HIDDEN_REJECTS = 500
 
 
 @dataclass(slots=True)
@@ -125,6 +127,10 @@ class Inventory:
     # и по его длине считать нельзя: карточка «отклонено» годами показывала 30
     # при полутора тысячах строк в таблице.
     reject_counts: dict[str, int] = field(default_factory=dict)
+    # Старые `unresolved` (до reject_reasons.HIDDEN_UNRESOLVED_BEFORE): скрыты под
+    # свёрнутым блоком, не удалены. `rejects` их уже не содержит; `reject_counts` — содержит.
+    hidden_rejects: list[RejectedCandidate] = field(default_factory=list)
+    hidden_rejects_count: int = 0
     # Повтор отказа (docs/dashboard.md, «Повтор отказа»): временные отказы целиком, а не
     # только те, что попали в хвост; решение правила на каждый; журнал попыток.
     temporary_rejects: list[RejectedCandidate] = field(default_factory=list)
@@ -198,7 +204,15 @@ async def inventory(*, now: datetime | None = None) -> Inventory:
             retries=await retries.recent(limit=INVENTORY_RETRIES),
             retries_today=await retries.used_in_window(moment),
             tracked_chats=await ChatRepository(session).count(),
-            rejects=await RejectRepository(session).recent(limit=INVENTORY_TAIL),
+            rejects=await RejectRepository(session).recent(
+                limit=INVENTORY_TAIL, hide_unresolved_before=reject_reasons.HIDDEN_UNRESOLVED_BEFORE
+            ),
+            hidden_rejects=await RejectRepository(session).old_unresolved(
+                reject_reasons.HIDDEN_UNRESOLVED_BEFORE, limit=INVENTORY_HIDDEN_REJECTS
+            ),
+            hidden_rejects_count=await RejectRepository(session).count_old_unresolved(
+                reject_reasons.HIDDEN_UNRESOLVED_BEFORE
+            ),
             reject_counts=await RejectRepository(session).counts_by_reason(),
             raw=await RawMessageRepository(session).recent(limit=INVENTORY_TAIL),
             collection_deliveries=await CollectionTaskRepository(session).recent_deliveries(

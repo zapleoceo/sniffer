@@ -15,6 +15,7 @@ from sqlalchemy.dialects.postgresql import insert
 
 from sniffer.db import models
 from sniffer.db.repositories.base import Repository
+from sniffer.domain import reject_reasons
 from sniffer.domain.join_priority import JoinPriorityPolicy, QueueEntry, order_queue
 from sniffer.domain.records import (
     CandidateState,
@@ -171,6 +172,23 @@ class CandidateRepository(Repository):
         return {str(status): int(total) for status, total in rows}
 
 
+def _old_unresolved(before: datetime) -> Any:
+    return (models.ChatReject.reason == reject_reasons.UNRESOLVED) & (
+        models.ChatReject.rejected_at < before
+    )
+
+
+def _not_hidden(before: datetime) -> Any:
+    """Дополнение к `_old_unresolved`, но без трёхзначной логики: `NOT (a AND b)` на NULL
+    даёт NULL и молча выбросило бы строку. Колонка NOT NULL, а запись на границе и
+    любая другая причина остаются видимыми."""
+    return (
+        models.ChatReject.rejected_at.is_(None)
+        | (models.ChatReject.rejected_at >= before)
+        | (models.ChatReject.reason != reject_reasons.UNRESOLVED)
+    )
+
+
 class RejectRepository(Repository):
     async def contains(self, key: str) -> bool:
         return bool(
@@ -179,15 +197,44 @@ class RejectRepository(Repository):
             )
         )
 
-    async def recent(self, *, limit: int = 50) -> list[RejectedCandidate]:
-        """Кого и почему не взяли. Причина — та же строка, что пишет joiner."""
+    async def recent(
+        self, *, limit: int = 50, hide_unresolved_before: datetime | None = None
+    ) -> list[RejectedCandidate]:
+        """Кого и почему не взяли. Причина — та же строка, что пишет joiner.
+
+        С `hide_unresolved_before` из выборки выпадают `unresolved`, отказанные раньше
+        границы (строго): это только вид, строки остаются в таблице.
+        """
+        query = select(models.ChatReject).order_by(models.ChatReject.rejected_at.desc())
+        if hide_unresolved_before is not None:
+            query = query.where(_not_hidden(hide_unresolved_before))
+        rows = await self._session.scalars(query.limit(limit))
+        return [
+            RejectedCandidate(key=row.key, reason=row.reason, rejected_at=row.rejected_at)
+            for row in rows
+        ]
+
+    async def old_unresolved(
+        self, before: datetime, *, limit: int = 500
+    ) -> list[RejectedCandidate]:
+        """Скрытые старые `unresolved` (rejected_at < before), свежие первыми. Только SELECT."""
         rows = await self._session.scalars(
-            select(models.ChatReject).order_by(models.ChatReject.rejected_at.desc()).limit(limit)
+            select(models.ChatReject)
+            .where(_old_unresolved(before))
+            .order_by(models.ChatReject.rejected_at.desc())
+            .limit(limit)
         )
         return [
             RejectedCandidate(key=row.key, reason=row.reason, rejected_at=row.rejected_at)
             for row in rows
         ]
+
+    async def count_old_unresolved(self, before: datetime) -> int:
+        """Сколько строк скрыто — настоящий count, не длина показанного списка. SELECT."""
+        total = await self._session.scalar(
+            select(func.count()).select_from(models.ChatReject).where(_old_unresolved(before))
+        )
+        return int(total or 0)
 
     async def by_reasons(self, reasons: list[str], *, limit: int = 50) -> list[RejectedCandidate]:
         """Отказы с заданными причинами, свежие первыми (не только хвост всей таблицы)."""

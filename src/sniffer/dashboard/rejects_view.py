@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import secrets
+from datetime import timedelta, timezone
 from urllib.parse import quote
 
 from sniffer.dashboard import data
@@ -29,6 +30,9 @@ CLASS_CSS = {
     RejectClass.PENDING: "bad",
     RejectClass.UNKNOWN: "bad",
 }
+
+# Граница названа по местной дате владельца (00:00 +07:00), хранится в UTC.
+HIDDEN_TZ = timezone(timedelta(hours=7))
 
 RETRY_PATH = "/rejects/{key}/retry"
 SCRIPT_PATH = "/static/database.js"
@@ -51,18 +55,42 @@ def card_label(view: data.Inventory) -> str:
     return f"отклонено (временных: {by_class[RejectClass.TEMPORARY]})"
 
 
+REJECT_HEADERS = ["кандидат", "причина", "класс", "когда", "повтор"]
+
+
 def section(view: data.Inventory, *, csrf: str) -> str:
     shown = len(view.rejects)
     return (
         f"<section><h2>Отклонённые: последние {shown} из {total(view)}</h2>"
         + _breakdown(view)
         + table(
-            ["кандидат", "причина", "класс", "когда", "повтор"],
+            REJECT_HEADERS,
             [_row(item) for item in view.rejects],
             label="Отклонённые кандидаты",
         )
+        + _hidden_block(view)
         + "</section>"
         + _retry_section(view, csrf)
+    )
+
+
+def _hidden_block(view: data.Inventory) -> str:
+    """Свёрнутый блок старых «не найден/сбой»: скрыты, не удалены (решение владельца 23.10)."""
+    if not view.hidden_rejects_count and not view.hidden_rejects:
+        return ""
+    cutoff = reject_reasons.HIDDEN_UNRESOLVED_BEFORE.astimezone(HIDDEN_TZ).strftime("%d.%m.%Y")
+    title = f"Старые «не найден/сбой» до {cutoff}: {view.hidden_rejects_count}"
+    return (
+        f"<details><summary>{esc(title)} — скрыты, не удалены</summary>"
+        "<p class='mute'>Записи сохранены как память дедупа: разведка не проверяет эти "
+        "чаты заново. Удаление не выполняется по решению владельца; в общий счёт и "
+        "разбивку по причинам они входят.</p>"
+        + table(
+            REJECT_HEADERS,
+            [_row(item) for item in view.hidden_rejects],
+            label="Старые отклонённые «не найден/сбой»",
+        )
+        + "</details>"
     )
 
 

@@ -7,8 +7,9 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -18,7 +19,9 @@ from fastapi.testclient import TestClient
 from sniffer.config import reload_settings
 from sniffer.dashboard import app as dashboard_app
 from sniffer.dashboard import auth, data, reauth, views
+from sniffer.db.repositories import RejectRepository
 from sniffer.db.repositories.collection_tasks import CollectionDeliveryState
+from sniffer.domain import reject_reasons
 from sniffer.domain.records import (
     REQUEST_DONE,
     BrokerCall,
@@ -732,6 +735,91 @@ def test_non_temporary_rejects_add_no_controls(
 
     assert "<form" not in body.lower()
     assert "<button" not in body.lower()
+
+
+# ── старые unresolved: свёрнуты, не удалены ─────────────────────────────────
+
+CUTOFF = reject_reasons.HIDDEN_UNRESOLVED_BEFORE
+
+
+def _hidden_inventory() -> data.Inventory:
+    return data.Inventory(
+        stats={"chats": 1, "chats_active": 1, "raw_messages": 1},
+        rejects=[
+            RejectedCandidate(key="@fresh_unresolved", reason="unresolved", rejected_at=CUTOFF),
+            RejectedCandidate(key="@fresh_user", reason="user", rejected_at=NOW),
+        ],
+        hidden_rejects=[
+            RejectedCandidate(
+                key="@old_hidden_1",
+                reason="unresolved",
+                rejected_at=CUTOFF - timedelta(seconds=1),
+            ),
+            RejectedCandidate(
+                key="@old_hidden_2", reason="unresolved", rejected_at=CUTOFF - timedelta(days=9)
+            ),
+        ],
+        hidden_rejects_count=2,
+        reject_counts={"unresolved": 3, "user": 1},
+    )
+
+
+def test_old_unresolved_rejects_sit_in_a_collapsed_details_block(
+    owner: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _serve(monkeypatch, _hidden_inventory())
+    body = owner.get("/database").text
+    start = body.index("Старые «не найден/сбой» до 20.10.2026: 2")
+    block_start = body.rindex("<details", 0, start)
+    block = body[block_start : body.index("</details>", start)]
+
+    assert block.startswith("<details>"), "блок свёрнут: атрибута open нет"
+    assert "скрыты, не удалены" in block and "память дедупа" in block
+    assert "@old_hidden_1" in block and "@old_hidden_2" in block
+    assert "@fresh_unresolved" not in block and "@fresh_user" not in block
+    assert body.count("@old_hidden_1") == 1, "в основной таблице скрытых строк нет"
+
+
+def test_the_boundary_row_and_other_reasons_stay_in_the_main_table(
+    owner: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _serve(monkeypatch, _hidden_inventory())
+    body = owner.get("/database").text
+    details_at = body.index("Старые «не найден/сбой»")
+
+    assert 0 < body.index("@fresh_unresolved") < details_at
+    assert 0 < body.index("@fresh_user") < details_at
+
+
+def test_hiding_does_not_change_totals_or_breakdown(
+    owner: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _serve(monkeypatch, _hidden_inventory())
+    body = owner.get("/database").text
+
+    assert "<b>4</b><span>отклонено" in body
+    assert "последние 2 из 4" in body
+    assert "<td class='num'>3</td>" in body
+
+
+def test_no_hidden_block_without_hidden_rows(
+    owner: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _serve(monkeypatch, _inventory_with_rejects({"unresolved": 3}, tail=3))
+
+    assert "скрыты, не удалены" not in owner.get("/database").text
+
+
+def test_the_cutoff_is_20_october_midnight_in_plus_7() -> None:
+    assert CUTOFF == datetime(2026, 10, 20, 0, 0, tzinfo=timezone(timedelta(hours=7)))
+    assert CUTOFF.utcoffset() == timedelta(0)
+
+
+def test_the_hiding_code_path_only_reads() -> None:
+    """Скрытие — вид, а не чистка: в репозитории отказов нет ни DELETE, ни UPDATE."""
+    source = inspect.getsource(RejectRepository)
+
+    assert "delete(" not in source and "update(" not in source
 
 
 # ── таблицы: прокрутка, подпись, подсказки ──────────────────────────────────
