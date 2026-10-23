@@ -657,6 +657,32 @@ async def test_reject_counts_cover_every_row_not_just_the_tail(db_session: Async
     assert await repo.counts_by_reason() == {"user": 35, "unresolved": 1}
 
 
+async def test_hiding_old_unresolved_is_a_view_and_deletes_nothing(
+    db_session: AsyncSession,
+) -> None:
+    cutoff = datetime(2026, 10, 19, 17, 0, tzinfo=UTC)
+    repo = RejectRepository(db_session)
+    for key, reason, moment in [
+        ("@old", "unresolved", cutoff - timedelta(seconds=1)),
+        ("@edge", "unresolved", cutoff),
+        ("@old_user", "user", cutoff - timedelta(days=5)),
+    ]:
+        await repo.reject(key, reason)
+        await db_session.execute(
+            update(models.ChatReject).where(models.ChatReject.key == key).values(rejected_at=moment)
+        )
+    await db_session.commit()
+
+    visible = await repo.recent(hide_unresolved_before=cutoff)
+    hidden = await repo.old_unresolved(cutoff)
+
+    assert {item.key for item in visible} == {"@edge", "@old_user"}
+    assert [item.key for item in hidden] == ["@old"]
+    assert await repo.count_old_unresolved(cutoff) == 1
+    assert await repo.counts_by_reason() == {"unresolved": 2, "user": 1}, "строки целы"
+    assert {item.key for item in await repo.recent()} == {"@old", "@edge", "@old_user"}
+
+
 # ── уборка сырья по сроку хранения ──────────────────────────────────────────
 
 

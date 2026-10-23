@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 
 
@@ -39,6 +40,16 @@ CLASS_LABEL: dict[RejectClass, str] = {
     RejectClass.PENDING: "ожидание / нужно действие",
     RejectClass.UNKNOWN: "неизвестно",
 }
+
+UNRESOLVED = "unresolved"
+
+# Решение владельца 23.10.2026: старые «не найден/сбой» прячутся на /database под
+# свёрнутый блок, но НЕ удаляются. Граница — 2026-10-20 00:00 +07:00: с 10.2026
+# `unresolved` пишется только на «чата нет» (см. комментарий у "unresolved" ниже),
+# а записи до неё неоднозначны. `chat_rejects.rejected_at` — время ПЕРВОГО отказа
+# (INSERT ... ON CONFLICT DO NOTHING). Строки остаются памятью дедупа разведки
+# (`is_rejected`): удалить их значило бы перепроверять те же чаты. Только вид.
+HIDDEN_UNRESOLVED_BEFORE = datetime(2026, 10, 19, 17, 0, tzinfo=UTC)
 
 _T = RejectClass.TEMPORARY
 _P = RejectClass.PERMANENT

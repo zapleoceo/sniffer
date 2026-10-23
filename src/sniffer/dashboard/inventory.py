@@ -20,6 +20,14 @@ from sniffer.domain.records import CandidateState, JoinEvent, RawMessage
 # сорок строк; здесь достаточно узнать сообщение в лицо.
 TEXT_PREVIEW = 160
 
+COLLECTION_TITLE = "Ответы клиентам после сбора"
+COLLECTION_HINT = (
+    "Ответ клиенту доставлен, если в колонке «доставка» стоит sent и заполнено время "
+    "«отправлен». Строки с failed, cancelled или «не создан» требуют внимания."
+)
+ORDER_HEADER = "порядок чтения"
+RANK_TITLE = "меньше — раньше; все найденные разведкой чаты получают 500, курируемые ≤100"
+
 # Исход вступления → как назвать его человеку. Строки те же, что пишет
 # `JoinLedgerRepository`; неизвестный исход показываем как есть, а не прячем.
 JOIN_KIND = {
@@ -42,7 +50,7 @@ def inventory_page(view: data.Inventory, *, csrf: str, note: str = "") -> str:
         + _raw(view)
         + "</main>"
     )
-    return page("SnifferBot — база", body)
+    return page("SnifferBot — база", body, script=rejects_view.SCRIPT_PATH)
 
 
 def _collection_deliveries(view: data.Inventory) -> str:
@@ -63,10 +71,13 @@ def _collection_deliveries(view: data.Inventory) -> str:
                 cell(moment(state.sent_at)),
             ]
         )
+    delivered = sum(1 for state in view.collection_deliveries if state.delivery_status == "sent")
+    total = len(view.collection_deliveries)
+    counter = f"заданий: {total}, доставлено: {delivered}, без ответа: {total - delivered}"
+    # Свёрнуто по умолчанию (решение владельца): блок вторичен, но ничего не удалено.
     return (
-        "<section><h2>Ответы после сбора</h2>"
-        "<p class='mute'>Задание завершено только тогда, когда ответ создан; "
-        "доставка подтверждена статусом sent и временем отправки.</p>"
+        f"<section><details><summary>{COLLECTION_TITLE} — {counter}</summary>"
+        f"<p class='mute'>{COLLECTION_HINT}</p>"
         + table(
             [
                 "задание",
@@ -81,8 +92,9 @@ def _collection_deliveries(view: data.Inventory) -> str:
                 "отправлен",
             ],
             rows,
+            label=COLLECTION_TITLE,
         )
-        + "</section>"
+        + "</details></section>"
     )
 
 
@@ -150,8 +162,19 @@ def _chats(view: data.Inventory) -> str:
     return (
         "<section><h2>Чаты реестра</h2>"
         + table(
-            ["чат", "название", "город", "активен", "ранг", "собрано", "курсор", "прочитан"],
+            [
+                "чат",
+                "название",
+                "город",
+                "активен",
+                ORDER_HEADER,
+                "собрано",
+                "курсор",
+                "прочитан",
+            ],
             rows,
+            label="Чаты реестра",
+            titles={ORDER_HEADER: RANK_TITLE},
         )
         + "</section>"
     )
@@ -163,6 +186,7 @@ def _queue(view: data.Inventory) -> str:
         + table(
             ["кандидат", "откуда", "приоритет", "статус", "попыток", "найден"],
             [_candidate_row(candidate) for candidate in view.candidates],
+            label="Очередь вступлений",
         )
         + "</section>"
     )
@@ -187,6 +211,7 @@ def _joins(view: data.Inventory) -> str:
         + table(
             ["когда", "исход", "чат", "заглушен", "ошибка заглушки", "пауза до", "стоп до"],
             [_join_row(event) for event in view.joins],
+            label="Журнал вступлений",
         )
         + "</section>"
     )
@@ -213,6 +238,7 @@ def _raw(view: data.Inventory) -> str:
         + table(
             ["опубликовано", "чат", "медиа", "текст"],
             [_raw_row(message) for message in view.raw],
+            label="Последнее сырьё",
         )
         + "</section>"
     )

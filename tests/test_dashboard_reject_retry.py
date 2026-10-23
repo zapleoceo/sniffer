@@ -416,3 +416,103 @@ def test_every_action_leaves_a_log_event_with_the_key_and_the_outcome(
     assert ("dashboard.reject_retry", "ok") in events
     assert ("dashboard.reject_retry_denied", "csrf") in events
     assert ("dashboard.reject_retry", "cooldown") in events
+
+
+# ── режим JSON: повтор без перезагрузки ─────────────────────────────────────
+
+JSON = {"Accept": "application/json"}
+
+
+def post_json(client: TestClient, key: str = "%40t_open", **form: str) -> Any:
+    fields = {"csrf": auth.issue_csrf(), "request_id": "form-token-0001", **form}
+    return client.post(f"/rejects/{key}/retry", data=fields, headers=JSON, follow_redirects=False)
+
+
+def test_json_mode_answers_with_status_and_message_not_a_redirect(
+    owner: TestClient, calls: Calls
+) -> None:
+    response = post_json(owner)
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json() == {
+        "status": "created",
+        "message": "Поставлено в очередь. Ничего не отправлено в Telegram: "
+        "вступит joiner по своим лимитам.",
+    }
+    assert len(calls.retries) == 1
+    assert "content-security-policy" in response.headers
+
+
+def test_plain_form_post_still_redirects(owner: TestClient, calls: Calls) -> None:
+    response = post(owner)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/database?retry=created"
+
+
+def test_json_mode_reports_a_replayed_form(owner: TestClient, calls: Calls) -> None:
+    calls.result = RetryResult(RetryStatus.REPLAYED, OK)
+
+    first = post_json(owner, request_id="same-token-1")
+    second = post_json(owner, request_id="same-token-1")
+
+    assert first.json()["status"] == second.json()["status"] == "replayed"
+    assert "уже была принята" in second.json()["message"]
+    assert [call["idempotency_key"] for call in calls.retries] == ["same-token-1"] * 2
+
+
+@pytest.mark.parametrize("csrf", ["", "garbage"])
+def test_json_mode_csrf_failure_is_403_json(owner: TestClient, calls: Calls, csrf: str) -> None:
+    response = post_json(owner, csrf=csrf)
+
+    assert response.status_code == 403
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json() == {
+        "status": "error",
+        "message": "форма устарела — откройте страницу заново",
+    }
+    assert calls.retries == []
+
+
+def test_json_mode_without_a_session_is_401_json(client: TestClient, calls: Calls) -> None:
+    response = post_json(client)
+
+    assert response.status_code == 401
+    assert response.json()["status"] == "error"
+    assert calls.retries == []
+
+
+def test_json_mode_daily_limit_is_429_with_retry_after(owner: TestClient, calls: Calls) -> None:
+    until = datetime.now(UTC) + timedelta(hours=2)
+    calls.result = RetryResult(
+        RetryStatus.REFUSED,
+        RetryDecision(
+            RetryCode.DAILY_LIMIT, "лимит запросов на сутки исчерпан", available_at=until
+        ),
+    )
+
+    response = post_json(owner)
+
+    assert response.status_code == 429
+    assert 7000 <= int(response.headers["retry-after"]) <= 7200
+    body = response.json()
+    assert body["status"] == "refused"
+    assert "лимит запросов на сутки исчерпан" in body["message"]
+
+
+def test_json_mode_cooldown_is_409_without_retry_after(owner: TestClient, calls: Calls) -> None:
+    calls.result = RetryResult(RetryStatus.REFUSED, COOLDOWN)
+
+    response = post_json(owner)
+
+    assert response.status_code == 409
+    assert "retry-after" not in response.headers
+    assert response.json()["status"] == "refused"
+
+
+def test_form_carries_a_status_element_for_the_script(owner: TestClient, calls: Calls) -> None:
+    body = owner.get("/database").text
+
+    assert body.count("role='status'") == 2
+    assert body.count("<script src=") == 1

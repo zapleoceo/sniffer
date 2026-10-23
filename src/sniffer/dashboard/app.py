@@ -13,11 +13,12 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Annotated
 
 import structlog
 from fastapi import Cookie, FastAPI, Form, Query, Request, Response
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from sniffer.config import get_settings
 from sniffer.dashboard import auth, data, inventory, reauth, views
@@ -87,6 +88,20 @@ REFUSAL_STATUS = {
 }
 
 
+STATIC_DIR = Path(__file__).parent / "static"
+
+
+def _wants_json(request: Request) -> bool:
+    """Скрипт страницы просит JSON; обычная форма без JS получает редирект и HTML."""
+    return "application/json" in request.headers.get("accept", "")
+
+
+def _json(status: int, payload: dict[str, str], headers: dict[str, str] | None = None) -> Response:
+    return JSONResponse(
+        payload, status_code=status, headers={**SECURITY_HEADERS, **(headers or {})}
+    )
+
+
 class Unauthorized(Exception):
     """Cookie нет или она недействительна — показываем только вход."""
 
@@ -126,13 +141,19 @@ def create_app() -> FastAPI:
         return response
 
     @app.exception_handler(Unauthorized)
-    async def _unauthorized(_request: Request, _exc: Unauthorized) -> HTMLResponse:
+    async def _unauthorized(request: Request, _exc: Unauthorized) -> Response:
         # 401 с страницей входа: неавторизованный не видит ни строки данных.
+        if _wants_json(request):
+            return _json(
+                401, {"status": "error", "message": "сессия истекла — откройте страницу заново"}
+            )
         return _html(login_page(get_settings().bot_username), status=401)
 
     @app.exception_handler(auth.AuthError)
-    async def _auth_failed(_request: Request, exc: auth.AuthError) -> HTMLResponse:
+    async def _auth_failed(request: Request, exc: auth.AuthError) -> Response:
         log.warning("dashboard.auth_failed", status=exc.status, reason=exc.message)
+        if _wants_json(request):
+            return _json(exc.status, {"status": "error", "message": exc.message})
         return _html(error_page(exc.status, exc.message), status=exc.status)
 
     @app.exception_handler(Exception)
@@ -148,6 +169,15 @@ def create_app() -> FastAPI:
         `.env`. Ни базы, ни секретов здесь не видно.
         """
         return {"status": "ok", "missing": auth.missing_settings()}
+
+    @app.get("/static/database.js")
+    async def database_script() -> Response:
+        """Скрипт страницы «База»: секретов нет, поэтому без входа."""
+        return Response(
+            (STATIC_DIR / "database.js").read_text(encoding="utf-8"),
+            media_type="text/javascript; charset=utf-8",
+            headers=dict(SECURITY_HEADERS),
+        )
 
     @app.get("/", response_class=HTMLResponse)
     async def overview(sniffer_owner: OwnerCookie = None) -> HTMLResponse:
@@ -168,6 +198,7 @@ def create_app() -> FastAPI:
 
     @app.post("/rejects/{key}/retry", response_class=HTMLResponse)
     async def reject_retry(
+        request: Request,
         key: str,
         csrf: Annotated[str, Form()] = "",
         request_id: Annotated[str, Form()] = "",
@@ -194,7 +225,7 @@ def create_app() -> FastAPI:
             code=result.decision.code.value,
             attempt=result.record.id if result.record else None,
         )
-        return _retry_response(result)
+        return _retry_response(result, as_json=_wants_json(request))
 
     @app.get("/auth/telegram", response_class=HTMLResponse)
     async def telegram_login(request: Request) -> Response:
@@ -304,8 +335,11 @@ def create_app() -> FastAPI:
     return app
 
 
-def _retry_response(result: RetryResult) -> Response:
+def _retry_response(result: RetryResult, *, as_json: bool = False) -> Response:
     if result.status is not RetryStatus.REFUSED:
+        if as_json:
+            note = RETRY_NOTES.get(result.status.value, "Принято.")
+            return _json(200, {"status": result.status.value, "message": note})
         return RedirectResponse(f"/database?retry={result.status.value}", status_code=303)
     status = REFUSAL_STATUS.get(result.decision.code, 409)
     message = result.decision.message
@@ -316,6 +350,12 @@ def _retry_response(result: RetryResult) -> Response:
         if status == 429:
             wait = int((until - datetime.now(UTC)).total_seconds())
             headers["Retry-After"] = str(max(wait, 1))
+    if as_json:
+        return _json(
+            status,
+            {"status": "refused", "message": message},
+            {"Retry-After": headers["Retry-After"]} if "Retry-After" in headers else None,
+        )
     return HTMLResponse(error_page(status, message), status_code=status, headers=headers)
 
 
