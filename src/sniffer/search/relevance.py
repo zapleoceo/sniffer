@@ -9,6 +9,7 @@ from math import exp
 from sniffer.domain.facts_amenities import amenity_facts
 from sniffer.domain.facts_text import fact_text
 from sniffer.domain.fingerprint import normalized
+from sniffer.domain.listing_state import listing_cutoff
 from sniffer.domain.passport import (
     ENGINE_CC_BAND,
     Budget,
@@ -48,19 +49,14 @@ ENGINE_BAND = ENGINE_CC_BAND
 
 _RENTABLE_TRANSPORT = frozenset({Category.MOTORBIKE, Category.CAR, Category.BICYCLE})
 
-# Возраст, после которого лот уходит из живой выдачи. Это не тот порог, что в
+# Возраст, после которого лот уходит из живой выдачи, — общая граница
+# актуальности владельца (`domain.listing_state.listing_cutoff`, 30 суток; правило
+# владельца 22.10.2026: объявление старше 30 дней не актуально). Это не порог
 # `verifier/liveness` (14 дней): там решается, когда ПРЕДУПРЕДИТЬ, и карточка
-# честно говорит «объявлению N дней, могло быть продано» — лот старше двух
-# недель чаще продан, чем нет, но всё ещё бывает жив. Здесь решается другое: с
-# какого возраста показывать лот ВМЕСТО более свежего значит врать. Знание
-# разное, поэтому и число своё, а не производное от чужого.
-#
-# Вдвое дальше порога предупреждения: пометка «могло быть продано» к этому
-# моменту верна дольше, чем лот вообще был живым. Такая жёсткость допустима
-# ровно потому, что подстрахована — если после отсева не осталось ничего,
-# старое показывается всё равно (`rank_items`). Живой повод: 02.09.2026 в
-# выдаче всплыл лот 59-дневной давности.
-LIVE_MAX_AGE_DAYS = 28
+# честно говорит «объявлению N дней, могло быть продано». Здесь — с какого
+# возраста лот не показывается вовсе, и подстраховки «если пусто, покажем старое»
+# нет: пустой ответ честнее неактуального (`bot.wording.NOTHING_FOUND`). Живой
+# повод: 02.09.2026 в выдаче всплыл лот 59-дневной давности.
 # Кросспост с другим хвостом: доля общих содержательных слов и минимум слов в тексте.
 NEAR_DUPLICATE_SIMILARITY = 0.85
 NEAR_DUPLICATE_MIN_WORDS = 12
@@ -107,10 +103,11 @@ def rank_items(
       прямо советует «попробуйте без марки» (`bot.wording.NOTHING_FOUND`), чем пять чужих
       карточек — ровно то, на что жаловался владелец. Неизвестное свойство
       противоречием не считается: лот, не назвавший марку/коробку, остаётся;
-    * **совсем старое** (`_too_old`) — догадка о живости, а не факт о предмете, и
-      лот старше порога всё-таки бывает жив. Поэтому очередь отменяется, когда
-      после неё пусто: пустая выдача хуже слабой, а карточка сама скажет
-      «объявлению N дней, могло быть продано» (`bot/cards.py`).
+    * **старше границы актуальности** (`_too_old`, 30 суток, `listing_cutoff`) —
+      правило владельца 22.10.2026: такое объявление не актуально. Очередь НЕ
+      отменяется: свежего нет — ответ пустой (`bot.wording.NOTHING_FOUND`). Лот до
+      границы, но старше порога живости, показывается с пометкой «объявлению
+      N дней, могло быть продано» (`bot/cards.py`).
 
     Порога по итоговому баллу здесь нет намеренно, хотя в подписке он есть
     (`matching.MATCH_MIN_SCORE`). Там `posted_at` у карточки обязателен, а в
@@ -134,7 +131,8 @@ def rank_items(
     # безразлично: у кросспоста текст один, значит и вердикт `_contradicts` один.
     unique = _dedup(ranked)
     asked_for = [item for item in unique if not _contradicts(item, passport, usd_vnd)]
-    return [item for item in asked_for if not _too_old(item, moment)] or asked_for
+    # Старое не возвращается, даже если свежего нет: правило владельца 22.10.2026.
+    return [item for item in asked_for if not _too_old(item, moment)]
 
 
 def _contradicts(item: RawItem, passport: Passport, usd_vnd: float | None) -> bool:
@@ -507,7 +505,7 @@ def _too_old(item: RawItem, now: datetime) -> bool:
     posted = _posted_utc(item)
     if posted is None:
         return False
-    return (now - posted).days > LIVE_MAX_AGE_DAYS
+    return posted < listing_cutoff(now)
 
 
 def _with_budget(task: SearchTask, budget: dict[str, float | str]) -> SearchTask:

@@ -19,19 +19,21 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
 
 from sniffer.bot.cards import render_cards
 from sniffer.domain.dialogue import Feedback, feedback_buttons, next_question
+from sniffer.domain.listing_state import LISTING_MAX_AGE_DAYS
 from sniffer.domain.passport import Budget, Category, Currency, Intent, Passport
 from sniffer.search.fallback import fallback_plan
 from sniffer.search.intake import merge
 from sniffer.search.intake_rules import detect_brand, detect_model, parse_query, with_model_facts
 from sniffer.search.motorbike_models import BODY_ELECTRIC, BODY_MANUAL, MOTORBIKE_MODELS
-from sniffer.search.relevance import LIVE_MAX_AGE_DAYS, rank_items
+from sniffer.search.relevance import rank_items
 from sniffer.search.vocabulary import (
     model_category,
     model_engine_cc,
@@ -366,12 +368,12 @@ def test_a_two_month_old_lot_loses_to_a_fresh_one() -> None:
     assert shown(wants(model="lead"), [stale, fresh]) == [fresh.title]
 
 
-def test_the_only_lot_is_shown_even_when_it_is_old() -> None:
-    """Пустая выдача хуже слабой, и честность берёт на себя карточка."""
+def test_the_only_lot_is_not_shown_when_it_is_old() -> None:
+    """Правило владельца 22.10.2026: старше 30 суток не актуально, подстраховки нет."""
     stale = lot("Honda Lead 2018", age_days=59)
 
-    assert shown(wants(model="lead"), [stale]) == [stale.title]
-    assert "могло быть продано" in render_cards([stale], now=NOW)
+    assert shown(wants(model="lead"), [stale]) == []
+    assert "могло быть продано" in render_cards([lot("Honda Lead 2018", age_days=20)], now=NOW)
 
 
 def test_the_threshold_is_a_date_not_a_score() -> None:
@@ -386,13 +388,37 @@ def test_the_threshold_is_a_date_not_a_score() -> None:
     assert "дата публикации неизвестна" in render_cards([undated], now=NOW)
 
 
-@pytest.mark.parametrize("age_days", [LIVE_MAX_AGE_DAYS - 1, LIVE_MAX_AGE_DAYS])
+@pytest.mark.parametrize("age_days", [LISTING_MAX_AGE_DAYS - 1, LISTING_MAX_AGE_DAYS])
 def test_a_lot_within_the_threshold_stays(age_days: int) -> None:
-    """Порог отсекает то, что СТАРШЕ его, а не то, что ему равно."""
+    """Порог отсекает то, что СТАРШЕ его, а не то, что ему равно (как `is_stale`)."""
     old = lot("Honda Lead 2019", age_days=age_days)
     fresh = lot("Honda Lead 2022", age_days=1)
 
     assert old.title in shown(wants(model="lead"), [old, fresh])
+
+
+def test_thirty_days_and_one_second_is_not_shown() -> None:
+    edge = lot("Honda Lead edge", age_days=30)
+    over = lot("Honda Lead over", age_days=30 + 1 / 86400)
+
+    assert shown(wants(model="lead"), [edge, over]) == [edge.external_id]
+
+
+def test_all_old_live_results_give_an_empty_answer_without_a_fallback() -> None:
+    """Правило владельца 22.10.2026: свежего нет — старое не подсовываем."""
+    old = [lot(f"Honda Lead {n}", age_days=31 + n) for n in range(3)]
+
+    assert shown(wants(model="lead"), old) == []
+
+
+def test_the_boundary_is_an_instant_not_a_wall_clock() -> None:
+    hanoi = timezone(timedelta(hours=7))
+    edge = lot("Honda Lead edge", age_days=30)
+    over = lot("Honda Lead over", age_days=30 + 1 / 86400)
+    edge = replace(edge, posted_at=edge.posted_at and edge.posted_at.astimezone(hanoi))
+    over = replace(over, posted_at=over.posted_at and over.posted_at.astimezone(hanoi))
+
+    assert shown(wants(model="lead"), [edge, over]) == [edge.external_id]
 
 
 # ── 7. Тот же вывод на ответе модели ────────────────────────────────────────
