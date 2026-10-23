@@ -30,6 +30,13 @@ from sniffer.domain.slots import (
 )
 
 
+class PaidSearch(Exception):
+    """У поиска оплаченное слежение (`expires_at` задан): возврат владельцем не для него."""
+
+    def __init__(self, root: int) -> None:
+        super().__init__(f"root={root}: paid search, use the bot's Следить button")
+
+
 class SlotRepository(Repository):
     async def monitors(self, user_id: int) -> list[Monitor]:
         rows = await self._session.execute(
@@ -142,6 +149,42 @@ class SlotRepository(Repository):
             .values(is_active=True, expires_at=None, no_slot_since=None)
         )
         return Outcome.ENABLE
+
+    async def resume_restored(self, user_id: int, root: int, *, now: datetime) -> int | None:
+        """Включить слежение возвращённого из архива поиска, ничего в нём не переписывая.
+
+        В отличие от `grant` / `grant_watch` НЕ снимает `no_slot_since`: отметку «стоял без права
+        с…» сбросит сам монитор (`MonitorAgent._resume`) и, если пауза длиннее суток, поднимет
+        курсор к «сейчас» (`must_jump_to_head`) — накопленное за архив не вываливается пачкой.
+        Фильтр, история, `since_listing_id`, `scan_listing_id` и приоритет целы. Если отметки паузы
+        нет (строка остановлена, но монитор её ещё не отметил), курсор поднимается здесь же: иначе
+        слот начал бы со старого места. `None` — у поиска нет слежения.
+
+        Только слежение владельца без срока (`expires_at IS NULL`). Оплаченную строку архив
+        «закрывает» пересчётом срока (`sync` ставит `expires_at` на момент архива), и обнулить его
+        значило бы отдать бесплатное слежение навсегда в обход `decide_enable`: такой поиск
+        возвращается кнопкой «Следить» — `PaidSearch`.
+        """
+        await self._lock(user_id)
+        row = await self._session.scalar(
+            select(models.Subscription)
+            .where(
+                models.Subscription.user_id == user_id, models.Subscription.passport_root == root
+            )
+            .execution_options(populate_existing=True)
+        )
+        if row is None:
+            return None
+        if row.expires_at is not None:
+            raise PaidSearch(root)
+        values: dict[str, object] = {"is_active": True}
+        if row.no_slot_since is None and not row.is_active:
+            head = int(await self._session.scalar(select(func.max(models.Listing.id))) or 0)
+            values["scan_listing_id"] = func.greatest(models.Subscription.scan_listing_id, head)
+        await self._session.execute(
+            update(models.Subscription).where(models.Subscription.id == row.id).values(**values)
+        )
+        return row.id
 
     async def move(self, user_id: int, *, to_root: int, from_root: int, now: datetime) -> bool:
         """Слот с `from_root` на `to_root`: порядок меняется, мониторинги остаются."""
