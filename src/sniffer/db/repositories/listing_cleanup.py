@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from sqlalchemy import ColumnElement, delete, exists, func, select, text
-from sqlalchemy.orm import InstrumentedAttribute
+from sqlalchemy.orm import InstrumentedAttribute, aliased
 
 from sniffer.db import models
 from sniffer.db.repositories.base import Repository
@@ -75,7 +75,10 @@ def _shown(listing_id: InstrumentedAttribute[int]) -> ColumnElement[bool]:
 
 
 def _notified(listing_id: InstrumentedAttribute[int]) -> ColumnElement[bool]:
-    return exists().where(models.Notification.listing_id == listing_id)
+    # Псевдоним: иначе `notifications` во внешнем запросе по outbox сольётся с
+    # внутренним и автокорреляция оставит подзапрос без FROM.
+    note = aliased(models.Notification)
+    return exists().where(note.listing_id == listing_id)
 
 
 class StaleListingCleanup(Repository):

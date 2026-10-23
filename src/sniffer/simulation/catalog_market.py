@@ -7,6 +7,11 @@ from datetime import UTC, datetime, timedelta
 
 from sniffer.sources.base import RawItem
 
+# Одна метка на все лоты, от «сейчас»: фиксированная дата сама состарила бы
+# каталог за 30 суток, а разные метки разрушили бы равенство свежести, на
+# котором держится порядок в сценариях.
+POSTED_AT = datetime.now(UTC).replace(microsecond=0) - timedelta(days=2)
+
 
 @dataclass(frozen=True, slots=True)
 class CatalogLot:
@@ -37,8 +42,7 @@ def _lot(
             title=title,
             text=title,
             price_vnd=price_vnd,
-            # Возраст от «сейчас»: фиксированная дата сама состарила бы каталог за 30 суток.
-            posted_at=datetime.now(UTC) - timedelta(days=2),
+            posted_at=POSTED_AT,
             raw={"verified": True, "facts": facts},
         ),
     )
