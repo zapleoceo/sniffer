@@ -3,7 +3,17 @@
 (function () {
   "use strict";
 
-  var MAX_TIMER_SEC = 3600;
+  // Лимит бывает до суток (DAILY_LIMIT). Один длинный setTimeout ненадёжен: во
+  // фоновой или уснувшей вкладке таймеры замирают, поэтому сверяем часы раз в минуту.
+  var CHECK_EVERY_MS = 60000;
+
+  function clock(ms) {
+    var at = new Date(ms);
+    var pad = function (n) {
+      return (n < 10 ? "0" : "") + n;
+    };
+    return pad(at.getHours()) + ":" + pad(at.getMinutes());
+  }
 
   function parseBody(response) {
     return response.text().then(function (text) {
@@ -34,6 +44,18 @@
       if (button) button.disabled = !enable;
     }
 
+    function unlockAt(untilMs) {
+      if (Date.now() >= untilMs) {
+        if (row) row.setAttribute("data-retry-state", "ready");
+        if (button && !inFlight) button.disabled = false;
+        show("Лимит прошёл — можно повторить.", "mute");
+        return;
+      }
+      setTimeout(function () {
+        unlockAt(untilMs);
+      }, Math.min(untilMs - Date.now(), CHECK_EVERY_MS));
+    }
+
     form.addEventListener("submit", function (event) {
       event.preventDefault();
       if (inFlight) return;
@@ -55,14 +77,16 @@
               show(message, "good");
               finish("done", false);
             } else if (response.status === 429) {
+              // Отказ не сохраняет ключ формы, поэтому та же форма после лимита безопасна.
               var wait = parseInt(response.headers.get("Retry-After") || "", 10);
-              show(message, "bad");
               finish("limited", false);
-              if (wait > 0 && wait <= MAX_TIMER_SEC) {
-                setTimeout(function () {
-                  if (button && !inFlight) button.disabled = false;
-                  show("Лимит прошёл — можно повторить.", "mute");
-                }, wait * 1000);
+              if (wait > 0) {
+                var until = Date.now() + wait * 1000;
+                show(message + " Кнопка включится сама около " + clock(until) +
+                  " (по часам этого компьютера).", "bad");
+                unlockAt(until);
+              } else {
+                show(message + " Срок не сообщён — обновите страницу позже.", "bad");
               }
             } else if (response.status >= 500) {
               // Исход неизвестен; тот же request_id не заведёт вторую попытку.
