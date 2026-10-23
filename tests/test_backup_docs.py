@@ -40,7 +40,7 @@ def test_the_section_states_the_defaults_of_the_script() -> None:
 
 def test_the_section_states_the_schedule_and_the_log_of_the_cron_file() -> None:
     content = function_source(script(), "backup_cron_content")
-    job = re.search(r"^(\d+) (\d+) \* \* \* root .*>>(\S+) 2>&1$", content, re.MULTILINE)
+    job = re.search(r'job="(\d+) (\d+) \* \* \* root .*>>(\S+) 2>&1"$', content, re.MULTILINE)
     assert job, "в cron-файле нет строки задания"
     minute, hour, log = job.groups()
 
@@ -54,3 +54,12 @@ def test_every_exit_code_of_the_script_is_in_the_table_of_the_section() -> None:
 
     assert codes == {"1", "2", "3", "4"}, f"коды скрипта изменились: {sorted(codes)}"
     assert documented == codes, "таблица кодов выхода в docs/deploy.md расходится со скриптом"
+
+
+def test_the_section_documents_the_switch_of_the_server_dump() -> None:
+    """Серверный дамп выключен по умолчанию; переключатель и режим описаны в разделе 10."""
+    section = _section()
+
+    assert "SNIFFER_SERVER_BACKUP=on" in section
+    assert "NAS-поток" in section
+    assert "SNIFFER_SERVER_BACKUP" in script()
