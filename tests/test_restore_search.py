@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from sniffer.db.repositories.slots import SlotRepository
+from sniffer.db.repositories.slots import PaidSearch, SlotRepository
 from sniffer.db.repositories.watch import WatchRepository
 from sniffer.worker import restore_search
 
@@ -55,7 +55,8 @@ async def test_the_tab_update_is_conditional_on_archived_and_scoped_to_one_user_
     session = Recorder()
     assert await WatchRepository(session).restore_archived(7, 3)  # type: ignore[arg-type]
     (sql,) = session.sql
-    assert sql.startswith("UPDATE search_tabs SET state='lost'")
+    assert sql.startswith("UPDATE search_tabs SET state=CASE WHEN")
+    assert "message_thread_id IS NOT NULL) THEN 'open' ELSE 'lost' END" in sql
     assert "search_tabs.user_id = 7" in sql and "search_tabs.passport_root = 3" in sql
     assert "search_tabs.state = 'archived'" in sql, "не в архиве — строка не меняется"
 
@@ -86,13 +87,12 @@ async def test_resume_without_a_pause_mark_lifts_the_cursor_to_the_head_itself()
     assert "greatest(subscriptions.scan_listing_id, 500)" in session.sql[-1]
 
 
-async def test_resume_zeroes_only_an_elapsed_term_and_leaves_a_live_one() -> None:
-    lapsed = Recorder(row=monitor(expires_at=NOW - timedelta(days=1)))
-    await SlotRepository(lapsed).resume_restored(7, 3, now=NOW)  # type: ignore[arg-type]
-    assert "expires_at=NULL" in lapsed.sql[-1].replace(" ", "")
-    paid = Recorder(row=monitor(expires_at=NOW + timedelta(days=5)))
-    await SlotRepository(paid).resume_restored(7, 3, now=NOW)  # type: ignore[arg-type]
-    assert "expires_at" not in paid.sql[-1].split(" WHERE ")[0]
+async def test_a_paid_row_is_refused_and_never_written() -> None:
+    """После настоящего архива `sync` ставит оплаченной строке `expires_at` на момент архива."""
+    session = Recorder(row=monitor(expires_at=NOW - timedelta(hours=1)))
+    with pytest.raises(PaidSearch):
+        await SlotRepository(session).resume_restored(7, 3, now=NOW)  # type: ignore[arg-type]
+    assert not any(item.startswith("UPDATE") for item in session.sql)
 
 
 async def test_a_search_without_monitoring_is_not_given_one() -> None:
@@ -109,8 +109,19 @@ class FakeSession:
         self.commits += 1
 
 
-def wire(monkeypatch: pytest.MonkeyPatch, *, user: bool, owns: bool, archived: bool) -> FakeSession:
+def wire(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    user: bool,
+    owns: bool,
+    archived: bool,
+    paid: bool = False,
+    owner: bool = True,
+) -> FakeSession:
     session = FakeSession()
+    monkeypatch.setattr(
+        restore_search, "get_settings", lambda: SimpleNamespace(is_owner=lambda _: owner)
+    )
 
     @asynccontextmanager
     async def scope() -> Any:
@@ -131,13 +142,15 @@ def wire(monkeypatch: pytest.MonkeyPatch, *, user: bool, owns: bool, archived: b
     class Watch:
         def __init__(self, _: Any) -> None: ...
 
-        async def restore_archived(self, *_: Any) -> bool:
-            return archived
+        async def restore_archived(self, *_: Any) -> str | None:
+            return "lost" if archived else None
 
     class Slots:
         def __init__(self, _: Any) -> None: ...
 
         async def resume_restored(self, *_: Any, **__: Any) -> int:
+            if paid:
+                raise PaidSearch(2)
             return 9
 
     for name, fake in (
@@ -161,6 +174,23 @@ async def test_a_foreign_or_missing_search_is_exit_3_and_commits_nothing(
     args = argparse.Namespace(tg_user_id=1, root=2)
     assert await restore_search.restore(args, NOW) == restore_search.EXIT_NOT_FOUND
     assert session.commits == 0
+
+
+async def test_a_non_owner_is_refused_before_any_database_work(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    session = wire(monkeypatch, user=True, owns=True, archived=True, owner=False)
+    assert await restore_search.restore(argparse.Namespace(tg_user_id=1, root=2), NOW) == 3
+    assert session.commits == 0
+    assert "not the owner" in capsys.readouterr().err
+
+
+async def test_a_paid_search_is_exit_3_with_a_reason_and_commits_nothing(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    session = wire(monkeypatch, user=True, owns=True, archived=True, paid=True)
+    assert await restore_search.restore(argparse.Namespace(tg_user_id=1, root=2), NOW) == 3
+    assert session.commits == 0 and "paid search" in capsys.readouterr().err
 
 
 async def test_a_search_that_is_not_archived_is_a_no_op_with_exit_0(

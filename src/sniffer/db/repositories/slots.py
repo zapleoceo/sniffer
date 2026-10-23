@@ -30,6 +30,13 @@ from sniffer.domain.slots import (
 )
 
 
+class PaidSearch(Exception):
+    """У поиска оплаченное слежение (`expires_at` задан): возврат владельцем не для него."""
+
+    def __init__(self, root: int) -> None:
+        super().__init__(f"root={root}: paid search, use the bot's Следить button")
+
+
 class SlotRepository(Repository):
     async def monitors(self, user_id: int) -> list[Monitor]:
         rows = await self._session.execute(
@@ -151,8 +158,12 @@ class SlotRepository(Repository):
         курсор к «сейчас» (`must_jump_to_head`) — накопленное за архив не вываливается пачкой.
         Фильтр, история, `since_listing_id`, `scan_listing_id` и приоритет целы. Если отметки паузы
         нет (строка остановлена, но монитор её ещё не отметил), курсор поднимается здесь же: иначе
-        слот начал бы со старого места. Просроченный срок обнуляется (слежение владельца без
-        платежа); действующий оплаченный не трогается. `None` — у поиска нет слежения.
+        слот начал бы со старого места. `None` — у поиска нет слежения.
+
+        Только слежение владельца без срока (`expires_at IS NULL`). Оплаченную строку архив
+        «закрывает» пересчётом срока (`sync` ставит `expires_at` на момент архива), и обнулить его
+        значило бы отдать бесплатное слежение навсегда в обход `decide_enable`: такой поиск
+        возвращается кнопкой «Следить» — `PaidSearch`.
         """
         await self._lock(user_id)
         row = await self._session.scalar(
@@ -164,11 +175,10 @@ class SlotRepository(Repository):
         )
         if row is None:
             return None
-        lapsed = row.expires_at is not None and row.expires_at <= now
+        if row.expires_at is not None:
+            raise PaidSearch(root)
         values: dict[str, object] = {"is_active": True}
-        if lapsed:
-            values["expires_at"] = None
-        if row.no_slot_since is None and (lapsed or not row.is_active):
+        if row.no_slot_since is None and not row.is_active:
             head = int(await self._session.scalar(select(func.max(models.Listing.id))) or 0)
             values["scan_listing_id"] = func.greatest(models.Subscription.scan_listing_id, head)
         await self._session.execute(
