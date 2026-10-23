@@ -143,6 +143,39 @@ class SlotRepository(Repository):
         )
         return Outcome.ENABLE
 
+    async def resume_restored(self, user_id: int, root: int, *, now: datetime) -> int | None:
+        """Включить слежение возвращённого из архива поиска, ничего в нём не переписывая.
+
+        В отличие от `grant` / `grant_watch` НЕ снимает `no_slot_since`: отметку «стоял без права
+        с…» сбросит сам монитор (`MonitorAgent._resume`) и, если пауза длиннее суток, поднимет
+        курсор к «сейчас» (`must_jump_to_head`) — накопленное за архив не вываливается пачкой.
+        Фильтр, история, `since_listing_id`, `scan_listing_id` и приоритет целы. Если отметки паузы
+        нет (строка остановлена, но монитор её ещё не отметил), курсор поднимается здесь же: иначе
+        слот начал бы со старого места. Просроченный срок обнуляется (слежение владельца без
+        платежа); действующий оплаченный не трогается. `None` — у поиска нет слежения.
+        """
+        await self._lock(user_id)
+        row = await self._session.scalar(
+            select(models.Subscription)
+            .where(
+                models.Subscription.user_id == user_id, models.Subscription.passport_root == root
+            )
+            .execution_options(populate_existing=True)
+        )
+        if row is None:
+            return None
+        lapsed = row.expires_at is not None and row.expires_at <= now
+        values: dict[str, object] = {"is_active": True}
+        if lapsed:
+            values["expires_at"] = None
+        if row.no_slot_since is None and (lapsed or not row.is_active):
+            head = int(await self._session.scalar(select(func.max(models.Listing.id))) or 0)
+            values["scan_listing_id"] = func.greatest(models.Subscription.scan_listing_id, head)
+        await self._session.execute(
+            update(models.Subscription).where(models.Subscription.id == row.id).values(**values)
+        )
+        return row.id
+
     async def move(self, user_id: int, *, to_root: int, from_root: int, now: datetime) -> bool:
         """Слот с `from_root` на `to_root`: порядок меняется, мониторинги остаются."""
         await self._lock(user_id)

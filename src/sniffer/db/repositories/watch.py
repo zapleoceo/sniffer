@@ -99,6 +99,27 @@ class WatchRepository(Repository):
         )
         return True
 
+    async def restore_archived(self, user_id: int, root: int) -> bool:
+        """Владелец возвращает убранный поиск: `archived` → `lost`, остальное не трогаем.
+
+        `lost`, а не `open`: `open` обещает живую тему (`root_of`, `threads_for` ищут по
+        `message_thread_id`), а у убранного поиска её может не быть. `lost` — «связь утрачена»:
+        убранность снята (`not_archived`), поиск снова в списках, тему ему пересоздаст штатный
+        `TabRepository.attach`. Условие в самом UPDATE: поиск не в архиве (или чужой) — ничего
+        не изменено, повтор безопасен. Слежение — отдельно: `SlotRepository.resume_restored`.
+        """
+        restored = await self._session.execute(
+            update(models.SearchTab)
+            .where(
+                models.SearchTab.user_id == user_id,
+                models.SearchTab.passport_root == root,
+                models.SearchTab.state == tabs.ARCHIVED,
+            )
+            .values(state=tabs.LOST)
+            .returning(models.SearchTab.id)
+        )
+        return restored.scalar_one_or_none() is not None
+
     async def _owns(self, user_id: int, root: int) -> bool:
         chain = func.coalesce(models.Passport.root_id, models.Passport.id)
         return bool(
