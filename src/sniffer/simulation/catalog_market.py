@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sniffer.sources.base import RawItem
+
+# Одна метка на все лоты, от «сейчас»: фиксированная дата сама состарила бы
+# каталог за 30 суток, а разные метки разрушили бы равенство свежести, на
+# котором держится порядок в сценариях.
+POSTED_AT = datetime.now(UTC).replace(microsecond=0) - timedelta(days=2)
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,7 +42,7 @@ def _lot(
             title=title,
             text=title,
             price_vnd=price_vnd,
-            posted_at=datetime(2026, 9, 6, 12, tzinfo=UTC),
+            posted_at=POSTED_AT,
             raw={"verified": True, "facts": facts},
         ),
     )

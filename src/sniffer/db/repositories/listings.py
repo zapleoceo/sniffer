@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, cast
 
 from sqlalchemy import Integer, Select, Table, and_, case, func, or_, select, update
@@ -12,7 +12,17 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sniffer.db import models
 from sniffer.db.mappers import to_listing
 from sniffer.db.repositories.base import Repository
-from sniffer.domain.listing_state import REASON_EXPIRED, REASON_SCREEN, REASON_SUPERSEDED
+from sniffer.db.repositories.listing_cleanup import (
+    StaleBatch,
+    StaleListingCleanup,
+    StaleOverview,
+)
+from sniffer.domain.listing_state import (
+    REASON_EXPIRED,
+    REASON_SCREEN,
+    REASON_SUPERSEDED,
+    listing_cutoff,
+)
 from sniffer.domain.records import Listing, MatchFilter
 
 
@@ -238,6 +248,21 @@ class ListingRepository(Repository):
         )
         return int(getattr(result, "rowcount", 0) or 0)
 
+    async def delete_stale(
+        self, cutoff: datetime, batch_size: int, dry_run: bool = True, *, after_id: int = 0
+    ) -> StaleBatch:
+        """Одна пачка уборки старше `cutoff` (по умолчанию — сухая).
+
+        Тонкая обёртка: логика и правила защиты — в `listing_cleanup.py`.
+        """
+        return await StaleListingCleanup(self._session).purge_batch(
+            cutoff, batch_size, after_id=after_id, dry_run=dry_run
+        )
+
+    async def overview_stale(self, cutoff: datetime) -> StaleOverview:
+        """Сколько карточек старше `cutoff` и сколько из них защищено. Только чтение."""
+        return await StaleListingCleanup(self._session).overview(cutoff)
+
     async def retire_unseen(
         self, source: str, *, city: str, category: str, seen: set[str], reason: str
     ) -> int:
@@ -312,15 +337,23 @@ class ListingRepository(Repository):
             .values(category=category, deal_type=deal_type, attributes=dict(attributes))
         )
 
-    async def unscreened(self, source: str, *, limit: int) -> list[Listing]:
+    async def unscreened(
+        self, source: str, *, limit: int, now: datetime | None = None
+    ) -> list[Listing]:
         """Активные карточки, которых модель ещё не читала; свежие первыми —
-        новое объявление важнее хвоста накопленного."""
+        новое объявление важнее хвоста накопленного.
+
+        Старше `LISTING_MAX_AGE_DAYS` в очередь не попадает: модель платная, а
+        такая карточка либо уже погашена, либо будет погашена в ближайший час.
+        """
+        cutoff = listing_cutoff(now or datetime.now(UTC))
         rows = await self._session.scalars(
             select(models.Listing)
             .where(
                 models.Listing.source == source,
                 models.Listing.is_active.is_(True),
                 models.Listing.screened_at.is_(None),
+                models.Listing.posted_at >= cutoff,
             )
             .order_by(models.Listing.posted_at.desc(), models.Listing.id.desc())
             .limit(limit)

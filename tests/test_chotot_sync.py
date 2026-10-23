@@ -85,6 +85,8 @@ def sync(
         store=store,
         retire=retired or Retired(),
         clock=clock,
+        # Фикстура доски — конец августа 2026; на «сейчас» она давно старше срока.
+        now=lambda: datetime(2026, 9, 1, tzinfo=UTC),
     )
 
 
