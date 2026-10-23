@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from sniffer.db.repositories.listing_cleanup import StaleBatch, StaleOverview
 from sniffer.domain.listing_state import LISTING_MAX_AGE_DAYS, is_stale, listing_cutoff
 from sniffer.domain.records import RawMessage
 from sniffer.worker import archive as archive_module
@@ -158,11 +159,79 @@ def test_default_is_a_dry_run() -> None:
         ["--sleep-s", "-1"],
         ["--dry-run", "--dry-run"],
         ["--batch-size"],
+        ["--max-batches", "0"],
+        ["--max-batches", "x"],
+        ["--max-batches", "1", "--max-batches", "2"],
+        ["--execute", "--confirm", "DELETE-STALE-2026-09-22"],
     ],
 )
 def test_bad_arguments_are_a_usage_error(argv: list[str]) -> None:
     with pytest.raises(cli.UsageError):
         cli.parse_options(argv)
+
+
+def test_execute_requires_an_explicit_bound_and_dry_run_does_not() -> None:
+    assert cli.parse_options([]).max_batches is None
+    assert cli.parse_options(["--max-batches=3"]).max_batches == 3
+    with pytest.raises(cli.UsageError, match="max-batches"):
+        cli.parse_options(["--execute", "--confirm", "DELETE-STALE-2026-09-22"])
+    bounded = cli.parse_options(
+        ["--execute", "--max-batches", "1", "--confirm", "DELETE-STALE-2026-09-22"]
+    )
+    assert (bounded.execute, bounded.max_batches) == (True, 1)
+
+
+class FakeSession:
+    async def commit(self) -> None:
+        return None
+
+
+@asynccontextmanager
+async def fake_session() -> AsyncIterator[Any]:
+    yield FakeSession()
+
+
+class FakeRepo:
+    """Три непустые пачки, затем пустая: проверяем только счётчик пачек."""
+
+    calls = 0
+
+    def __init__(self, _: Any) -> None: ...
+
+    async def overview_stale(self, cutoff: datetime) -> StaleOverview:
+        return StaleOverview(9, 0, 0, 0, 9, 0)
+
+    async def delete_stale(
+        self, cutoff: datetime, batch_size: int, dry_run: bool = True, *, after_id: int = 0
+    ) -> StaleBatch:
+        type(self).calls += 1
+        if type(self).calls > 3:
+            return StaleBatch(0, 0, 0, 0, 0, after_id)
+        return StaleBatch(3, 0 if dry_run else 3, 0, 0, 0, after_id + 3)
+
+
+async def test_max_batches_stops_the_pass_and_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "ListingRepository", FakeRepo)
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    async def go(limit: int | None) -> cli.CleanupReport:
+        FakeRepo.calls = 0
+        return await cli.run_cleanup(
+            cli.Options(max_batches=limit, sleep_s=0),
+            cli.CleanupReport(),
+            now=lambda: NOW,
+            sleep=no_sleep,
+            session_factory=fake_session,
+        )
+
+    capped = await go(2)
+    assert (capped.batches, capped.selected, capped.limit_reached) == (2, 6, True)
+    assert "--max-batches" in capped.render()
+    assert FakeRepo.calls == 2, "после лимита в базу больше не ходим"
+    full = await go(None)
+    assert (full.batches, full.limit_reached) == (3, False)
 
 
 def test_confirmation_string_is_bound_to_the_cutoff_date() -> None:
@@ -194,7 +263,7 @@ def test_the_exit_code_for_a_missing_confirmation_is_usage() -> None:
         return await cli.run_cleanup(options, report, now=lambda: NOW, session_factory=no_database)
 
     code = cli.run_stale_cleanup(
-        ["--execute"], runner=runner, out=lambda _: None, err=errors.append
+        ["--execute", "--max-batches", "1"], runner=runner, out=lambda _: None, err=errors.append
     )
 
     assert code == cli.EXIT_USAGE

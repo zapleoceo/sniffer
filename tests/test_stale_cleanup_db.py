@@ -93,12 +93,19 @@ async def run(
     execute: bool,
     batch_size: int = 500,
     confirm: str | None = None,
+    max_batches: int | None = None,
 ) -> cli.CleanupReport:
     async def no_sleep(_: float) -> None:
         return None
 
     return await cli.run_cleanup(
-        cli.Options(execute=execute, confirm=confirm, batch_size=batch_size, sleep_s=0),
+        cli.Options(
+            execute=execute,
+            confirm=confirm,
+            batch_size=batch_size,
+            sleep_s=0,
+            max_batches=max_batches,
+        ),
         cli.CleanupReport(),
         now=lambda: NOW,
         sleep=no_sleep,
@@ -237,7 +244,67 @@ async def test_catalog_projections_are_never_deleted(
     assert await alive(sessions) == {"projection"}
 
 
-async def test_media_and_notifications_go_with_the_card_and_raw_messages_stay(
+async def seed_delivery(
+    sessions: async_sessionmaker[AsyncSession], external_id: str, posted_at: datetime, tg_id: int
+) -> int:
+    """Карточка с медиа, уведомлением и строкой outbox. Возвращает id карточки."""
+    async with sessions() as session:
+        listing = await ListingRepository(session).add(card(external_id, posted_at))
+        assert listing.id is not None
+        user = await UserRepository(session).get_or_create(tg_id)
+        assert user.id is not None
+        passport = await PassportRepository(session).save_new(
+            user.id,
+            Passport(
+                intent=Intent.BUY, category=Category.MOTORBIKE, city="nha_trang", raw_query="q"
+            ),
+        )
+        sub = models.Subscription(user_id=user.id, passport_root=passport.id)
+        session.add(sub)
+        await session.flush()
+        session.add(models.ListingMedia(listing_id=listing.id, r2_key=f"k-{external_id}"))
+        note = models.Notification(subscription_id=sub.id, listing_id=listing.id, score=0.5)
+        session.add(note)
+        await session.flush()
+        session.add(
+            models.Outbox(
+                user_id=user.id, subscription_id=sub.id, notification_id=note.id, payload={}
+            )
+        )
+        await session.commit()
+        return listing.id
+
+
+async def count(sessions: async_sessionmaker[AsyncSession], model: Any) -> int:
+    async with sessions() as session:
+        return int(await session.scalar(select(func.count()).select_from(model)) or 0)
+
+
+async def test_cards_with_delivery_history_are_protected_and_history_is_untouched(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    """Уведомление — память дедупа, outbox — история доставки: не удаляются каскадом."""
+    old = CUTOFF - timedelta(days=3)
+    await seed_delivery(sessions, "notified", old, 9101)
+    await seed(sessions, ("plain", old))
+
+    dry = await run(sessions, execute=False)
+    assert (dry.stale_total, dry.skipped_notifications, dry.selected) == (2, 1, 1)
+    assert dry.outbox_at_risk == 0 and dry.outbox == 0
+
+    report = await run(sessions, execute=True, confirm=CONFIRM)
+
+    assert (report.deleted, report.skipped_notifications) == (1, 1)
+    assert (report.notifications, report.outbox, report.outbox_at_risk) == (0, 0, 0)
+    assert await alive(sessions) == {"notified"}
+    assert await count(sessions, models.Notification) == 1
+    assert await count(sessions, models.Outbox) == 1
+    assert await count(sessions, models.ListingMedia) == 1
+    again = await run(sessions, execute=True, confirm=CONFIRM)
+    assert (again.deleted, again.skipped_notifications) == (0, 1)
+
+
+async def test_stale_card_without_history_goes_with_its_media_and_raw_messages_stay(
     sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     old = CUTOFF - timedelta(days=3)
@@ -251,29 +318,29 @@ async def test_media_and_notifications_go_with_the_card_and_raw_messages_stay(
         )
         listing = await ListingRepository(session).add(card("old", old, raw_message_id=raw_id))
         assert listing.id is not None
-        user = await UserRepository(session).get_or_create(9101)
-        assert user.id is not None
-        passport = await PassportRepository(session).save_new(
-            user.id,
-            Passport(
-                intent=Intent.BUY, category=Category.MOTORBIKE, city="nha_trang", raw_query="q"
-            ),
-        )
-        sub = models.Subscription(user_id=user.id, passport_root=passport.id)
-        session.add(sub)
-        await session.flush()
         session.add(models.ListingMedia(listing_id=listing.id, r2_key="k1"))
         session.add(models.ListingMedia(listing_id=listing.id, r2_key="k2"))
-        session.add(models.Notification(subscription_id=sub.id, listing_id=listing.id, score=0.5))
         await session.commit()
 
     report = await run(sessions, execute=True, confirm=CONFIRM)
 
-    assert (report.deleted, report.media, report.notifications) == (1, 2, 1)
-    async with sessions() as session:
-        for model in (models.Listing, models.ListingMedia, models.Notification):
-            assert await session.scalar(select(func.count()).select_from(model)) == 0
-        assert await session.scalar(select(func.count()).select_from(models.RawMessage)) == 1
+    assert (report.deleted, report.media, report.skipped_notifications) == (1, 2, 0)
+    assert await count(sessions, models.Listing) == 0
+    assert await count(sessions, models.ListingMedia) == 0
+    assert await count(sessions, models.RawMessage) == 1
+
+
+async def test_max_batches_bounds_a_real_pass(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    await seed(sessions, *((f"old{n}", CUTOFF - timedelta(days=n + 1)) for n in range(5)))
+
+    first = await run(sessions, execute=True, confirm=CONFIRM, batch_size=2, max_batches=1)
+
+    assert (first.batches, first.deleted, first.limit_reached) == (1, 2, True)
+    assert len(await alive(sessions)) == 3
+    rest = await run(sessions, execute=True, confirm=CONFIRM, batch_size=2, max_batches=10)
+    assert (rest.deleted, rest.limit_reached) == (3, False)
 
 
 async def test_a_stale_but_active_card_is_still_served_until_expiry_runs(

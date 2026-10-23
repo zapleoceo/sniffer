@@ -12,9 +12,17 @@
   захода, а не датой объявления. В схеме одно от другого не отличить, поэтому
   исключается вся группа;
 * карточка, у которой есть показы (`offer_views`): FK без CASCADE, история квоты
-  клиента не должна исчезать молча.
+  клиента не должна исчезать молча;
+* карточка, у которой есть хоть одна строка `notifications`: это память дедупа
+  по подпискам (`UNIQUE(subscription_id, listing_id)`), а через
+  `outbox.notification_id ON DELETE CASCADE` её удаление унесло бы и историю
+  доставки, которую мы храним намеренно (`infra/sql/001_init.sql`). Защита — так
+  же, как для показов; в отчёте такие карточки считаются отдельно.
 
-Что уходит вместе с карточкой по CASCADE: `listing_media`, `notifications`.
+Что уходит вместе с карточкой по CASCADE: только `listing_media`. Каскад по
+`notifications`/`outbox` для выбранных карточек пуст по построению; отчёт всё
+равно считает такие строки (`outbox` — «сколько было бы затронуто», ожидаемо 0),
+чтобы нарушение защиты было видно, а не предполагалось.
 `catalog_observations` получает SET NULL (но проекции мы и так не трогаем);
 `raw_messages` не затрагиваются: сырьё живёт по своему сроку (`retention`).
 
@@ -46,6 +54,7 @@ class StaleBatch:
     deleted: int
     media: int
     notifications: int
+    outbox: int
     last_id: int
 
 
@@ -56,11 +65,17 @@ class StaleOverview:
     stale_total: int
     protected_catalog: int
     protected_offer_views: int
+    protected_notifications: int
     eligible: int
+    outbox_at_risk: int
 
 
 def _shown(listing_id: InstrumentedAttribute[int]) -> ColumnElement[bool]:
     return exists().where(models.OfferView.listing_id == listing_id)
+
+
+def _notified(listing_id: InstrumentedAttribute[int]) -> ColumnElement[bool]:
+    return exists().where(models.Notification.listing_id == listing_id)
 
 
 class StaleListingCleanup(Repository):
@@ -68,6 +83,7 @@ class StaleListingCleanup(Repository):
         """Разрез по причинам защиты. Только чтение."""
         old = models.Listing.posted_at < cutoff
         shown = _shown(models.Listing.id)
+        notified = _notified(models.Listing.id)
         catalog = models.Listing.catalog_observation_id.is_not(None)
         row = (
             await self._session.execute(
@@ -75,11 +91,23 @@ class StaleListingCleanup(Repository):
                     func.count(),
                     func.count().filter(catalog),
                     func.count().filter(~catalog, shown),
-                    func.count().filter(~catalog, ~shown),
+                    func.count().filter(~catalog, ~shown, notified),
+                    func.count().filter(~catalog, ~shown, ~notified),
                 ).where(old)
             )
         ).one()
-        return StaleOverview(*(int(value) for value in row))
+        # Строки outbox, которые уйдут каскадом вместе с удаляемыми карточками.
+        # Защита по notifications делает это число нулём; оно в отчёте, чтобы
+        # нарушение было видно.
+        outbox = await self._session.scalar(
+            select(func.count())
+            .select_from(models.Outbox)
+            .join(models.Notification, models.Notification.id == models.Outbox.notification_id)
+            .join(models.Listing, models.Listing.id == models.Notification.listing_id)
+            .where(old, ~catalog, ~shown, ~notified)
+        )
+        total, catalog_n, views_n, notified_n, eligible = (int(value) for value in row)
+        return StaleOverview(total, catalog_n, views_n, notified_n, eligible, int(outbox or 0))
 
     async def purge_batch(
         self, cutoff: datetime, batch_size: int, *, after_id: int = 0, dry_run: bool = True
@@ -101,6 +129,7 @@ class StaleListingCleanup(Repository):
                 listing.posted_at.is_not(None),
                 listing.catalog_observation_id.is_(None),
                 ~_shown(listing.id),
+                ~_notified(listing.id),
                 listing.id > after_id,
             )
             .order_by(listing.id)
@@ -110,7 +139,7 @@ class StaleListingCleanup(Repository):
             pick = pick.with_for_update(skip_locked=True)
         ids = list(await self._session.scalars(pick))
         if not ids:
-            return StaleBatch(0, 0, 0, 0, after_id)
+            return StaleBatch(0, 0, 0, 0, 0, after_id)
         media = await self._session.scalar(
             select(func.count())
             .select_from(models.ListingMedia)
@@ -121,13 +150,22 @@ class StaleListingCleanup(Repository):
             .select_from(models.Notification)
             .where(models.Notification.listing_id.in_(ids))
         )
+        outbox = await self._session.scalar(
+            select(func.count())
+            .select_from(models.Outbox)
+            .join(models.Notification, models.Notification.id == models.Outbox.notification_id)
+            .where(models.Notification.listing_id.in_(ids))
+        )
         deleted = 0
         if not dry_run:
-            # Повторное условие на показы — страховка поверх блокировки строк.
+            # Повторные условия на показы и уведомления — страховка поверх
+            # блокировки строк: защищённое не удаляется даже при гонке.
             result = await self._session.execute(
                 delete(listing)
-                .where(listing.id.in_(ids), ~_shown(listing.id))
+                .where(listing.id.in_(ids), ~_shown(listing.id), ~_notified(listing.id))
                 .returning(listing.id)
             )
             deleted = len(result.scalars().all())
-        return StaleBatch(len(ids), deleted, int(media or 0), int(notifications or 0), ids[-1])
+        return StaleBatch(
+            len(ids), deleted, int(media or 0), int(notifications or 0), int(outbox or 0), ids[-1]
+        )

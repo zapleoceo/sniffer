@@ -34,9 +34,11 @@ LISTING_MAX_AGE_DAYS = 30
 def listing_cutoff(now: datetime) -> datetime:
     """Граница актуальности: всё, что опубликовано РАНЬШЕ неё, устарело.
 
-    Одна функция для гашения, воронки, обхода доски, ИИ-проверки и уборки:
-    сравнение строгое (`posted_at < cutoff`), на самой границе карточка жива —
-    так же, как в `ListingRepository.expire`. Наивное время считается UTC.
+    Одна функция для воронки, обхода доски, ИИ-проверки, живого поиска и уборки;
+    сравнение строгое (`posted_at < cutoff`), на самой границе карточка жива.
+    Гашение (`worker/expiry.py`) считает `now - timedelta(days)` само, потому что
+    число дней там настраиваемое, но с той же константой и тем же строгим
+    сравнением. Наивное время считается UTC.
     """
     moment = now if now.tzinfo is not None else now.replace(tzinfo=UTC)
     return moment.astimezone(UTC) - timedelta(days=LISTING_MAX_AGE_DAYS)
