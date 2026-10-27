@@ -59,6 +59,18 @@ def _digest(value: dict[str, Any] | None) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()[:12]
 
 
+def audit_hard_filter_update(
+    subscription_id: int, *, before: dict[str, Any] | None, after: dict[str, Any] | None
+) -> None:
+    """Аудит УСПЕШНОЙ правки: зовётся только после commit и чтения, без содержимого фильтра."""
+    _audit.info(
+        "subscription.hard_filter_updated",
+        subscription=subscription_id,
+        before=_digest(before),
+        after=_digest(after),
+    )
+
+
 class SlotRepository(Repository):
     async def monitors(self, user_id: int) -> list[Monitor]:
         rows = await self._session.execute(
@@ -156,7 +168,9 @@ class SlotRepository(Repository):
         отдаём актуальное значение, чтобы человек сверился и повторил осознанно. Подписку не
         создаёт, не включает и не продлевает (`is_active`, `expires_at`, `no_slot_since`, курсоры
         не трогаются) — этим отличается от `grant`, который перезаписывает всё разом.
-        Аудит — структурный лог без персональных данных: id подписки и хэши до/после.
+        Успех здесь — «строка обновлена В ТРАНЗАКЦИИ», а не «записано»: commit делает вызывающий.
+        Поэтому аудит успеха не пишется тут, а только после подтверждённого commit и реального
+        чтения (`read_hard_filter`, `audit_hard_filter_update`); ложный «успех» при откате исключён.
         """
         before = expected.to_json() if expected is not None else None
         target = models.Subscription.hard_filter
@@ -169,12 +183,6 @@ class SlotRepository(Repository):
             .returning(models.Subscription.id)
         )
         if changed.scalar_one_or_none() is not None:
-            _audit.info(
-                "subscription.hard_filter_updated",
-                subscription=subscription_id,
-                before=_digest(before),
-                after=_digest(new.to_json()),
-            )
             return HardFilterUpdate(applied=True, current=new.to_json())
         row = (
             await self._session.execute(
@@ -187,6 +195,20 @@ class SlotRepository(Repository):
             raise LookupError(f"подписка {subscription_id} не найдена")
         _audit.info("subscription.hard_filter_conflict", subscription=subscription_id)
         return HardFilterUpdate(applied=False, current=row.hard_filter)
+
+    async def read_hard_filter(self, subscription_id: int) -> dict[str, Any] | None:
+        """Настоящее чтение `hard_filter` (новый SELECT). `LookupError` — подписки нет."""
+        row = (
+            await self._session.execute(
+                select(models.Subscription.id, models.Subscription.hard_filter).where(
+                    models.Subscription.id == subscription_id
+                )
+            )
+        ).one_or_none()
+        if row is None:
+            raise LookupError(f"подписка {subscription_id} не найдена")
+        found: dict[str, Any] | None = row.hard_filter
+        return found
 
     async def grant_watch(self, user_id: int, root: int, *, now: datetime) -> Outcome:
         """«Следить» без платежа: мониторинг без срока. Путь владельца, он себе не платит.
