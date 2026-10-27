@@ -1644,6 +1644,43 @@ async def test_catalog_search_filters_by_known_attributes_and_keeps_the_unknown(
     assert "honda-lead" in ids(fresh)
 
 
+async def test_catalog_search_model_spellings_pg1_and_airblade(
+    db_session: AsyncSession,
+) -> None:
+    """PG1 / PG-1 / PG 1 — одна модель в SQL-префильтре (листинг 435947); слитное
+    написание прочих моделей («Airblade») не потеряно; PG10 и PG2 не подмешиваются."""
+    from sniffer.domain.records import MatchFilter
+
+    repo = ListingRepository(db_session)
+    cards = [
+        _catalog_card("pg-attr", title="Yamaha 2024", attributes={"model": "pg-1"}),
+        _catalog_card("pg-text-dash", title="Yamaha PG-1 2024", attributes={}),
+        _catalog_card("pg-text-space", title="Yamaha PG 1", attributes={}),
+        _catalog_card("pg-text-solid", title="Yamaha PG1", attributes={}),
+        _catalog_card("pg10", title="Yamaha PG10", attributes={"model": "pg10"}),
+        _catalog_card("pg2", title="Yamaha PG2", attributes={"model": "pg2"}),
+        _catalog_card("airblade-text", title="Honda Airblade", attributes={}),
+        _catalog_card("airblade-attr", title="Honda", attributes={"model": "air_blade"}),
+        _catalog_card("other", title="Honda Vision", attributes={"model": "vision"}),
+    ]
+    for card in cards:
+        assert await repo.upsert_external(card)
+    await db_session.commit()
+
+    def ids(rows: list[Listing]) -> set[str]:
+        return {str(row.external_id) for row in rows}
+
+    base = MatchFilter(city="nha_trang", category="motorbike", deal_type="sell")
+    for wanted in ("pg1", "PG-1", "PG 1"):
+        found = ids(await repo.search_catalog(replace(base, model=wanted)))
+        assert {"pg-attr", "pg-text-dash", "pg-text-space", "pg-text-solid"} <= found
+        assert "pg2" not in found and "other" not in found
+
+    airblade = ids(await repo.search_catalog(replace(base, model="air_blade")))
+    assert {"airblade-text", "airblade-attr"} <= airblade
+    assert "other" not in airblade
+
+
 async def test_catalog_expiry_retirement_and_liveness_refs(db_session: AsyncSession) -> None:
     """Каталог хранит актуальное: старое гаснет, снятое с доски гаснет, а
     живость перечитывает только свежие карточки своего чата."""
