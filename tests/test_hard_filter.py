@@ -53,16 +53,85 @@ def test_the_conditions_are_read_from_ru_en_vi_text(text: str) -> None:
     "text",
     [
         "Студия, балкон есть",  # кухня не названа отдельной: «неизвестно» = нет
-        "Отдельная кухня, вид на море",  # балкон не назван
         "Без балкона, отдельная кухня",
         "No balcony, separate kitchen",
+        "Không có ban công, bếp riêng",
         "Балкон, кухня-студия",
         "Балкон, без отдельной кухни",
         "Балкон, кухня общая на этаже",
     ],
 )
-def test_unknown_or_negated_conditions_reject_the_card(text: str) -> None:
+def test_unknown_kitchen_or_negated_conditions_reject_the_card(text: str) -> None:
     assert not OWNER.accepts(apartment(text))
+
+
+BALCONY_ONLY = HardFilter(require=frozenset({BALCONY}))
+
+
+def test_balcony_true_passes_without_a_note() -> None:
+    card = apartment("Тихая квартира", balcony=True)
+    assert BALCONY_ONLY.accepts(card)
+    assert BALCONY_ONLY.unconfirmed(card) == ()
+
+
+@pytest.mark.parametrize(
+    "card",
+    [
+        apartment("Тихая квартира", balcony=None),  # NULL
+        apartment("Тихая квартира"),  # ключа нет
+        apartment("Отдельная кухня, вид на море"),
+    ],
+)
+def test_unknown_balcony_passes_with_the_unconfirmed_note(card: Listing) -> None:
+    assert BALCONY_ONLY.accepts(card)
+    assert BALCONY_ONLY.unconfirmed(card) == (BALCONY,)
+
+
+@pytest.mark.parametrize(
+    "card",
+    [
+        apartment("Тихая квартира", balcony=False),
+        apartment("Без балкона"),
+        apartment("No balcony"),
+        apartment("Không có ban công"),
+    ],
+)
+def test_explicit_no_balcony_is_rejected(card: Listing) -> None:
+    assert not BALCONY_ONLY.accepts(card)
+
+
+def test_a_text_mention_confirms_the_balcony_without_a_note() -> None:
+    card = apartment("Большой балкон")
+    assert BALCONY_ONLY.accepts(card)
+    assert BALCONY_ONLY.unconfirmed(card) == ()
+
+
+def test_unknown_separate_kitchen_is_still_a_rejection_even_with_a_balcony() -> None:
+    both = HardFilter(require=frozenset({BALCONY, SEPARATE_KITCHEN}))
+    assert not both.accepts(apartment("Тихая квартира", balcony=True))
+    assert not both.accepts(apartment("Тихая квартира"))
+    assert both.accepts(apartment("Тихая квартира", kitchen="separate"))
+    assert both.unconfirmed(apartment("Тихая квартира", kitchen="separate")) == (BALCONY,)
+
+
+def test_unknown_balcony_does_not_relax_the_place() -> None:
+    placed = HardFilter(require=frozenset({BALCONY}), districts=frozenset({"vinh_hoa"}))
+    assert placed.accepts(apartment("Тихая квартира", district="vinh_hoa"))
+    assert not placed.accepts(apartment("Тихая квартира", district="phuoc_long"))
+    assert not placed.accepts(apartment("Тихая квартира", district=None))
+
+
+def test_the_delivered_card_says_the_balcony_is_unconfirmed() -> None:
+    from sniffer.notifier.delivery import UNCONFIRMED_BALCONY, render
+    from sniffer.worker.monitor_queue import payload
+
+    card = apartment("Тихая квартира")
+    flagged = render(payload(card, unconfirmed=BALCONY_ONLY.unconfirmed(card)))
+    plain = render(payload(card))
+    assert UNCONFIRMED_BALCONY == "⚠ балкон не подтверждён"
+    assert UNCONFIRMED_BALCONY in flagged
+    assert UNCONFIRMED_BALCONY not in plain
+    assert "unconfirmed" not in payload(card)
 
 
 def test_an_attribute_beats_the_text() -> None:

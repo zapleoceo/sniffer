@@ -2,14 +2,19 @@
 
 Обычный отбор слежения («известное ≠ несовпадение», `matching.worth_sending`) мягкий: карточка,
 о балконе которой ничего не известно, проходит, потому что половина объявлений его не пишет.
-Для владельца, который сказал «без отдельной кухни и балкона не присылать», это неверно: неизвестное
-тут равно «нет». Поэтому условия живут отдельно, лежат на ПОДПИСКЕ (`subscriptions.hard_filter`,
+Для владельца, который сказал «без отдельной кухни и балкона не присылать», это неверно: неизвестная
+кухня тут равна «нет» (балкон — исключение, см. ниже).
+Поэтому условия живут отдельно, лежат на ПОДПИСКЕ (`subscriptions.hard_filter`,
 а не в паспорте: правка паспорта их не стирает, а другие клиенты их не видят) и по умолчанию
 отсутствуют — подписка без фильтра ведёт себя как прежде байт в байт.
 
 Что проверяется и откуда берётся знание:
 
-* `balcony` — атрибут `balcony` карточки; нет атрибута — слова текста (ru / en / vi) без отрицания;
+* `balcony` — атрибут `balcony` карточки; нет атрибута — слова текста (ru / en / vi). Три исхода:
+  да (атрибут `true` или слово без отрицания), нет (атрибут `false` или слово под отрицанием —
+  отказ) и НЕИЗВЕСТНО (ни атрибута, ни слова: карточка проходит, а уведомление несёт пометку
+  «балкон не подтверждён», см. `unconfirmed`). Решение владельца: не терять половину рынка, не
+  называющую балкон, но и не выдавать неизвестное за факт;
 * `separate_kitchen` — атрибут `kitchen == "separate"`; `shared` — отказ; нет атрибута — слова
   текста о ОТДЕЛЬНОЙ кухне. Просто «кухня» не годится: она есть в каждой квартире, включая студии;
 * место — `listings.district` из справочника `districts_nha_trang` (слаги) либо, когда справочник
@@ -98,16 +103,27 @@ class HardFilter:
         }
 
     def accepts(self, listing: Listing) -> bool:
-        """Карточка удовлетворяет ВСЕМ условиям. Неизвестное отсеивается, не пропускается."""
+        """Карточка удовлетворяет ВСЕМ условиям. Неизвестное отсеивается — кроме балкона:
+        неизвестный балкон проходит (`unconfirmed`), явное «нет» отсеивается."""
         folded = fold(f"{listing.title}\n{listing.summary}")
         return (
             self._place_ok(listing.district, folded)
-            and (BALCONY not in self.require or _balcony(listing.attributes, folded))
+            and (BALCONY not in self.require or _balcony(listing.attributes, folded) is not False)
             and (
                 SEPARATE_KITCHEN not in self.require
                 or _separate_kitchen(listing.attributes, folded)
             )
         )
+
+    def unconfirmed(self, listing: Listing) -> tuple[str, ...]:
+        """Условия, которые карточка прошла лишь потому, что о них ничего не известно.
+
+        Сейчас только балкон; уведомление обязано сказать об этом клиенту.
+        """
+        if BALCONY not in self.require:
+            return ()
+        folded = fold(f"{listing.title}\n{listing.summary}")
+        return (BALCONY,) if _balcony(listing.attributes, folded) is None else ()
 
     def _place_ok(self, district: str | None, folded: str) -> bool:
         if not self.districts and not self.place_words:
@@ -121,11 +137,14 @@ class HardFilter:
         )
 
 
-def _balcony(attributes: dict[str, Any], folded: str) -> bool:
+def _balcony(attributes: dict[str, Any], folded: str) -> bool | None:
+    """`True` / `False` — известно, `None` — неизвестно (нет атрибута и нет слова в тексте)."""
     known = attributes.get("balcony")
     if isinstance(known, bool):
         return known
-    return _mentioned(_BALCONY, folded)
+    if _mentioned(_BALCONY, folded):
+        return True
+    return False if _BALCONY.search(folded) else None
 
 
 def _separate_kitchen(attributes: dict[str, Any], folded: str) -> bool:
