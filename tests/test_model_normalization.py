@@ -11,7 +11,7 @@ from sqlalchemy.dialects import postgresql
 
 from sniffer.db import models
 from sniffer.db.repositories.listings import _with_attributes
-from sniffer.domain.model_key import model_key, model_spellings
+from sniffer.domain.model_key import model_variants
 from sniffer.domain.passport import Category, Intent, Passport
 from sniffer.domain.records import Listing, MatchFilter
 from sniffer.matching.rules import worth_sending
@@ -55,7 +55,14 @@ def _sql(model: str) -> str:
 
 
 def test_listing_435947_matches_passport_pg1_by_attribute() -> None:
-    card = _listing("Yamaha PG-1 2019", "Продам Yamaha PG-1", brand="yamaha", model="pg-1")
+    """Значения живой карточки: Yamaha PG-1, 2024, 10 000 км, 27 500 000 VND."""
+    card = _listing(
+        "Yamaha PG-1 2024, 10 000 km",
+        "Продам Yamaha PG-1, 2024 год, пробег 10 000 км, 27 500 000 VND",
+        brand="yamaha",
+        model="pg-1",
+        year=2024,
+    )
 
     assert worth_sending(card, _passport("pg1"), now=NOW)
 
@@ -94,19 +101,34 @@ def test_other_models_keep_their_behaviour() -> None:
     assert not worth_sending(_listing("Honda Vision"), _passport("lead"), now=NOW)
 
 
-def test_the_key_joins_only_letter_then_digit() -> None:
-    assert {model_key(v) for v in ("PG1", "PG-1", "PG 1", "pg_1", "pg-1")} == {"pg1"}
-    assert model_key("air blade") == "air blade"
-    assert model_key("PG10") != model_key("PG1")
+def test_airblade_without_attributes_passes_both_gates() -> None:
+    """Регресс ревью: слитное написание не-PG1 модели осталось и в SQL, и в Python."""
+    card = _listing("Honda Airblade 2020")
+
+    assert worth_sending(card, _passport("air_blade"), now=NOW)
+    assert {"air blade", "airblade", "air_blade"} <= model_variants("air_blade")
+
+
+def test_only_the_explicit_alias_list_is_widened() -> None:
+    assert model_variants("pg1") >= {"pg1", "pg-1", "pg 1", "pg_1"}
+    assert "mt15" in model_variants("mt 15")
+    assert "mt-15" not in model_variants("mt15")
+    assert not worth_sending(_listing("Yamaha MT-15"), _passport("mt15"), now=NOW)
+    assert worth_sending(_listing("Yamaha MT15"), _passport("mt15"), now=NOW)
 
 
 def test_sql_prefilter_accepts_every_spelling_of_pg1() -> None:
-    assert model_spellings("pg1") >= {"pg1", "pg-1", "pg 1"}
-    for wanted in ("pg1", "PG-1", "PG 1"):
+    for wanted in ("pg1", "PG-1", "PG 1", "pg_1"):
         sql = _sql(wanted)
         assert "lower((listings.attributes ->> 'model')) IN" in sql
-        assert "'pg-1'" in sql
-        assert "'pg1'" in sql
+        for spelling in ("pg1", "pg-1", "pg 1", "pg_1"):
+            assert f"'{spelling}'" in sql
+
+
+def test_sql_prefilter_keeps_every_old_spelling_of_other_models() -> None:
+    sql = _sql("air_blade")
+    for spelling in ("air blade", "airblade", "air_blade"):
+        assert f"'{spelling}'" in sql
 
 
 def test_sql_prefilter_does_not_gain_other_models() -> None:

@@ -23,7 +23,7 @@ from sniffer.domain.listing_state import (
     REASON_SUPERSEDED,
     listing_cutoff,
 )
-from sniffer.domain.model_key import model_spellings
+from sniffer.domain.model_key import model_variants
 from sniffer.domain.records import Listing, MatchFilter
 
 
@@ -467,9 +467,9 @@ def _with_attributes(statement: Select[Any], spec: MatchFilter) -> Select[Any]:
         # атрибутах либо слова в тексте, слитно и раздельно — «air blade» и
         # «airblade» одно имя). Окончательно судит `rank_items` тем же
         # знанием о написаниях, что читает запрос клиента.
-        # Написания одного имени («pg1» / «pg-1» / «pg 1») сводит `model_key`; та
-        # же функция стоит в `matching.rules`, чтобы оба фильтра не расходились.
-        spellings = sorted(model_spellings(spec.model))
+        # Написания (слитно/раздельно + `CANONICAL_ALIASES`) даёт `model_key`; те же
+        # стоят в `matching.rules`, чтобы оба фильтра не расходились.
+        spellings = sorted(model_variants(spec.model))
         haystack = func.lower(models.Listing.title + " " + models.Listing.summary)
         statement = statement.where(
             or_(
