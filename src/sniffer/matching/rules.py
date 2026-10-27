@@ -19,7 +19,7 @@ from datetime import UTC, datetime, timedelta
 from math import exp
 
 from sniffer.domain.match_filter import build_match_filter, ceiling_vnd
-from sniffer.domain.model_key import model_word_forms, model_words
+from sniffer.domain.model_key import model_aliases, model_words
 from sniffer.domain.passport import (
     HOUSING_PREFERENCES_KEY,
     Currency,
@@ -96,8 +96,9 @@ def worth_sending(listing: Listing, passport: Passport, *, now: datetime | None 
 
 
 def _listing_has_model(listing: Listing, wanted: str) -> bool:
-    """Модель названа в карточке: те же написания, что у SQL-префильтра (`model_key`)."""
-    forms = model_word_forms(wanted)
+    """Модель названа в карточке. Точная фраза; для PG1 — ещё его явные синонимы."""
+    forms = {model_words(wanted), *(model_words(alias) for alias in model_aliases(wanted))}
+    forms.discard("")
     actual = str(listing.attributes.get("model") or "")
     if actual and model_words(actual) in forms:
         return True

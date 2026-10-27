@@ -23,7 +23,7 @@ from sniffer.domain.listing_state import (
     REASON_SUPERSEDED,
     listing_cutoff,
 )
-from sniffer.domain.model_key import model_variants
+from sniffer.domain.model_key import model_aliases
 from sniffer.domain.records import Listing, MatchFilter
 
 
@@ -467,15 +467,18 @@ def _with_attributes(statement: Select[Any], spec: MatchFilter) -> Select[Any]:
         # атрибутах либо слова в тексте, слитно и раздельно — «air blade» и
         # «airblade» одно имя). Окончательно судит `rank_items` тем же
         # знанием о написаниях, что читает запрос клиента.
-        # Написания (слитно/раздельно + `CANONICAL_ALIASES`) даёт `model_key`; те же
-        # стоят в `matching.rules`, чтобы оба фильтра не расходились.
-        spellings = sorted(model_variants(spec.model))
+        # Прежнее условие без изменений; шире оно становится только у моделей из
+        # `CANONICAL_ALIASES` (PG1) — те же синонимы, что в `matching.rules`.
+        phrase = spec.model.replace("_", " ").casefold()
+        aliases = sorted(model_aliases(spec.model))
         haystack = func.lower(models.Listing.title + " " + models.Listing.summary)
         statement = statement.where(
             or_(
                 attrs["model"].astext == spec.model,
-                func.lower(attrs["model"].astext).in_(spellings),
-                *(haystack.contains(spelling) for spelling in spellings),
+                haystack.contains(phrase),
+                haystack.contains(phrase.replace(" ", "")),
+                *([func.lower(attrs["model"].astext).in_(aliases)] if aliases else []),
+                *(haystack.contains(alias) for alias in aliases),
             )
         )
     if spec.engine_cc_min is not None or spec.engine_cc_max is not None:

@@ -11,7 +11,7 @@ from sqlalchemy.dialects import postgresql
 
 from sniffer.db import models
 from sniffer.db.repositories.listings import _with_attributes
-from sniffer.domain.model_key import model_variants
+from sniffer.domain.model_key import model_aliases
 from sniffer.domain.passport import Category, Intent, Passport
 from sniffer.domain.records import Listing, MatchFilter
 from sniffer.matching.rules import worth_sending
@@ -101,20 +101,20 @@ def test_other_models_keep_their_behaviour() -> None:
     assert not worth_sending(_listing("Honda Vision"), _passport("lead"), now=NOW)
 
 
-def test_airblade_without_attributes_passes_both_gates() -> None:
-    """Регресс ревью: слитное написание не-PG1 модели осталось и в SQL, и в Python."""
-    card = _listing("Honda Airblade 2020")
-
-    assert worth_sending(card, _passport("air_blade"), now=NOW)
-    assert {"air blade", "airblade", "air_blade"} <= model_variants("air_blade")
+def test_non_pg1_python_gate_behaves_as_before() -> None:
+    """Не-PG1: точная фраза, как на master. Слитное написание Python не принимает."""
+    assert not worth_sending(_listing("Honda Airblade"), _passport("air_blade"), now=NOW)
+    assert not worth_sending(_listing("Honda", model="airblade"), _passport("air_blade"), now=NOW)
+    assert not worth_sending(_listing("Honda", model="mt15"), _passport("mt 15"), now=NOW)
+    assert not worth_sending(_listing("Yamaha MT-15"), _passport("mt15"), now=NOW)
+    assert worth_sending(_listing("Yamaha MT15"), _passport("mt15"), now=NOW)
+    assert worth_sending(_listing("Honda Air Blade"), _passport("air_blade"), now=NOW)
 
 
 def test_only_the_explicit_alias_list_is_widened() -> None:
-    assert model_variants("pg1") >= {"pg1", "pg-1", "pg 1", "pg_1"}
-    assert "mt15" in model_variants("mt 15")
-    assert "mt-15" not in model_variants("mt15")
-    assert not worth_sending(_listing("Yamaha MT-15"), _passport("mt15"), now=NOW)
-    assert worth_sending(_listing("Yamaha MT15"), _passport("mt15"), now=NOW)
+    assert model_aliases("PG-1") == {"pg1", "pg-1", "pg 1", "pg_1"}
+    assert model_aliases("mt15") == frozenset()
+    assert model_aliases("air_blade") == frozenset()
 
 
 def test_sql_prefilter_accepts_every_spelling_of_pg1() -> None:
@@ -125,10 +125,13 @@ def test_sql_prefilter_accepts_every_spelling_of_pg1() -> None:
             assert f"'{spelling}'" in sql
 
 
-def test_sql_prefilter_keeps_every_old_spelling_of_other_models() -> None:
+def test_sql_prefilter_for_other_models_is_exactly_the_old_one() -> None:
+    """Прежний SQL: точный атрибут + фраза + слитная фраза, без lower(...) IN."""
     sql = _sql("air_blade")
-    for spelling in ("air blade", "airblade", "air_blade"):
-        assert f"'{spelling}'" in sql
+    assert "IN (" not in sql
+    assert "'air blade'" in sql and "'airblade'" in sql
+    assert "'pg-1'" not in sql
+    assert "IN (" not in _sql("mt15")
 
 
 def test_sql_prefilter_does_not_gain_other_models() -> None:

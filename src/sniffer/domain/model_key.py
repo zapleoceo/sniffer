@@ -5,10 +5,9 @@
 `matching.rules` обязаны считать одно и то же именем, иначе подписка `pg1` не
 находит «Yamaha PG-1» (листинг 435947).
 
-Правило ОДНО и явное: слитные и раздельные написания любой модели («air blade» —
-«airblade», как всегда делал SQL) плюс закрытый список синонимов
-`CANONICAL_ALIASES`. Общего правила «буква+цифра» нет намеренно: оно задело бы
-чужие модели (mt15, cb1000r). Новый синоним — одна строка словаря и тест.
+Расширяются ТОЛЬКО модели из закрытого списка `CANONICAL_ALIASES`. Для прочих
+каждый гейт ведёт себя как раньше, общего правила «буква+цифра» нет намеренно:
+оно задело бы чужие модели (mt15, cb1000r). Новый синоним — строка словаря и тест.
 """
 
 from __future__ import annotations
@@ -29,18 +28,14 @@ def model_words(value: str) -> str:
     return _NON_WORD.sub(" ", value.casefold().replace("_", " ")).strip()
 
 
-def model_variants(value: str) -> frozenset[str]:
-    """Написания модели для SQL (нижний регистр): исходное, словами, слитное и синонимы."""
-    original = value.strip().casefold()
-    phrase = original.replace("_", " ")
-    forms = {original, phrase, phrase.replace(" ", "")}
+def model_aliases(value: str) -> frozenset[str]:
+    """Явные синонимы модели (нижний регистр) или пустой набор.
+
+    Только для моделей из `CANONICAL_ALIASES`; у всех остальных оба фильтра ведут
+    себя как раньше (SQL: исходная фраза и слитная, Python: точная фраза).
+    """
     words = model_words(value)
     for aliases in CANONICAL_ALIASES.values():
         if words in {model_words(alias) for alias in aliases}:
-            forms |= aliases
-    return frozenset(form for form in forms if form)
-
-
-def model_word_forms(value: str) -> frozenset[str]:
-    """То же в `model_words`-виде — для сравнения с атрибутом и поиска в тексте."""
-    return frozenset(form for form in (model_words(v) for v in model_variants(value)) if form)
+            return aliases
+    return frozenset()
