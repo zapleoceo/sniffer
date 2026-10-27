@@ -102,11 +102,10 @@ async def run(args: argparse.Namespace) -> int:
 def answer(err: BaseException) -> int:
     """Документированный код на любую поломку; успех не изображается.
 
-    Единственное, что не наше, — `SystemExit` (argparse: код 2 и прочие чужие) и `GeneratorExit`.
+    Не наше — `SystemExit` (в т.ч. `SystemExit(2)` от argparse) и `GeneratorExit`:
+    пробрасываются тем же объектом.
     Текст исключения не печатается: у базы он несёт параметры запроса (`class_chain`).
     """
-    if isinstance(err, SystemExit):
-        return err.code if isinstance(err.code, int) else EXIT_USAGE
     reraise_if_not_ours(err)
     if is_interrupt(err):
         sys.stderr.write("прервано: результат не подтверждён, сверьте фильтр чтением\n")

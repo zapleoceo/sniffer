@@ -313,3 +313,29 @@ def test_an_unexpected_error_outside_the_database_step_is_also_a_code(
     monkeypatch.setattr(update_hard_filter, "parse", boom)
 
     assert update_hard_filter.main([]) == update_hard_filter.EXIT_FAILURE
+
+
+@pytest.mark.parametrize(
+    "request_to_stop", [SystemExit(), SystemExit(7), SystemExit("foreign shutdown")]
+)
+def test_a_foreign_system_exit_leaves_main_as_the_same_object(
+    monkeypatch: pytest.MonkeyPatch, request_to_stop: SystemExit
+) -> None:
+    _wire(monkeypatch, commit_error=request_to_stop)
+
+    with pytest.raises(SystemExit) as raised:
+        update_hard_filter.main(_argv())
+
+    assert raised.value is request_to_stop
+
+
+def test_argparse_keeps_its_ordinary_behaviour(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as bad:
+        update_hard_filter.main(["--subscription-id", "x"])
+    assert bad.value.code == 2
+    assert "usage" in capsys.readouterr().err
+
+    with pytest.raises(SystemExit) as helped:
+        update_hard_filter.main(["--help"])
+    assert helped.value.code == 0
+    assert "--expect-json" in capsys.readouterr().out
