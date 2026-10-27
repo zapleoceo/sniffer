@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 from math import exp
 
 from sniffer.domain.match_filter import build_match_filter, ceiling_vnd
+from sniffer.domain.model_key import model_key, model_text_pattern, model_words
 from sniffer.domain.passport import (
     HOUSING_PREFERENCES_KEY,
     Currency,
@@ -95,16 +96,13 @@ def worth_sending(listing: Listing, passport: Passport, *, now: datetime | None 
 
 
 def _listing_has_model(listing: Listing, wanted: str) -> bool:
+    """Модель названа в карточке: «pg1», «PG-1» и «PG 1» — одно имя, «pg10» — другое."""
+    wanted_key = model_key(wanted)
     actual = str(listing.attributes.get("model") or "")
-    wanted_words = _model_words(wanted)
-    if actual and _model_words(actual) == wanted_words:
+    if actual and model_key(actual) == wanted_key:
         return True
-    haystack = _model_words(f"{listing.title} {listing.summary}")
-    return bool(wanted_words and re.search(rf"(?<!\w){re.escape(wanted_words)}(?!\w)", haystack))
-
-
-def _model_words(value: str) -> str:
-    return re.sub(r"[^\w]+", " ", value.casefold().replace("_", " ")).strip()
+    haystack = model_words(f"{listing.title} {listing.summary}")
+    return bool(wanted_key and re.search(rf"(?<!\w){model_text_pattern(wanted)}(?!\w)", haystack))
 
 
 def _known_attribute_conflicts(listing: Listing, passport: Passport) -> bool:

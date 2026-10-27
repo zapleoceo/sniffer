@@ -23,6 +23,7 @@ from sniffer.domain.listing_state import (
     REASON_SUPERSEDED,
     listing_cutoff,
 )
+from sniffer.domain.model_key import model_spellings
 from sniffer.domain.records import Listing, MatchFilter
 
 
@@ -466,13 +467,15 @@ def _with_attributes(statement: Select[Any], spec: MatchFilter) -> Select[Any]:
         # атрибутах либо слова в тексте, слитно и раздельно — «air blade» и
         # «airblade» одно имя). Окончательно судит `rank_items` тем же
         # знанием о написаниях, что читает запрос клиента.
-        phrase = spec.model.replace("_", " ").casefold()
+        # Написания одного имени («pg1» / «pg-1» / «pg 1») сводит `model_key`; та
+        # же функция стоит в `matching.rules`, чтобы оба фильтра не расходились.
+        spellings = sorted(model_spellings(spec.model))
         haystack = func.lower(models.Listing.title + " " + models.Listing.summary)
         statement = statement.where(
             or_(
                 attrs["model"].astext == spec.model,
-                haystack.contains(phrase),
-                haystack.contains(phrase.replace(" ", "")),
+                func.lower(attrs["model"].astext).in_(spellings),
+                *(haystack.contains(spelling) for spelling in spellings),
             )
         )
     if spec.engine_cc_min is not None or spec.engine_cc_max is not None:
