@@ -19,9 +19,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import structlog
-from sqlalchemy import cast as sql_cast
 from sqlalchemy import func, select, update
-from sqlalchemy.dialects.postgresql import JSONB
 
 from sniffer.db import models
 from sniffer.db.repositories.base import Repository
@@ -162,9 +160,8 @@ class SlotRepository(Repository):
         """
         before = expected.to_json() if expected is not None else None
         target = models.Subscription.hard_filter
-        matches = (
-            target.is_(None) if before is None else target == sql_cast(json.dumps(before), JSONB)
-        )
+        # Словарь, а не строка в CAST: тип JSONB у колонки сам сериализует параметр один раз.
+        matches = target.is_(None) if before is None else target == before
         changed = await self._session.execute(
             update(models.Subscription)
             .where(models.Subscription.id == subscription_id, matches)

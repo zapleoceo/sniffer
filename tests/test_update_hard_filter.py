@@ -60,7 +60,7 @@ async def test_the_update_sets_only_the_hard_filter_column_and_compares_the_old_
     assert set_clause.strip().startswith("hard_filter")
     for column in ("is_active", "expires_at", "no_slot_since", "listing_id"):
         assert column not in set_clause
-    assert "CAST" in sql and "subscriptions.id =" in sql
+    assert "subscriptions.hard_filter =" in sql and "subscriptions.id =" in sql
     assert result.applied and result.current == NEW.to_json()
 
 
