@@ -144,6 +144,11 @@ def test_the_policy_survives_a_json_round_trip_and_is_absent_otherwise() -> None
         {"require": ["balcony"], "allow_unknown": ["balcon"]},
         {"require": ["balcony"], "allow_unknown": "balcony"},
         {"require": ["balcony"], "allow_unknown": [1]},
+        {"require": ["balcony"], "allow_unknown": False},
+        {"require": ["balcony"], "allow_unknown": 0},
+        {"require": ["balcony"], "allow_unknown": ""},
+        {"require": ["balcony"], "allow_unknown": {}},
+        {"require": ["balcony"], "allow_unknown": None},
         {"require": ["separate_kitchen"], "allow_unknown": ["balcony"]},
     ],
 )

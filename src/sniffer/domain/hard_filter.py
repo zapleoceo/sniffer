@@ -100,7 +100,9 @@ class HardFilter:
         words = tuple(fold(str(word)).strip() for word in raw.get("place_words") or ())
         if any(not word for word in words):
             raise ValueError("hard_filter: пустое слово-адрес")
-        allowed = raw.get("allow_unknown") or []
+        # Ключа нет — политики нет. Ключ передан — значение обязано быть списком строк: false,
+        # 0, "", {} и null НЕ приравниваются к «нет политики»: иначе мусор обошёл бы карантин.
+        allowed = raw.get("allow_unknown", [])
         if not isinstance(allowed, list) or not all(isinstance(item, str) for item in allowed):
             raise ValueError("hard_filter: allow_unknown должен быть списком строк")
         allow_unknown = frozenset(allowed)
@@ -122,8 +124,9 @@ class HardFilter:
         return data
 
     def accepts(self, listing: Listing) -> bool:
-        """Карточка удовлетворяет ВСЕМ условиям. Неизвестное отсеивается — кроме балкона:
-        неизвестный балкон проходит (`unconfirmed`), явное «нет» отсеивается."""
+        """Карточка удовлетворяет ВСЕМ условиям. Неизвестное отсеивается; исключение одно —
+        неизвестный балкон у фильтра с `allow_unknown: ["balcony"]` (проходит, см. `unconfirmed`).
+        Явное «нет» отсеивается всегда."""
         folded = fold(f"{listing.title}\n{listing.summary}")
         return (
             self._place_ok(listing.district, folded)
