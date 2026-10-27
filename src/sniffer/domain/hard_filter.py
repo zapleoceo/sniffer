@@ -3,13 +3,19 @@
 Обычный отбор слежения («известное ≠ несовпадение», `matching.worth_sending`) мягкий: карточка,
 о балконе которой ничего не известно, проходит, потому что половина объявлений его не пишет.
 Для владельца, который сказал «без отдельной кухни и балкона не присылать», это неверно: неизвестное
-тут равно «нет». Поэтому условия живут отдельно, лежат на ПОДПИСКЕ (`subscriptions.hard_filter`,
+тут равно «нет» (для балкона подписка может явно разрешить неизвестное — `allow_unknown`).
+Поэтому условия живут отдельно, лежат на ПОДПИСКЕ (`subscriptions.hard_filter`,
 а не в паспорте: правка паспорта их не стирает, а другие клиенты их не видят) и по умолчанию
 отсутствуют — подписка без фильтра ведёт себя как прежде байт в байт.
 
 Что проверяется и откуда берётся знание:
 
-* `balcony` — атрибут `balcony` карточки; нет атрибута — слова текста (ru / en / vi) без отрицания;
+* `balcony` — атрибут `balcony` карточки; нет атрибута — слова текста (ru / en / vi). Исходы: да
+  (атрибут `true` или слово без отрицания), нет (атрибут `false` или слово под отрицанием — отказ)
+  и НЕИЗВЕСТНО (ни атрибута, ни слова). По умолчанию неизвестное — отказ. Только у фильтра с
+  `"allow_unknown": ["balcony"]` неизвестное проходит, а уведомление несёт пометку «балкон не
+  подтверждён» (`unconfirmed`). Атрибут главнее текста: `balcony=true` проходит и при отрицании
+  в тексте;
 * `separate_kitchen` — атрибут `kitchen == "separate"`; `shared` — отказ; нет атрибута — слова
   текста о ОТДЕЛЬНОЙ кухне. Просто «кухня» не годится: она есть в каждой квартире, включая студии;
 * место — `listings.district` из справочника `districts_nha_trang` (слаги) либо, когда справочник
@@ -36,7 +42,10 @@ if TYPE_CHECKING:
 BALCONY = "balcony"
 SEPARATE_KITCHEN = "separate_kitchen"
 REQUIREMENTS = frozenset({BALCONY, SEPARATE_KITCHEN})
-_KEYS = frozenset({"require", "districts", "place_words"})
+_KEYS = frozenset({"require", "districts", "place_words", "allow_unknown"})
+# Требования, неизвестное по которым подписка может явно разрешить (`allow_unknown`).
+# Кухня сюда не входит: её неизвестное по-прежнему отказ.
+UNKNOWN_ALLOWED = frozenset({BALCONY})
 
 # Слова на свёрнутом тексте (`fold`: латиница без диакритики, «đ» → «d», кириллица нетронута).
 _BALCONY = re.compile(r"балкон|\bbalcon(?:y|ies)?\b|\bban cong\b")
@@ -67,6 +76,9 @@ class HardFilter:
     districts: frozenset[str] = frozenset()
     # Слова-адреса (свёрнутые), которых нет в справочнике: улицы у ориентира.
     place_words: tuple[str, ...] = ()
+    # Требования, по которым НЕИЗВЕСТНОЕ не отказ, а проход с пометкой в уведомлении. Пусто
+    # у каждого фильтра, который не включил политику явно: прежнее строгое поведение.
+    allow_unknown: frozenset[str] = frozenset()
 
     @classmethod
     def from_json(cls, raw: dict[str, Any] | None) -> HardFilter | None:
@@ -88,26 +100,58 @@ class HardFilter:
         words = tuple(fold(str(word)).strip() for word in raw.get("place_words") or ())
         if any(not word for word in words):
             raise ValueError("hard_filter: пустое слово-адрес")
-        return cls(require, districts, words)
+        # Ключа нет — политики нет. Ключ передан — значение обязано быть списком строк: false,
+        # 0, "", {} и null НЕ приравниваются к «нет политики»: иначе мусор обошёл бы карантин.
+        allowed = raw.get("allow_unknown", [])
+        if not isinstance(allowed, list) or not all(isinstance(item, str) for item in allowed):
+            raise ValueError("hard_filter: allow_unknown должен быть списком строк")
+        allow_unknown = frozenset(allowed)
+        if not allow_unknown <= UNKNOWN_ALLOWED:
+            bad = sorted(allow_unknown - UNKNOWN_ALLOWED)
+            raise ValueError(f"hard_filter: allow_unknown не поддерживает {bad}")
+        if not allow_unknown <= require:
+            raise ValueError("hard_filter: allow_unknown допустим только для заданных require")
+        return cls(require, districts, words, allow_unknown)
 
     def to_json(self) -> dict[str, Any]:
-        return {
+        data: dict[str, Any] = {
             "require": sorted(self.require),
             "districts": sorted(self.districts),
             "place_words": list(self.place_words),
         }
+        if self.allow_unknown:  # ключ появляется только у включивших политику
+            data["allow_unknown"] = sorted(self.allow_unknown)
+        return data
 
     def accepts(self, listing: Listing) -> bool:
-        """Карточка удовлетворяет ВСЕМ условиям. Неизвестное отсеивается, не пропускается."""
+        """Карточка удовлетворяет ВСЕМ условиям. Неизвестное отсеивается; исключение одно —
+        неизвестный балкон у фильтра с `allow_unknown: ["balcony"]` (проходит, см. `unconfirmed`).
+        Явное «нет» отсеивается всегда."""
         folded = fold(f"{listing.title}\n{listing.summary}")
         return (
             self._place_ok(listing.district, folded)
-            and (BALCONY not in self.require or _balcony(listing.attributes, folded))
+            and (BALCONY not in self.require or self._balcony_ok(listing.attributes, folded))
             and (
                 SEPARATE_KITCHEN not in self.require
                 or _separate_kitchen(listing.attributes, folded)
             )
         )
+
+    def unconfirmed(self, listing: Listing) -> tuple[str, ...]:
+        """Условия, которые карточка прошла лишь потому, что о них ничего не известно.
+
+        Сейчас только балкон; уведомление обязано сказать об этом клиенту.
+        """
+        if BALCONY not in self.require or BALCONY not in self.allow_unknown:
+            return ()
+        folded = fold(f"{listing.title}\n{listing.summary}")
+        return (BALCONY,) if _balcony(listing.attributes, folded) is None else ()
+
+    def _balcony_ok(self, attributes: dict[str, Any], folded: str) -> bool:
+        state = _balcony(attributes, folded)
+        if state is None:
+            return BALCONY in self.allow_unknown
+        return state
 
     def _place_ok(self, district: str | None, folded: str) -> bool:
         if not self.districts and not self.place_words:
@@ -121,11 +165,14 @@ class HardFilter:
         )
 
 
-def _balcony(attributes: dict[str, Any], folded: str) -> bool:
+def _balcony(attributes: dict[str, Any], folded: str) -> bool | None:
+    """`True` / `False` — известно, `None` — неизвестно (нет атрибута и нет слова в тексте)."""
     known = attributes.get("balcony")
     if isinstance(known, bool):
         return known
-    return _mentioned(_BALCONY, folded)
+    if _mentioned(_BALCONY, folded):
+        return True
+    return False if _BALCONY.search(folded) else None
 
 
 def _separate_kitchen(attributes: dict[str, Any], folded: str) -> bool:

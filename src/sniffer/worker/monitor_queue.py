@@ -16,14 +16,16 @@ DIGEST_HOUR = 18
 LOCAL_ZONE = VIETNAM
 
 
-def payload(listing: Listing, *, delivery_mode: str = "instant") -> dict[str, object]:
+def payload(
+    listing: Listing, *, delivery_mode: str = "instant", unconfirmed: tuple[str, ...] = ()
+) -> dict[str, object]:
     """Что нотифаер покажет клиенту. Карточка собирается при отправке.
 
     В очередь кладём данные, а не готовый текст: разметка меняется чаще, чем
     ходит очередь, и сообщение, пролежавшее сутки, не должно приезжать в
     прошлогоднем оформлении.
     """
-    return {
+    data: dict[str, object] = {
         "listing_id": listing.id,
         "title": listing.title,
         "summary": listing.summary,
@@ -34,6 +36,10 @@ def payload(listing: Listing, *, delivery_mode: str = "instant") -> dict[str, ob
         "posted_at": listing.posted_at.isoformat(),
         "delivery_mode": delivery_mode,
     }
+    if unconfirmed:
+        # Условия жёсткого фильтра, прошедшие «по неизвестному» (`HardFilter.unconfirmed`).
+        data["unconfirmed"] = list(unconfirmed)
+    return data
 
 
 def scheduled(subscription: SubscriptionState, moment: datetime, _relevance: float) -> datetime:

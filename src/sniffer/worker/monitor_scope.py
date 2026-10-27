@@ -111,7 +111,15 @@ async def serve_slot(
             user_id=subscription.user_id,
             listing_id=listing.id or 0,
             score=relevance,
-            payload=payload(listing, delivery_mode=mode),
+            payload=payload(
+                listing,
+                delivery_mode=mode,
+                unconfirmed=(
+                    subscription.hard_filter.unconfirmed(listing)
+                    if subscription.hard_filter is not None
+                    else ()
+                ),
+            ),
             scheduled_at=scheduled(subscription, moment, relevance),
             now=moment,
         )

@@ -74,3 +74,37 @@ async def test_a_subscription_without_a_hard_filter_keeps_the_soft_selection(
     assert await MonitorAgent().tick(now=NOW) == 4
 
     assert [item["listing_id"] for item in world.delivery.queued] == [1, 2, 3, 4]
+
+
+async def test_opt_in_unknown_balcony_is_queued_with_the_note_and_unknown_kitchen_is_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lenient = HardFilter(
+        require=STRICT.require,
+        districts=STRICT.districts,
+        allow_unknown=frozenset({BALCONY}),
+    )
+    page = [
+        flat(1, "Отдельная кухня, вид на море"),  # балкон неизвестен
+        flat(2, "Отдельная кухня, без балкона"),  # явное «нет»
+        flat(3, "Балкон, тихо"),  # кухня неизвестна: прежний отказ
+        flat(4, "Отдельная кухня, балкон"),  # всё подтверждено
+    ]
+    world = install(monkeypatch, subscriptions=[rental(lenient)], page=page)
+
+    assert await MonitorAgent().tick(now=NOW) == 2
+
+    by_id = {item["listing_id"]: item for item in world.delivery.queued}
+    assert set(by_id) == {1, 4}
+    assert by_id[1]["payload"]["unconfirmed"] == ["balcony"]
+    assert "unconfirmed" not in by_id[4]["payload"]
+
+
+async def test_a_subscription_without_the_policy_does_not_get_unknown_balcony(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = [flat(1, "Отдельная кухня, вид на море")]
+    world = install(monkeypatch, subscriptions=[rental(STRICT)], page=page)
+
+    assert await MonitorAgent().tick(now=NOW) == 0
+    assert world.delivery.queued == []

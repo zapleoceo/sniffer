@@ -243,6 +243,9 @@ def _text(unit: Unit) -> str:
     return f"{escape(unit.note)}\n\n{body}" if unit.note else body
 
 
+UNCONFIRMED_BALCONY = "⚠ балкон не подтверждён"
+
+
 def render(payload: dict[str, Any]) -> str:
     """Карточка из данных очереди. Разметка собирается при отправке.
 
@@ -265,9 +268,15 @@ def render(payload: dict[str, Any]) -> str:
     summary = str(payload.get("summary") or "").strip()
     if summary:
         lines.append(escape(summary[:300]))
+    if "balcony" in _words(payload.get("unconfirmed")):
+        lines.append(UNCONFIRMED_BALCONY)
     if url:
         lines.append(f'<a href="{url}">открыть оригинал</a>')
     return "\n".join(line for line in lines if line)
+
+
+def _words(value: object) -> list[str]:
+    return [str(word) for word in value] if isinstance(value, list) else []
 
 
 def _overflow(payload: dict[str, Any]) -> str:
