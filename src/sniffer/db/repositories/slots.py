@@ -12,8 +12,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Any
 
+import structlog
 from sqlalchemy import func, select, update
 
 from sniffer.db import models
@@ -35,6 +40,35 @@ class PaidSearch(Exception):
 
     def __init__(self, root: int) -> None:
         super().__init__(f"root={root}: paid search, use the bot's Следить button")
+
+
+_audit = structlog.get_logger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class HardFilterUpdate:
+    """Итог CAS-замены фильтра. `current` — что лежит в базе ПОСЛЕ вызова (JSON или `None`)."""
+
+    applied: bool
+    current: dict[str, Any] | None
+
+
+def _digest(value: dict[str, Any] | None) -> str:
+    """Короткий отпечаток канонического JSON для аудита: содержимое в лог не идёт."""
+    canonical = json.dumps(value, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(canonical.encode()).hexdigest()[:12]
+
+
+def audit_hard_filter_update(
+    subscription_id: int, *, before: dict[str, Any] | None, after: dict[str, Any] | None
+) -> None:
+    """Аудит УСПЕШНОЙ правки: зовётся только после commit и чтения, без содержимого фильтра."""
+    _audit.info(
+        "subscription.hard_filter_updated",
+        subscription=subscription_id,
+        before=_digest(before),
+        after=_digest(after),
+    )
 
 
 class SlotRepository(Repository):
@@ -122,6 +156,59 @@ class SlotRepository(Repository):
         self._session.add(row)
         await self._session.flush()
         return row.id
+
+    async def update_hard_filter(
+        self, subscription_id: int, *, expected: HardFilter | None, new: HardFilter
+    ) -> HardFilterUpdate:
+        """Заменить ТОЛЬКО `hard_filter` существующей подписки, если там сейчас `expected`.
+
+        Один `UPDATE … WHERE id = :id AND hard_filter IS NOT DISTINCT FROM :expected`: проверка и
+        запись — одна атомарная команда, замок не нужен. Сравнение по jsonb (порядок ключей не
+        важен) и по каноническому виду `HardFilter.to_json()`. Расхождение — ничего не пишем и
+        отдаём актуальное значение, чтобы человек сверился и повторил осознанно. Подписку не
+        создаёт, не включает и не продлевает (`is_active`, `expires_at`, `no_slot_since`, курсоры
+        не трогаются) — этим отличается от `grant`, который перезаписывает всё разом.
+        Успех здесь — «строка обновлена В ТРАНЗАКЦИИ», а не «записано»: commit делает вызывающий.
+        Поэтому аудит успеха не пишется тут, а только после подтверждённого commit и реального
+        чтения (`read_hard_filter`, `audit_hard_filter_update`); ложный «успех» при откате исключён.
+        """
+        before = expected.to_json() if expected is not None else None
+        target = models.Subscription.hard_filter
+        # Словарь, а не строка в CAST: тип JSONB у колонки сам сериализует параметр один раз.
+        matches = target.is_(None) if before is None else target == before
+        changed = await self._session.execute(
+            update(models.Subscription)
+            .where(models.Subscription.id == subscription_id, matches)
+            .values(hard_filter=new.to_json())
+            .returning(models.Subscription.id)
+        )
+        if changed.scalar_one_or_none() is not None:
+            return HardFilterUpdate(applied=True, current=new.to_json())
+        row = (
+            await self._session.execute(
+                select(models.Subscription.id, models.Subscription.hard_filter).where(
+                    models.Subscription.id == subscription_id
+                )
+            )
+        ).one_or_none()
+        if row is None:
+            raise LookupError(f"подписка {subscription_id} не найдена")
+        _audit.info("subscription.hard_filter_conflict", subscription=subscription_id)
+        return HardFilterUpdate(applied=False, current=row.hard_filter)
+
+    async def read_hard_filter(self, subscription_id: int) -> dict[str, Any] | None:
+        """Настоящее чтение `hard_filter` (новый SELECT). `LookupError` — подписки нет."""
+        row = (
+            await self._session.execute(
+                select(models.Subscription.id, models.Subscription.hard_filter).where(
+                    models.Subscription.id == subscription_id
+                )
+            )
+        ).one_or_none()
+        if row is None:
+            raise LookupError(f"подписка {subscription_id} не найдена")
+        found: dict[str, Any] | None = row.hard_filter
+        return found
 
     async def grant_watch(self, user_id: int, root: int, *, now: datetime) -> Outcome:
         """«Следить» без платежа: мониторинг без срока. Путь владельца, он себе не платит.
