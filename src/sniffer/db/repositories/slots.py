@@ -12,9 +12,16 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Any
 
+import structlog
+from sqlalchemy import cast as sql_cast
 from sqlalchemy import func, select, update
+from sqlalchemy.dialects.postgresql import JSONB
 
 from sniffer.db import models
 from sniffer.db.repositories.base import Repository
@@ -35,6 +42,23 @@ class PaidSearch(Exception):
 
     def __init__(self, root: int) -> None:
         super().__init__(f"root={root}: paid search, use the bot's Следить button")
+
+
+_audit = structlog.get_logger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class HardFilterUpdate:
+    """Итог CAS-замены фильтра. `current` — что лежит в базе ПОСЛЕ вызова (JSON или `None`)."""
+
+    applied: bool
+    current: dict[str, Any] | None
+
+
+def _digest(value: dict[str, Any] | None) -> str:
+    """Короткий отпечаток канонического JSON для аудита: содержимое в лог не идёт."""
+    canonical = json.dumps(value, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(canonical.encode()).hexdigest()[:12]
 
 
 class SlotRepository(Repository):
@@ -122,6 +146,50 @@ class SlotRepository(Repository):
         self._session.add(row)
         await self._session.flush()
         return row.id
+
+    async def update_hard_filter(
+        self, subscription_id: int, *, expected: HardFilter | None, new: HardFilter
+    ) -> HardFilterUpdate:
+        """Заменить ТОЛЬКО `hard_filter` существующей подписки, если там сейчас `expected`.
+
+        Один `UPDATE … WHERE id = :id AND hard_filter IS NOT DISTINCT FROM :expected`: проверка и
+        запись — одна атомарная команда, замок не нужен. Сравнение по jsonb (порядок ключей не
+        важен) и по каноническому виду `HardFilter.to_json()`. Расхождение — ничего не пишем и
+        отдаём актуальное значение, чтобы человек сверился и повторил осознанно. Подписку не
+        создаёт, не включает и не продлевает (`is_active`, `expires_at`, `no_slot_since`, курсоры
+        не трогаются) — этим отличается от `grant`, который перезаписывает всё разом.
+        Аудит — структурный лог без персональных данных: id подписки и хэши до/после.
+        """
+        before = expected.to_json() if expected is not None else None
+        target = models.Subscription.hard_filter
+        matches = (
+            target.is_(None) if before is None else target == sql_cast(json.dumps(before), JSONB)
+        )
+        changed = await self._session.execute(
+            update(models.Subscription)
+            .where(models.Subscription.id == subscription_id, matches)
+            .values(hard_filter=new.to_json())
+            .returning(models.Subscription.id)
+        )
+        if changed.scalar_one_or_none() is not None:
+            _audit.info(
+                "subscription.hard_filter_updated",
+                subscription=subscription_id,
+                before=_digest(before),
+                after=_digest(new.to_json()),
+            )
+            return HardFilterUpdate(applied=True, current=new.to_json())
+        row = (
+            await self._session.execute(
+                select(models.Subscription.id, models.Subscription.hard_filter).where(
+                    models.Subscription.id == subscription_id
+                )
+            )
+        ).one_or_none()
+        if row is None:
+            raise LookupError(f"подписка {subscription_id} не найдена")
+        _audit.info("subscription.hard_filter_conflict", subscription=subscription_id)
+        return HardFilterUpdate(applied=False, current=row.hard_filter)
 
     async def grant_watch(self, user_id: int, root: int, *, now: datetime) -> Outcome:
         """«Следить» без платежа: мониторинг без срока. Путь владельца, он себе не платит.

@@ -105,3 +105,30 @@ docker exec sniffer-worker python -m sniffer.worker.restore_search --tg-user-id 
 клиенту, клиента нет или поиск оплаченный (запись не делается, строка клиента не создаётся; причина
 одной строкой в stderr).
 
+
+## Правка фильтра существующей подписки (CAS)
+
+`grant_watch` выдаёт мониторинг и перезаписывает фильтр целиком (включая `is_active`, `expires_at`,
+`no_slot_since`). Для точечной правки есть отдельный метод
+`SlotRepository.update_hard_filter(subscription_id, *, expected, new)` и команда
+
+```
+docker exec sniffer-worker python -m sniffer.worker.update_hard_filter \
+  --subscription-id <N> --expect-json '<текущий фильтр или null>' --set-json '<новый фильтр>'
+```
+
+* **Условие.** Один `UPDATE subscriptions SET hard_filter = :new WHERE id = :id AND hard_filter
+  IS NOT DISTINCT FROM :expected` (`null` → `IS NULL`; сравнение по jsonb, порядок ключей не важен;
+  `expected` приводится к каноническому виду `HardFilter.to_json()`). Проверка и запись — одна
+  атомарная команда.
+* **Пишет только `hard_filter`.** `is_active`, `expires_at`, `no_slot_since`, курсоры
+  (`since_listing_id`, `scan_listing_id`), карантин, `notifications` и другие подписки не меняются;
+  подписку метод не создаёт и не включает. Версии у подписки нет, CAS держится на сравнении содержимого.
+* **Конфликт** — ничего не записано, команда печатает актуальное значение (`conflict … current=…`) и
+  выходит с кодом 4; метод возвращает `HardFilterUpdate(applied=False, current=<JSON из базы>)`.
+* **Валидация.** Оба JSON проходят `HardFilter.from_json` (опечатка, невалидный `allow_unknown`,
+  не объект) — код 2 до обращения к базе. Подписки нет — код 3. Применено — код 0.
+* **Аудит.** Отдельной таблицы событий у подписок нет (`passport_events` привязана к паспорту), поэтому
+  структурный лог `subscription.hard_filter_updated`: id подписки и 12-символьные sha256-отпечатки
+  значения до и после. Содержимое фильтра, id клиента и текст в лог не попадают; при конфликте —
+  `subscription.hard_filter_conflict` только с id.
