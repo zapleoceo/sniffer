@@ -269,13 +269,15 @@ class QuotaRepository(Repository):
                 models.OfferView.shown_at < older_than,
                 models.OfferView.channel.in_(SWEPT_CHANNELS),
             )
-            .order_by(models.OfferView.shown_at)
+            .order_by(models.OfferView.shown_at, models.OfferView.id)
             .limit(limit)
             .with_for_update(skip_locked=True)
+            .cte("stale")
+            .prefix_with("MATERIALIZED", dialect="postgresql")
         )
         removed = await self._session.execute(
             delete(_table(models.OfferView))
-            .where(models.OfferView.id.in_(stale.scalar_subquery()))
+            .where(models.OfferView.id.in_(select(stale.c.id)))
             .returning(models.OfferView.id)
         )
         return len(removed.scalars().all())

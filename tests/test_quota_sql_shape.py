@@ -251,7 +251,9 @@ async def test_the_sweep_skips_locked_rows_and_spares_the_monitor() -> None:
 
     await QuotaRepository(session).sweep_stale(older_than=T0, limit=100)  # type: ignore[arg-type]
 
-    sql = session.only("DELETE FROM offer_views")
+    sql = session.only("WITH stale AS MATERIALIZED")
+    assert "DELETE FROM offer_views" in sql
+    assert "LIMIT 100" in sql
     assert "SKIP LOCKED" in sql
     assert "delivered_at IS NULL" in sql
     assert "channel IN ('search', 'deferred')" in sql, "резервы слежения подтверждает нотификатор"
