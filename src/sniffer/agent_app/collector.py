@@ -11,17 +11,14 @@ from functools import partial
 
 import structlog
 
-from sniffer.agent_app.collector_gateway import CollectorGateway, Sessions
-from sniffer.agent_app.extraction import extract
+from sniffer.agent_app.collector_gateway import Sessions
 from sniffer.agent_app.followup import queue_answers, queue_cap_answers, queue_failure_answers
-from sniffer.agent_app.mcp_server import connect
+from sniffer.agent_app.marketplace_workflow import process as process
 from sniffer.bot.quota import QuotaService
 from sniffer.bot.quota_ledger import new_quota
-from sniffer.broker.client import BrokerCapError, BrokerClient
-from sniffer.broker.usage import default_usage_sink
+from sniffer.broker.client import BrokerCapError
 from sniffer.config import Settings, get_settings
 from sniffer.db.engine import session_scope
-from sniffer.db.repositories.catalog_observations import CatalogObservationRepository
 from sniffer.db.repositories.collection_tasks import (
     CollectionLease,
     CollectionTaskRepository,
@@ -32,51 +29,6 @@ from sniffer.runtime.service import Service, run_service, sleep_or_stop
 log = structlog.get_logger(__name__)
 Process = Callable[[CollectionLease], Awaitable[dict[str, int]]]
 Reply = Callable[[CollectionLease], Awaitable[int]]
-
-
-async def process(lease: CollectionLease) -> dict[str, int]:
-    gateway = CollectorGateway(lease)
-    broker = BrokerClient(usage=default_usage_sink)
-    try:
-        async with connect(gateway) as session:
-            # The task already contains the complete server-owned source list.
-            # Asking a model to repeat it as JSON/tool calls added no judgement,
-            # but made collection depend on provider formatting.  Execute these
-            # bounded MCP reads deterministically; the broker remains responsible
-            # only for semantic extraction of each retained original below.
-            for assigned_source in gateway.scope.sources:
-                result = await session.call_tool("sources_collect", {"source": assigned_source})
-                if result.isError or result.structuredContent is None:
-                    raise ValueError("source_collection_failed")
-            if set(gateway.outcomes) != set(gateway.scope.sources):
-                raise ValueError("incomplete_collection")
-            for index, original in enumerate(gateway.originals):
-                extracted = await extract(original, broker)
-                result = await session.call_tool(
-                    "catalog_stage", {"index": index, "extracted": extracted}
-                )
-                if result.isError or result.structuredContent is None:
-                    raise ValueError("stage_failed")
-        async with session_scope() as db:
-            repo = CatalogObservationRepository(db)
-            for successful_source in gateway.outcomes:
-                await repo.record_coverage(lease.id, lease.token, successful_source, "success")
-            await db.commit()
-        return {"collected": len(gateway.originals), "published": gateway.published}
-    except Exception as exc:
-        log.exception("collector.task_failed", task_id=lease.id, kind=type(exc).__name__)
-        # Partial publication stays valid; never label an incomplete extraction fresh.
-        try:
-            async with session_scope() as db:
-                repo = CatalogObservationRepository(db)
-                for source in gateway.scope.sources:
-                    await repo.record_coverage(lease.id, lease.token, source, "error")
-                await db.commit()
-        except Exception:
-            log.warning("collector.coverage_write_failed", task_id=lease.id)
-        raise
-    finally:
-        await broker.aclose()
 
 
 class Collector:
