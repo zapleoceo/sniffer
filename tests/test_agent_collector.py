@@ -15,7 +15,7 @@ import pytest
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sniffer.agent_app import collector, collector_gateway, marketplace_workflow
+from sniffer.agent_app import collector, collector_gateway, marketplace_workflow, scenario_router
 from sniffer.agent_app.collector_gateway import CollectorGateway, Sessions
 from sniffer.agent_app.contracts import CollectionScope
 from sniffer.agent_app.extraction import Original, extract, observation
@@ -691,7 +691,74 @@ async def test_marketplace_source_failure_records_error_without_publication(
     broker.aclose.assert_awaited_once()
 
 
-def test_default_collector_workflow_is_marketplace() -> None:
+def test_default_collector_workflow_uses_scenario_router() -> None:
     assert inspect.signature(collector.Collector).parameters["work"].default is (
-        marketplace_workflow.process
+        scenario_router.process
+    )
+
+
+async def test_disabled_news_task_is_retried_without_marketplace_reply(storage: Storage) -> None:
+    repo, sessions, _ = storage
+    repo.claim.return_value = CollectionLease(
+        LEASE.id,
+        LEASE.token,
+        {**LEASE.scope, "scenario": "news"},
+        LEASE.attempts,
+        LEASE.deadline_at,
+    )
+    failure_reply = AsyncMock()
+    cap_reply = AsyncMock()
+
+    assert (
+        await collector.Collector(
+            sessions=sessions, failure_reply=failure_reply, cap_reply=cap_reply
+        ).tick()
+        == 1
+    )
+
+    failure_reply.assert_not_awaited()
+    cap_reply.assert_not_awaited()
+    repo.complete.assert_not_awaited()
+    assert repo.fail.await_args.args[2] == "news_disabled"
+
+
+@pytest.mark.parametrize("scenario", ["news", "unknown"])
+@pytest.mark.parametrize(
+    "error_code", ["reply_failed_budget_cap", "reply_failed_collection_failed"]
+)
+async def test_unavailable_reply_recovery_never_sends_marketplace_reply(
+    storage: Storage, scenario: str, error_code: str
+) -> None:
+    repo, sessions, _ = storage
+    repo.claim_reply.return_value = CollectionLease(
+        LEASE.id,
+        LEASE.token,
+        {**LEASE.scope, "scenario": scenario},
+        LEASE.attempts,
+        LEASE.deadline_at,
+        error_code,
+    )
+    work = AsyncMock()
+    success_reply = AsyncMock()
+    failure_reply = AsyncMock()
+    cap_reply = AsyncMock()
+
+    assert (
+        await collector.Collector(
+            sessions=sessions,
+            work=work,
+            reply=success_reply,
+            failure_reply=failure_reply,
+            cap_reply=cap_reply,
+        ).tick()
+        == 1
+    )
+
+    work.assert_not_awaited()
+    success_reply.assert_not_awaited()
+    failure_reply.assert_not_awaited()
+    cap_reply.assert_not_awaited()
+    repo.complete.assert_not_awaited()
+    assert repo.fail.await_args.args[2] == (
+        "news_disabled" if scenario == "news" else "unknown_scenario"
     )

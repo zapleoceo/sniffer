@@ -30,6 +30,7 @@ from sniffer.db.models.discovery import (
 )
 from sniffer.db.models.jobs import Job
 from sniffer.db.models.listings import Listing, ListingMedia
+from sniffer.db.models.news import news_processing
 from sniffer.db.models.observability import (
     BrokerCall,
     ClientRequest,
@@ -73,6 +74,7 @@ __all__ = [
     "User",
     "UserConsent",
     "coverage",
+    "news_processing",
     "observations",
     "proposals",
     "publications",
