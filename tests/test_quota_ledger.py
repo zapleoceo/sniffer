@@ -344,6 +344,8 @@ async def the_sweep_works_in_batches(kit: Kit) -> None:
 
     assert await quota.sweep(T0 + RESERVATION_TTL, 2) == 2
     assert len(await kit.rows(user)) == 3
+    assert await quota.sweep(T0 + RESERVATION_TTL, 2) == 2
+    assert len(await kit.rows(user)) == 1
 
 
 # ── кому и сколько ──────────────────────────────────────────────────────────
