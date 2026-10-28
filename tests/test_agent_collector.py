@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -14,7 +15,7 @@ import pytest
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sniffer.agent_app import collector, collector_gateway
+from sniffer.agent_app import collector, collector_gateway, marketplace_workflow, scenario_router
 from sniffer.agent_app.collector_gateway import CollectorGateway, Sessions
 from sniffer.agent_app.contracts import CollectionScope
 from sniffer.agent_app.extraction import Original, extract, observation
@@ -638,15 +639,15 @@ async def test_real_mcp_collector_calls_known_source_without_model_tool_json(
         publish=AsyncMock(return_value=True),
         record_coverage=AsyncMock(),
     )
-    monkeypatch.setattr(collector, "CollectorGateway", lambda _: gateway)
-    monkeypatch.setattr(collector, "session_scope", sessions)
-    monkeypatch.setattr(collector, "CatalogObservationRepository", lambda _: repo)
+    monkeypatch.setattr(marketplace_workflow, "CollectorGateway", lambda _: gateway)
+    monkeypatch.setattr(marketplace_workflow, "session_scope", sessions)
+    monkeypatch.setattr(marketplace_workflow, "CatalogObservationRepository", lambda _: repo)
     monkeypatch.setattr(collector_gateway, "CatalogObservationRepository", lambda _: repo)
     broker = SimpleNamespace(
         structured=AsyncMock(return_value=FACTS),
         aclose=AsyncMock(),
     )
-    monkeypatch.setattr(collector, "BrokerClient", lambda **_: broker)
+    monkeypatch.setattr(marketplace_workflow, "BrokerClient", lambda **_: broker)
 
     assert await collector.process(lease) == {"collected": 1, "published": 1}
     fetch.assert_awaited_once()
@@ -655,3 +656,109 @@ async def test_real_mcp_collector_calls_known_source_without_model_tool_json(
     repo.publish.assert_awaited_once()
     repo.record_coverage.assert_awaited_once_with(11, "trusted", "chotot", "success")
     broker.aclose.assert_awaited_once()
+
+
+async def test_marketplace_source_failure_records_error_without_publication(
+    storage: Storage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, sessions, _ = storage
+    gateway = SimpleNamespace(
+        scope=SimpleNamespace(sources=["chotot"]),
+        originals=[],
+        outcomes={},
+        published=0,
+    )
+    repo = SimpleNamespace(record_coverage=AsyncMock())
+    broker = SimpleNamespace(aclose=AsyncMock())
+    tool = SimpleNamespace(isError=True, structuredContent=None)
+    session = SimpleNamespace(call_tool=AsyncMock(return_value=tool))
+
+    @asynccontextmanager
+    async def connected(_gateway: object) -> AsyncIterator[SimpleNamespace]:
+        yield session
+
+    monkeypatch.setattr(marketplace_workflow, "CollectorGateway", lambda _: gateway)
+    monkeypatch.setattr(marketplace_workflow, "BrokerClient", lambda **_: broker)
+    monkeypatch.setattr(marketplace_workflow, "connect", connected)
+    monkeypatch.setattr(marketplace_workflow, "session_scope", sessions)
+    monkeypatch.setattr(marketplace_workflow, "CatalogObservationRepository", lambda _: repo)
+
+    with pytest.raises(ValueError, match="source_collection_failed"):
+        await collector.process(LEASE)
+
+    session.call_tool.assert_awaited_once_with("sources_collect", {"source": "chotot"})
+    repo.record_coverage.assert_awaited_once_with(11, "trusted", "chotot", "error")
+    broker.aclose.assert_awaited_once()
+
+
+def test_default_collector_workflow_uses_scenario_router() -> None:
+    assert inspect.signature(collector.Collector).parameters["work"].default is (
+        scenario_router.process
+    )
+
+
+async def test_disabled_news_task_is_retried_without_marketplace_reply(storage: Storage) -> None:
+    repo, sessions, _ = storage
+    repo.claim.return_value = CollectionLease(
+        LEASE.id,
+        LEASE.token,
+        {**LEASE.scope, "scenario": "news"},
+        LEASE.attempts,
+        LEASE.deadline_at,
+    )
+    failure_reply = AsyncMock()
+    cap_reply = AsyncMock()
+
+    assert (
+        await collector.Collector(
+            sessions=sessions, failure_reply=failure_reply, cap_reply=cap_reply
+        ).tick()
+        == 1
+    )
+
+    failure_reply.assert_not_awaited()
+    cap_reply.assert_not_awaited()
+    repo.complete.assert_not_awaited()
+    assert repo.fail.await_args.args[2] == "news_disabled"
+
+
+@pytest.mark.parametrize("scenario", ["news", "unknown"])
+@pytest.mark.parametrize(
+    "error_code", ["reply_failed_budget_cap", "reply_failed_collection_failed"]
+)
+async def test_unavailable_reply_recovery_never_sends_marketplace_reply(
+    storage: Storage, scenario: str, error_code: str
+) -> None:
+    repo, sessions, _ = storage
+    repo.claim_reply.return_value = CollectionLease(
+        LEASE.id,
+        LEASE.token,
+        {**LEASE.scope, "scenario": scenario},
+        LEASE.attempts,
+        LEASE.deadline_at,
+        error_code,
+    )
+    work = AsyncMock()
+    success_reply = AsyncMock()
+    failure_reply = AsyncMock()
+    cap_reply = AsyncMock()
+
+    assert (
+        await collector.Collector(
+            sessions=sessions,
+            work=work,
+            reply=success_reply,
+            failure_reply=failure_reply,
+            cap_reply=cap_reply,
+        ).tick()
+        == 1
+    )
+
+    work.assert_not_awaited()
+    success_reply.assert_not_awaited()
+    failure_reply.assert_not_awaited()
+    cap_reply.assert_not_awaited()
+    repo.complete.assert_not_awaited()
+    assert repo.fail.await_args.args[2] == (
+        "news_disabled" if scenario == "news" else "unknown_scenario"
+    )

@@ -32,6 +32,8 @@ class SearchCriteria(BaseModel):
 
 class CollectionScope(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
+    # Accept an explicit legacy route without changing serialized task fingerprints.
+    scenario: Literal["marketplace"] = Field(default="marketplace", exclude=True)
     city: Literal["nha_trang", "da_nang"]
     category: Literal["motorbike", "bicycle", "car", "apartment", "room", "house", "other"]
     deal_type: Literal["sell", "rent_out", "wanted"]

@@ -11,72 +11,26 @@ from functools import partial
 
 import structlog
 
-from sniffer.agent_app.collector_gateway import CollectorGateway, Sessions
-from sniffer.agent_app.extraction import extract
+from sniffer.agent_app.collector_gateway import Sessions
 from sniffer.agent_app.followup import queue_answers, queue_cap_answers, queue_failure_answers
-from sniffer.agent_app.mcp_server import connect
+from sniffer.agent_app.scenario_router import process as process
+from sniffer.agent_app.scenario_router import require_available
 from sniffer.bot.quota import QuotaService
 from sniffer.bot.quota_ledger import new_quota
-from sniffer.broker.client import BrokerCapError, BrokerClient
-from sniffer.broker.usage import default_usage_sink
+from sniffer.broker.client import BrokerCapError
 from sniffer.config import Settings, get_settings
 from sniffer.db.engine import session_scope
-from sniffer.db.repositories.catalog_observations import CatalogObservationRepository
 from sniffer.db.repositories.collection_tasks import (
     CollectionLease,
     CollectionTaskRepository,
     LeaseLost,
 )
+from sniffer.domain.scenarios import ScenarioUnavailable
 from sniffer.runtime.service import Service, run_service, sleep_or_stop
 
 log = structlog.get_logger(__name__)
 Process = Callable[[CollectionLease], Awaitable[dict[str, int]]]
 Reply = Callable[[CollectionLease], Awaitable[int]]
-
-
-async def process(lease: CollectionLease) -> dict[str, int]:
-    gateway = CollectorGateway(lease)
-    broker = BrokerClient(usage=default_usage_sink)
-    try:
-        async with connect(gateway) as session:
-            # The task already contains the complete server-owned source list.
-            # Asking a model to repeat it as JSON/tool calls added no judgement,
-            # but made collection depend on provider formatting.  Execute these
-            # bounded MCP reads deterministically; the broker remains responsible
-            # only for semantic extraction of each retained original below.
-            for assigned_source in gateway.scope.sources:
-                result = await session.call_tool("sources_collect", {"source": assigned_source})
-                if result.isError or result.structuredContent is None:
-                    raise ValueError("source_collection_failed")
-            if set(gateway.outcomes) != set(gateway.scope.sources):
-                raise ValueError("incomplete_collection")
-            for index, original in enumerate(gateway.originals):
-                extracted = await extract(original, broker)
-                result = await session.call_tool(
-                    "catalog_stage", {"index": index, "extracted": extracted}
-                )
-                if result.isError or result.structuredContent is None:
-                    raise ValueError("stage_failed")
-        async with session_scope() as db:
-            repo = CatalogObservationRepository(db)
-            for successful_source in gateway.outcomes:
-                await repo.record_coverage(lease.id, lease.token, successful_source, "success")
-            await db.commit()
-        return {"collected": len(gateway.originals), "published": gateway.published}
-    except Exception as exc:
-        log.exception("collector.task_failed", task_id=lease.id, kind=type(exc).__name__)
-        # Partial publication stays valid; never label an incomplete extraction fresh.
-        try:
-            async with session_scope() as db:
-                repo = CatalogObservationRepository(db)
-                for source in gateway.scope.sources:
-                    await repo.record_coverage(lease.id, lease.token, source, "error")
-                await db.commit()
-        except Exception:
-            log.warning("collector.coverage_write_failed", task_id=lease.id)
-        raise
-    finally:
-        await broker.aclose()
 
 
 class Collector:
@@ -111,6 +65,11 @@ class Collector:
             await session.commit()
         if lease is None:
             return 0
+        try:
+            require_available(lease.scope)
+        except ScenarioUnavailable as exc:
+            await self._fail(lease, str(exc), delay=86400)
+            return 1
         if reply_only:
             await self.retry_failure_reply(lease)
             return 1
@@ -124,37 +83,44 @@ class Collector:
             # Shutdown never finishes an unknown outcome. Lease recovery owns retry.
             raise
         except Exception as exc:
-            try:
-                async with asyncio.timeout(70):
-                    reply = self._cap_reply if _has_cap(exc) else self._failure_reply
-                    await reply(lease)
-            except Exception as reply_exc:
-                log.exception(
-                    "collector.failure_reply_failed",
-                    task_id=lease.id,
-                    kind=type(reply_exc).__name__,
-                )
-                error_code = (
-                    "reply_failed_budget_cap" if _has_cap(exc) else "reply_failed_collection_failed"
-                )
-                delay = 300
+            unavailable = _scenario_unavailable(exc)
+            if unavailable is not None:
+                # A disabled workflow must never invoke marketplace failure replies.
+                error_code, delay = str(unavailable), 86400
             else:
-                error_code = "budget_cap" if _has_cap(exc) else "collection_failed"
-                delay = _cap_delay() if _has_cap(exc) else 3600
-            if _has_cap(exc):
-                self._capped_until = datetime.now(UTC) + timedelta(seconds=_cap_delay())
-            async with self._sessions() as session:
                 try:
-                    await CollectionTaskRepository(session).fail(
-                        lease.id,
-                        lease.token,
-                        error_code,
-                        retry_seconds=delay,
+                    async with asyncio.timeout(70):
+                        reply = self._cap_reply if _has_cap(exc) else self._failure_reply
+                        await reply(lease)
+                except Exception as reply_exc:
+                    log.exception(
+                        "collector.failure_reply_failed",
+                        task_id=lease.id,
+                        kind=type(reply_exc).__name__,
                     )
-                    await session.commit()
-                except LeaseLost:
-                    log.info("collector.lease_lost", task_id=lease.id)
+                    error_code = (
+                        "reply_failed_budget_cap"
+                        if _has_cap(exc)
+                        else "reply_failed_collection_failed"
+                    )
+                    delay = 300
+                else:
+                    error_code = "budget_cap" if _has_cap(exc) else "collection_failed"
+                    delay = _cap_delay() if _has_cap(exc) else 3600
+                if _has_cap(exc):
+                    self._capped_until = datetime.now(UTC) + timedelta(seconds=_cap_delay())
+            await self._fail(lease, error_code, delay=delay)
         return 1
+
+    async def _fail(self, lease: CollectionLease, error_code: str, *, delay: int) -> None:
+        async with self._sessions() as session:
+            try:
+                await CollectionTaskRepository(session).fail(
+                    lease.id, lease.token, error_code, retry_seconds=delay
+                )
+                await session.commit()
+            except LeaseLost:
+                log.info("collector.lease_lost", task_id=lease.id)
 
     async def retry_failure_reply(self, lease: CollectionLease) -> None:
         error_code = lease.error_code or "reply_failed_collection_failed"
@@ -215,6 +181,21 @@ def _has_cap(exc: BaseException) -> bool:
     return isinstance(exc, BrokerCapError) or (
         isinstance(exc, BaseExceptionGroup) and any(_has_cap(child) for child in exc.exceptions)
     )
+
+
+def _scenario_unavailable(exc: BaseException) -> ScenarioUnavailable | None:
+    if isinstance(exc, ScenarioUnavailable):
+        return exc
+    if isinstance(exc, BaseExceptionGroup):
+        return next(
+            (
+                found
+                for child in exc.exceptions
+                if (found := _scenario_unavailable(child)) is not None
+            ),
+            None,
+        )
+    return None
 
 
 def _cap_delay() -> int:

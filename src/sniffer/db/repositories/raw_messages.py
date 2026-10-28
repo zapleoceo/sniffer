@@ -133,7 +133,15 @@ class RawMessageRepository(Repository):
         expired = (
             select(table.c.id)
             .outerjoin(models.Listing, models.Listing.raw_message_id == table.c.id)
-            .where(table.c.ingested_at < older_than, models.Listing.id.is_(None))
+            .outerjoin(
+                models.news_processing,
+                models.news_processing.c.raw_message_id == table.c.id,
+            )
+            .where(
+                table.c.ingested_at < older_than,
+                models.Listing.id.is_(None),
+                models.news_processing.c.raw_message_id.is_(None),
+            )
             .limit(limit)
         )
         deleted = await self._session.execute(

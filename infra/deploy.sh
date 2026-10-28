@@ -210,6 +210,7 @@ chats             excluded_evidence      # 020: снимок доказател�
 chat_exclusion_events                    # 020: журнал exclude/restore, append-only
 chats             liveness_listing_id    # 021: курсор проверки живости по listing.id
 chats             liveness_checked_at    # 024: когда чат последним проходил проверку живости; NULL - ни разу
+news_processing                         # 025: независимое состояние новостей, без автонаполнения
 SENTINELS
 }
 
