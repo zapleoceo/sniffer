@@ -69,6 +69,7 @@ def merge_edit(current: Passport, fresh: Passport) -> Passport:
         update={
             "intent": intent,
             "city": fresh.city or current.city,
+            "districts": fresh.districts or current.districts,
             "category": fresh.category or current.category,
             "attributes": merged_attributes,
             "raw_query": fresh.raw_query,
@@ -108,6 +109,7 @@ def refines(current: Passport, fresh: Passport) -> bool:
         return False
     return bool(
         fresh.attributes
+        or fresh.districts
         or fresh.budget.max is not None
         or fresh.category is not None
         or fresh.city is not None

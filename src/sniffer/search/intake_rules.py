@@ -22,6 +22,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from sniffer.domain.districts import PLACES, ZONE_PHRASES
 from sniffer.domain.passport import (
     RENTED_CATEGORIES,
     Category,
@@ -376,16 +377,40 @@ def parse_query(text: str, *, default_city: str = "") -> Passport:
         }
 
     known_city = city or default_city or None
+    districts = (
+        _query_districts(query, known_city)
+        if category in _HOUSING_CATEGORIES or category is None
+        else []
+    )
     return Passport(
         intent=intent,
         category=category,
         city=known_city,
+        districts=districts,
         budget=budget,
         attributes=with_model_facts(attributes),
         raw_query=query,
         confidence=_confidence(category, city, budget.max),
         missing_fields=_missing(category, city, budget.max),
         status=PassportStatus.READY if category and known_city else PassportStatus.DRAFT,
+    )
+
+
+def _query_districts(text: str, city: str | None) -> list[str]:
+    """Expand a named city zone to the existing listing district slugs.
+
+    A zone is not one district: northern listings are stored under individual
+    wards, complexes and streets, so the broad `bac_nha_trang` slug alone would
+    silently discard most of them.
+    """
+    if city not in (None, "nha_trang"):
+        return []
+    folded = text.casefold().replace("ё", "е")
+    zones = [zone for zone, phrase in ZONE_PHRASES.items() if re.search(phrase, folded)]
+    if len(zones) != 1:
+        return []
+    return sorted(
+        place.slug for place in PLACES if place.city == "nha_trang" and place.zone == zones[0]
     )
 
 

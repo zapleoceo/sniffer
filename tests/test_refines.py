@@ -40,3 +40,34 @@ def test_refine_keeps_the_old_conditions_and_adds_the_new_ones() -> None:
 
 def test_a_restated_subject_with_a_place_the_dictionary_does_not_know_is_a_new_search() -> None:
     assert not refines(CURRENT, parse_query("ищу скутер в куангнгае"))
+
+
+def test_northern_nha_trang_edit_keeps_the_existing_housing_search() -> None:
+    current = parse_query("сниму квартиру в Нячанге до 500 долларов, 2 комнаты")
+    text = "Измени только район на северный район Нячанга"
+    fresh = parse_query(text)
+
+    assert fresh.districts
+    assert "vinh_hai" in fresh.districts
+    assert "vinh_phuoc" in fresh.districts
+    assert refines(current, fresh)
+    revised = refine(current, fresh, text)
+    assert revised.category == current.category
+    assert revised.city == current.city
+    assert revised.budget == current.budget
+    assert revised.attributes == current.attributes
+    assert revised.districts == fresh.districts
+
+
+def test_northern_housing_zone_is_not_applied_to_another_city_or_vehicle() -> None:
+    assert not parse_query("квартира в Дананге, северный район").districts
+    assert not parse_query("скутер на севере Нячанга").districts
+
+
+def test_later_budget_edit_preserves_the_selected_districts() -> None:
+    current = parse_query("сниму квартиру на севере Нячанга")
+    fresh = parse_query("до 600 долларов")
+
+    revised = refine(current, fresh, "до 600 долларов")
+    assert revised.districts == current.districts
+    assert revised.budget.max == 600
