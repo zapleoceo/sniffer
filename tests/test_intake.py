@@ -614,7 +614,12 @@ def test_the_housing_word_does_not_catch_lookalikes() -> None:
 )
 def test_rooms_are_read_from_the_query(text: str, rooms: int) -> None:
     """Число комнат приезжает атрибутом — и словом, и цифрой, и латиницей."""
-    assert parse_query(text, default_city=CITY).attributes.get("rooms") == rooms
+    attributes = parse_query(text, default_city=CITY).attributes
+    if "спальн" in text or "bedroom" in text:
+        assert attributes.get("bedrooms") == rooms
+        assert "rooms" not in attributes
+    else:
+        assert attributes.get("rooms") == rooms
 
 
 def test_furnished_and_sea_view_are_read_from_the_query() -> None:

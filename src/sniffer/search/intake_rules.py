@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from sniffer.domain.districts import PLACES, ZONE_PHRASES, ZONE_WORDS
+from sniffer.domain.housing_rooms import read_bedrooms, read_total_rooms
 from sniffer.domain.passport import (
     RENTED_CATEGORIES,
     Category,
@@ -667,6 +668,14 @@ def detect_housing_attributes(text: str, category: Category | None) -> dict[str,
             re.IGNORECASE,
         ):
             found["rooms_min"] = True
+    bedrooms = read_bedrooms(text)
+    if bedrooms is not None:
+        found["bedrooms"] = bedrooms
+        # Legacy read_rooms accepts "4 спальни" as a room count. Keep total
+        # rooms only when the source actually states a total separately.
+        if read_total_rooms(text) is None:
+            found.pop("rooms", None)
+            found.pop("rooms_min", None)
     furnished = _attribute_named_in(category, "furnished", text)
     if furnished is not None:
         found["furnished"] = furnished == "true"

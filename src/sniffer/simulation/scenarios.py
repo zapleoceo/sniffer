@@ -590,7 +590,7 @@ SCENARIOS: tuple[Scenario, ...] = (
             "city": "nha_trang",
             "category": "apartment",
             "intent": "rent",
-            "attributes.rooms": 2,
+            "attributes.bedrooms": 2,
             "attributes.furnished": True,
         },
         forbid=("budget.max",),

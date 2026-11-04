@@ -10,6 +10,7 @@ from typing import Any
 
 from sniffer.db import models
 from sniffer.domain.hard_filter import HardFilter
+from sniffer.domain.housing_rooms import read_bedrooms, read_total_rooms
 from sniffer.domain.passport import Budget, Category, Intent, Passport, PassportStatus
 from sniffer.domain.records import (
     BrokerCall,
@@ -25,6 +26,19 @@ from sniffer.domain.records import (
     SubscriptionState,
     User,
 )
+
+
+def _legacy_housing_attributes(attributes: dict[str, Any], raw_query: str) -> dict[str, Any]:
+    """Interpret old saved bedroom queries without rewriting production rows."""
+    result = dict(attributes)
+    bedrooms = read_bedrooms(raw_query)
+    if bedrooms is None or "bedrooms" in result:
+        return result
+    result["bedrooms"] = bedrooms
+    if read_total_rooms(raw_query) is None and result.get("rooms") == bedrooms:
+        result.pop("rooms", None)
+        result.pop("rooms_min", None)
+    return result
 
 
 def to_chat(row: models.Chat) -> Chat:
@@ -146,7 +160,7 @@ def to_stored_passport(row: models.Passport) -> StoredPassport:
             city=row.city,
             districts=list(row.districts),
             budget=Budget.model_validate(row.budget or {}),
-            attributes=dict(row.attributes),
+            attributes=_legacy_housing_attributes(dict(row.attributes), row.raw_query),
             must_have=list(row.must_have),
             deal_breakers=list(row.deal_breakers),
             timeframe_from=row.timeframe_from,

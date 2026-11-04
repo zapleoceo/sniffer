@@ -114,7 +114,8 @@ def test_a_misfiled_apartment_is_corrected_with_side_and_attributes() -> None:
     assert fix is not None
     category, deal_type, attributes = fix
     assert (category, deal_type) == ("apartment", "rent_out")
-    assert attributes.get("rooms") == 2
+    assert attributes.get("bedrooms") == 2
+    assert "rooms" not in attributes
     assert "transmission" not in attributes
 
 

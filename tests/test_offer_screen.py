@@ -127,7 +127,8 @@ def test_a_new_category_rereads_attributes_for_it() -> None:
 
     assert fields["category"] == "apartment"
     assert "transmission" not in fields["attributes"] and "power" not in fields["attributes"]
-    assert fields["attributes"]["rooms"] == 2
+    assert fields["attributes"]["bedrooms"] == 2
+    assert "rooms" not in fields["attributes"], "bedrooms do not prove total rooms"
 
 
 def test_a_new_category_does_not_lose_the_facts_the_funnel_read() -> None:
@@ -143,7 +144,7 @@ def test_a_new_category_does_not_lose_the_facts_the_funnel_read() -> None:
     fields = screened_fields(flat, OfferVerdict("offer", "apartment", "rent_out", "unknown"))
 
     assert fields["attributes"] == {
-        "rooms": 2,
+        "bedrooms": 2,
         "area_m2": 55,
         "elevator": True,
         "min_term_months": 6,

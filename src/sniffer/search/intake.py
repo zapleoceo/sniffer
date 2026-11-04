@@ -20,6 +20,7 @@ import structlog
 from sniffer.broker.client import BrokerClient, BrokerError
 from sniffer.broker.usage import default_usage_sink
 from sniffer.config import get_settings
+from sniffer.domain.housing_rooms import read_bedrooms
 from sniffer.domain.passport import (
     Budget,
     Category,
@@ -30,7 +31,12 @@ from sniffer.domain.passport import (
     PricePeriod,
 )
 from sniffer.search.engine_size import MAX_CC, MIN_CC
-from sniffer.search.intake_rules import grounded_model, parse_query, with_model_facts
+from sniffer.search.intake_rules import (
+    _query_districts,
+    grounded_model,
+    parse_query,
+    with_model_facts,
+)
 from sniffer.search.market_terms import ALL_CITY_NAMES
 from sniffer.search.planner import StructuredCaller
 
@@ -53,6 +59,13 @@ Zoomer или другая. Список примеров не закрытый:
 даже если раньше его не встречал. Не додумывай модель, которой нет в запросе.
 Марка и модель — РАЗНЫЕ поля: «honda lead» это brand=honda и model=lead.
 Не отбрасывай часть названия и не расширяй точный запрос до одной марки."""
+
+
+SYSTEM_PROMPT += (
+    " For housing requests, distinguish total rooms from bedrooms. Return exact "
+    "district_evidence and bedrooms_evidence copied from the user's text; use an "
+    "empty string when absent or ambiguous. Never infer a district from the city."
+)
 
 
 class QueryIntake:
@@ -155,11 +168,15 @@ def intake_schema() -> dict[str, Any]:
             "brand",
             "model",
             "engine_cc",
+            "district_evidence",
+            "bedrooms_evidence",
         ],
         "properties": {
             "intent": _enum(Intent),
             "category": _enum(Category),
             "city": {"type": "string", "enum": ["", *ALL_CITY_NAMES]},
+            "district_evidence": {"type": "string"},
+            "bedrooms_evidence": {"type": "string"},
             "budget_max": {"type": "string", "description": "число без валюты, пусто если нет"},
             "currency": _enum(Currency),
             "period": _enum(PricePeriod),
@@ -225,11 +242,20 @@ def merge(rules: Passport, payload: Any) -> Passport:
             attributes["engine_cc"] = engine_cc
 
     city = str(payload.get("city") or "").strip() or rules.city
+    district_quote = str(payload.get("district_evidence") or "").strip()
+    bedrooms_quote = str(payload.get("bedrooms_evidence") or "").strip()
+    districts = rules.districts
+    if not districts and district_quote and district_quote in rules.raw_query:
+        districts = _query_districts(district_quote, city)
+    if "bedrooms" not in attributes and bedrooms_quote and bedrooms_quote in rules.raw_query:
+        if (bedrooms := read_bedrooms(bedrooms_quote)) is not None:
+            attributes["bedrooms"] = bedrooms
     return rules.model_copy(
         update={
             "intent": _member(Intent, payload.get("intent")) or rules.intent,
             "category": category,
             "city": city,
+            "districts": districts,
             "budget": budget,
             # Модель могла приехать только от LLM — тогда марку и коробку из неё
             # выводить всё равно надо, и делает это та же функция, что в

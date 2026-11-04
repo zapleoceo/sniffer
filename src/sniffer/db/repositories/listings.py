@@ -370,6 +370,7 @@ class ListingRepository(Repository):
         category: str | None = None,
         deal_type: str | None = None,
         attributes: dict[str, Any] | None = None,
+        district: str | None = None,
     ) -> None:
         """Вердикт модели: мусор гасится, предложение получает уточнённые поля."""
         values: dict[str, Any] = {"screened_at": func.now(), "screen_note": note[:300]}
@@ -386,6 +387,8 @@ class ListingRepository(Repository):
             )
         if attributes is not None:
             values["attributes"] = dict(attributes)
+        if district is not None:
+            values["district"] = district
         await self._session.execute(
             update(models.Listing).where(models.Listing.id == listing_id).values(**values)
         )
