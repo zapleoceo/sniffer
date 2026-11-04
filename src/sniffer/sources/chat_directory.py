@@ -156,20 +156,29 @@ async def search_listings(params: dict[str, object], *, limit: int) -> list[List
     except ValueError:
         intent = None
     ceiling = None
+    floor = None
     budget = params.get("budget")
     if isinstance(budget, dict) and budget.get("currency") == "VND":
         value = budget.get("max")
         if isinstance(value, (int, float)) and value >= 0:
             ceiling = Decimal(str(value))
+        value = budget.get("min")
+        if isinstance(value, (int, float)) and value >= 0:
+            floor = Decimal(str(value))
     # Атрибуты приезжают в нейтральном виде паспорта (`search/plan.context_params`)
     # — те же имена, что читает разбор запроса и отбор выдачи.
     raw_attributes = params.get("attributes")
+    raw_districts = params.get("districts")
     category = str(params.get("category") or "").strip() or None
     spec = build_match_filter(
         city=city,
+        districts=tuple(value for value in raw_districts if isinstance(value, str))
+        if isinstance(raw_districts, list)
+        else (),
         category=category,
         intent=intent,
         ceiling=ceiling,
+        floor=floor,
         since=datetime.now(UTC) - timedelta(days=CATALOG_MAX_AGE_DAYS),
         attributes=dict(raw_attributes) if isinstance(raw_attributes, dict) else {},
     )

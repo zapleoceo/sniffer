@@ -18,7 +18,8 @@ import re
 from datetime import UTC, datetime, timedelta
 from math import exp
 
-from sniffer.domain.match_filter import build_match_filter, ceiling_vnd
+from sniffer.domain.districts import complete_zone
+from sniffer.domain.match_filter import build_match_filter, ceiling_vnd, floor_vnd
 from sniffer.domain.model_key import model_aliases, model_words
 from sniffer.domain.passport import (
     HOUSING_PREFERENCES_KEY,
@@ -43,7 +44,7 @@ MATCH_MIN_SCORE = 0.55
 MONITOR_MAX_AGE = timedelta(hours=24)
 # Свойства паспорта, чьё сравнение у слежения НЕ равенство: объём идёт полосой, направление
 # — служебное, модель судится словами. Равенство по ним резало бы «от 250» и «200 ±25%» (D3).
-_NOT_EQUALITY = frozenset({"engine_cc", "engine_cc_dir", "model"})
+_NOT_EQUALITY = frozenset({"engine_cc", "engine_cc_dir", "model", "rooms_min"})
 
 
 def filter_for(
@@ -60,9 +61,11 @@ def filter_for(
     moment = now or datetime.now(UTC)
     return build_match_filter(
         city=passport.city,
+        districts=tuple(passport.districts),
         category=passport.category.value,
         intent=passport.intent,
         ceiling=ceiling_vnd(passport.budget, usd_vnd),
+        floor=floor_vnd(passport.budget, usd_vnd),
         since=moment - timedelta(days=MATCH_MAX_AGE_DAYS),
         attributes=passport.attributes,
     )
@@ -87,6 +90,10 @@ def worth_sending(listing: Listing, passport: Passport, *, now: datetime | None 
     moment = now or datetime.now(UTC)
     if _age(listing, moment) > MONITOR_MAX_AGE:
         return False
+    if passport.districts and listing.district not in passport.districts:
+        zone = complete_zone(passport.districts)
+        if listing.district is not None or zone is None or listing.attributes.get("zone") != zone:
+            return False
     wanted_model = str(passport.attributes.get("model") or "")
     if wanted_model and not _listing_has_model(listing, wanted_model):
         return False
@@ -121,8 +128,16 @@ def _known_attribute_conflicts(listing: Listing, passport: Passport) -> bool:
     if isinstance(actual_cc, int | float) and not isinstance(actual_cc, bool):
         if (low is not None and actual_cc < low) or (high is not None and actual_cc > high):
             return True
+    if wanted_all.get("rooms_min") is True and isinstance(wanted_all.get("rooms"), int):
+        rooms = listing.attributes.get("rooms")
+        if isinstance(rooms, int) and rooms < int(wanted_all["rooms"]):
+            return True
     for field, wanted in wanted_all.items():
-        if field in _NOT_EQUALITY or field == HOUSING_PREFERENCES_KEY:
+        if (
+            field in _NOT_EQUALITY
+            or field == HOUSING_PREFERENCES_KEY
+            or (field == "rooms" and wanted_all.get("rooms_min") is True)
+        ):
             continue
         actual = listing.attributes.get(field)
         if conflicts(field, actual, wanted, passport.attributes):
@@ -164,7 +179,9 @@ def _attribute_fit(listing: Listing, passport: Passport) -> float:
     wanted = {
         k: v
         for k, v in passport.attributes.items()
-        if k not in _NOT_EQUALITY and k != HOUSING_PREFERENCES_KEY
+        if k not in _NOT_EQUALITY
+        and k != HOUSING_PREFERENCES_KEY
+        and not (k == "rooms" and passport.attributes.get("rooms_min") is True)
     }
     if not wanted:
         return 0.5

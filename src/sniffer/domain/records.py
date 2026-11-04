@@ -402,9 +402,12 @@ class MatchFilter:
     """
 
     city: str
+    districts: tuple[str, ...] = ()
+    zone: str | None = None
     category: str | None = None
     deal_type: str | None = None
     max_price_vnd: Decimal | None = None
+    min_price_vnd: Decimal | None = None
     since: datetime | None = None
     # Свойства, у которых известное значение обязано совпасть, а неизвестное не
     # мешает («известное ≠ несовпадение», как в отборе выдачи): марка, коробка,
@@ -415,6 +418,7 @@ class MatchFilter:
     model: str | None = None
     engine_cc_min: int | None = None
     engine_cc_max: int | None = None
+    rooms_min: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

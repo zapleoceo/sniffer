@@ -17,6 +17,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
+from sniffer.domain.districts import complete_zone
 from sniffer.domain.passport import (
     Budget,
     Currency,
@@ -47,30 +48,50 @@ def ceiling_vnd(budget: Budget, usd_vnd: float | None) -> Decimal | None:
     return None
 
 
+def floor_vnd(budget: Budget, usd_vnd: float | None) -> Decimal | None:
+    """Lower price bound in VND when the budget currency can be converted."""
+    if budget.min is None:
+        return None
+    if budget.currency is Currency.VND:
+        return Decimal(str(budget.min))
+    if budget.currency is Currency.USD and usd_vnd is not None:
+        return Decimal(str(budget.min * usd_vnd))
+    return None
+
+
 def build_match_filter(
     *,
     city: str,
+    districts: tuple[str, ...] = (),
     category: str | None,
     intent: Intent | None,
     ceiling: Decimal | None,
+    floor: Decimal | None = None,
     since: datetime,
     attributes: dict[str, Any],
 ) -> MatchFilter:
     """`MatchFilter` по сторонам паспорта: умолчания категории, полоса объёма, модель."""
     merged = with_default_attributes(category, attributes)
     low, high = engine_cc_bounds(merged.get("engine_cc"), merged.get("engine_cc_dir"))
+    minimum_rooms = merged.get("rooms") if merged.get("rooms_min") is True else None
     return MatchFilter(
         city=city,
+        districts=districts,
+        zone=complete_zone(districts),
         category=category,
         # Паспорт описывает сторону клиента, карточка — сторону автора объявления:
         # покупателю нужен продавец, арендатору — арендодатель.
         deal_type=counterpart_deal_type(intent),
         max_price_vnd=ceiling,
+        min_price_vnd=floor,
         since=since,
         attributes={
-            key: merged[key] for key in EXACT_ATTRIBUTES if merged.get(key) not in (None, "")
+            key: merged[key]
+            for key in EXACT_ATTRIBUTES
+            if merged.get(key) not in (None, "") and not (key == "rooms" and minimum_rooms)
         },
         model=str(merged.get("model") or "").strip() or None,
         engine_cc_min=low,
         engine_cc_max=high,
+        rooms_min=minimum_rooms if isinstance(minimum_rooms, int) else None,
     )
