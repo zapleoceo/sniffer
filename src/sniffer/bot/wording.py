@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from html import escape
 
-from sniffer.bot.naming import budget_phrase, category_noun
+from sniffer.bot.naming import budget_phrase, category_noun, district_phrase
 from sniffer.domain.passport import Category, Intent, Passport
 from sniffer.domain.plans import (
     FREE_CARDS_PER_PERIOD,
@@ -208,6 +208,9 @@ def accepted(passport: Passport) -> str:
     city = city_name(passport.city, "ru")
     if city:
         parts.append(city)
+    district = district_phrase(passport)
+    if district:
+        parts.append(district)
     budget = budget_phrase(passport)
     if budget:
         parts.append(budget)
@@ -225,7 +228,10 @@ def accepted(passport: Passport) -> str:
         parts.append(f"{prefix}{engine_cc} cc")
     rooms = passport.attributes.get("rooms")
     if rooms is not None:
-        parts.append(f"{rooms} комн.")
+        if passport.attributes.get("rooms_min") is True:
+            parts.append(f"не менее {rooms} комнат")
+        else:
+            parts.append(f"{rooms} комн.")
     furnished = passport.attributes.get("furnished")
     if furnished is True:
         parts.append("с мебелью")
