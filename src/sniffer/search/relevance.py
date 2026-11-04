@@ -6,7 +6,9 @@ import re
 from datetime import UTC, datetime
 from math import exp
 
+from sniffer.domain.districts import complete_zone
 from sniffer.domain.facts_amenities import amenity_facts
+from sniffer.domain.facts_place import read_place
 from sniffer.domain.facts_text import fact_text
 from sniffer.domain.fingerprint import normalized
 from sniffer.domain.listing_state import listing_cutoff
@@ -144,6 +146,8 @@ def _contradicts(item: RawItem, passport: Passport, usd_vnd: float | None) -> bo
     """
     if _other_category(item, passport) or _other_model(item, passport):
         return True
+    if _wrong_district(item, passport):
+        return True
     # Прокат — оффер аренды, чужая сторона сделки: клиент с intent=BUY хочет
     # купить. Отсекаем только у покупателя — клиенту с intent=RENT прокат нужен.
     rental_offer = _is_rental_offer(item.title, item.text)
@@ -182,7 +186,9 @@ def _contradicts(item: RawItem, passport: Passport, usd_vnd: float | None) -> bo
         passport.category,
     ):
         return True
-    if _wrong_rooms(text, passport.attributes.get("rooms")):
+    if _wrong_rooms(
+        text, passport.attributes.get("rooms"), minimum=passport.attributes.get("rooms_min") is True
+    ):
         return True
     ceiling = _budget_ceiling_vnd(passport.budget, usd_vnd)
     floor = _budget_floor_vnd(passport.budget, usd_vnd)
@@ -304,7 +310,25 @@ def _model_cc_values(category: Category | None, text: str) -> list[int]:
     return [cc for cc in (model_engine_cc(slug) for slug in named) if cc is not None]
 
 
-def _wrong_rooms(text: str, wanted: object) -> bool:
+def _wrong_district(item: RawItem, passport: Passport) -> bool:
+    """A named district or zone must prove the requested location; unknown is not north."""
+    if not passport.districts:
+        return False
+    district = item.raw.get("district")
+    if isinstance(district, str) and district:
+        return district not in passport.districts
+    wanted_zone = complete_zone(passport.districts)
+    attributes = item.raw.get("attributes")
+    zone = attributes.get("zone") if isinstance(attributes, dict) else None
+    if isinstance(zone, str) and zone:
+        return zone != wanted_zone
+    place = read_place(fact_text(f"{item.title}\n{item.text}"))
+    if place.district:
+        return place.district not in passport.districts
+    return not (wanted_zone and place.zone == wanted_zone)
+
+
+def _wrong_rooms(text: str, wanted: object, *, minimum: bool = False) -> bool:
     """Число комнат лота противоречит запрошенному.
 
     Жёсткий факт, как модель и объём: «2 спальни» против студии — разное жильё,
@@ -318,7 +342,11 @@ def _wrong_rooms(text: str, wanted: object) -> bool:
     if wanted is None:
         return False
     found = room_counts(text)
-    return bool(found) and int(str(wanted)) not in found
+    return bool(found) and (
+        all(count < int(str(wanted)) for count in found)
+        if minimum
+        else int(str(wanted)) not in found
+    )
 
 
 # ── Прокат: оффер аренды в тексте лота ───────────────────────────────────────
@@ -634,7 +662,10 @@ def _mentions(passport: Passport, field: str, value: object, haystack: str) -> b
     # числитель, и роняла бы балл каждого лота. Отсев уже отбросил лоты с ЧУЖИМ
     # числом комнат (`_wrong_rooms`), здесь совпадение лишь поднимает балл.
     if field == "rooms":
-        return int(str(value)) in room_counts(haystack)
+        counts = room_counts(haystack)
+        if passport.attributes.get("rooms_min") is True:
+            return any(count >= int(str(value)) for count in counts)
+        return int(str(value)) in counts
     # Марка, как и модель, — имя, а не свойство рынка: слов в `ATTRIBUTE_TERMS`
     # у неё нет, ищется тем же детектором. Иначе «brand» попадала бы в
     # знаменатель доли атрибутов, никогда не попадая в числитель, и роняла бы

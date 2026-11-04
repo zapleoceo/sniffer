@@ -140,7 +140,20 @@ _VND_THRESHOLD = 100_000
 
 def parse_budget(text: str, *, intent: Intent | None = None) -> Budget:
     """Что клиент готов заплатить. Ничего не нашли — пустой бюджет, не ноль."""
-    amounts = _amounts(_without_rejected(text))
+    # В «7–15 млн» единица справа относится к обеим границам.
+    expanded = re.sub(
+        r"\b(\d+(?:[.,]\d+)?)\s*[-–—]\s*(\d+(?:[.,]\d+)?)\s*(млн|миллион\w*)\b",
+        r"\1 \3 - \2 \3",
+        text,
+        flags=re.IGNORECASE,
+    )
+    expanded = re.sub(
+        r"\bот\s+(\d+(?:[.,]\d+)?)\s+до\s+(\d+(?:[.,]\d+)?)\s*(млн|миллион\w*)\b",
+        r"от \1 \3 до \2 \3",
+        expanded,
+        flags=re.IGNORECASE,
+    )
+    amounts = _amounts(_without_rejected(expanded))
     lows = [value for value, mark in amounts if mark == "low"]
     highs = [value for value, mark in amounts if mark == "high"]
     plain = [value for value, mark in amounts if mark is None]

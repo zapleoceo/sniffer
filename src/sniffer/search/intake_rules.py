@@ -660,6 +660,13 @@ def detect_housing_attributes(text: str, category: Category | None) -> dict[str,
     rooms = detect_rooms(text, category)
     if rooms is not None:
         found["rooms"] = rooms
+        if re.search(
+            r"(?:\b(?:минимум|не\s+менее|от)\s*\d+\s*(?:комнат|спал)\w*|"
+            r"\b\d+\s*\+?\s*(?:комнат|спал)\w*\s*(?:минимум|и\s+более))",
+            text,
+            re.IGNORECASE,
+        ):
+            found["rooms_min"] = True
     furnished = _attribute_named_in(category, "furnished", text)
     if furnished is not None:
         found["furnished"] = furnished == "true"

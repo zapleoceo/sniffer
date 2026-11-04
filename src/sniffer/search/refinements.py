@@ -52,6 +52,8 @@ def merge_edit(current: Passport, fresh: Passport) -> Passport:
         or fresh.intent
     )
     merged_attributes = {**attributes, **fresh.attributes}
+    if "rooms" in fresh.attributes and "rooms_min" not in fresh.attributes:
+        merged_attributes.pop("rooms_min", None)
     if (fresh.category or current.category) in HOUSING:
         wishes = current_housing_preferences(attributes)
         for kind, value in housing_preference_updates(
@@ -77,6 +79,10 @@ def merge_edit(current: Passport, fresh: Passport) -> Passport:
     )
     if fresh.budget.max is not None:
         revised = apply_answer(revised, "budget.max", fresh.budget)
+        if fresh.budget.min is not None:
+            revised = revised.model_copy(
+                update={"budget": revised.budget.model_copy(update={"min": fresh.budget.min})}
+            )
     if intent != current.intent:
         revised = revised.model_copy(
             update={"budget": revised.budget.model_copy(update={"period": fresh.budget.period})}

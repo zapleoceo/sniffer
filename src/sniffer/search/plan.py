@@ -72,8 +72,11 @@ class SearchTask(BaseModel):
         return self.source, self.query.casefold(), self.lang
 
     def with_defaults(self, defaults: Mapping[str, Any]) -> SearchTask:
-        """Свои параметры источника всегда важнее подставленных из паспорта."""
-        return self.model_copy(update={"params": {**defaults, **self.params}})
+        """Source hints may specialize a task, but cannot erase a chosen district."""
+        params = {**defaults, **self.params}
+        if "districts" in defaults:
+            params["districts"] = defaults["districts"]
+        return self.model_copy(update={"params": params})
 
 
 class SearchPlan(BaseModel):
@@ -130,6 +133,8 @@ def context_params(passport: Passport) -> dict[str, Any]:
     params: dict[str, Any] = {}
     if passport.city:
         params["city"] = passport.city
+    if passport.districts:
+        params["districts"] = list(passport.districts)
     if passport.category:
         params["category"] = passport.category.value
     if passport.intent:

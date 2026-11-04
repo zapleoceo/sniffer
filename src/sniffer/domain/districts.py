@@ -46,6 +46,23 @@ PLACES: tuple[Place, ...] = tuple(
 # Слаг однозначен на весь реестр: два города с одним слагом склеили бы районы в базе.
 PLACE_BY_SLUG: dict[str, Place] = {place.slug: place for place in PLACES}
 
+
+def complete_zone(districts: list[str] | tuple[str, ...]) -> str | None:
+    """Return a zone only when the selected slugs cover that entire zone."""
+    selected = set(districts)
+    if not selected:
+        return None
+    locations = {PLACE_BY_SLUG[slug] for slug in selected if slug in PLACE_BY_SLUG}
+    zones = {(place.city, place.zone) for place in locations}
+    if len(zones) != 1 or not locations or len(locations) != len(selected):
+        return None
+    city, zone = next(iter(zones))
+    if zone is None:
+        return None
+    all_in_zone = {place.slug for place in PLACES if place.city == city and place.zone == zone}
+    return zone if selected == all_in_zone else None
+
+
 # Слова зон по-русски, по-английски и по-вьетнамски (на свёрнутом тексте). Зона названа
 # только оборотом с городом или частью города: голое «центр» — торговый центр, «север» —
 # ориентация окон («Ориентация: северо-восток»), и по ним зону не читаем. «Вьетнам

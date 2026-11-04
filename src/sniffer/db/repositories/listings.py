@@ -432,6 +432,15 @@ def _filtered(spec: MatchFilter) -> Select[Any]:
     )
     if spec.category is not None:
         statement = statement.where(models.Listing.category == spec.category)
+    if spec.districts:
+        known_district = models.Listing.district.in_(spec.districts)
+        if spec.zone:
+            known_zone = models.Listing.attributes["zone"].astext == spec.zone
+            statement = statement.where(
+                or_(known_district, and_(models.Listing.district.is_(None), known_zone))
+            )
+        else:
+            statement = statement.where(known_district)
     if spec.deal_type is not None:
         statement = statement.where(models.Listing.deal_type == spec.deal_type)
     if spec.since is not None:
@@ -443,6 +452,13 @@ def _filtered(spec: MatchFilter) -> Select[Any]:
             or_(
                 models.Listing.price_amount.is_(None),
                 models.Listing.price_amount <= spec.max_price_vnd,
+            )
+        )
+    if spec.min_price_vnd is not None:
+        statement = statement.where(
+            or_(
+                models.Listing.price_amount.is_(None),
+                models.Listing.price_amount >= spec.min_price_vnd,
             )
         )
     return _with_attributes(statement, spec)
@@ -458,6 +474,10 @@ def _with_attributes(statement: Select[Any], spec: MatchFilter) -> Select[Any]:
     «неизвестно», а не ошибка приведения на весь запрос.
     """
     attrs = models.Listing.attributes
+    if spec.rooms_min is not None:
+        rooms = attrs["rooms"].astext
+        known_rooms = case((rooms.op("~")("^[0-9]+$"), sql_cast(rooms, Integer)), else_=None)
+        statement = statement.where(or_(known_rooms.is_(None), known_rooms >= spec.rooms_min))
     for key, value in spec.attributes.items():
         if value in (None, ""):
             continue
