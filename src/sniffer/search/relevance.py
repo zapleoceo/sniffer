@@ -11,6 +11,7 @@ from sniffer.domain.facts_amenities import amenity_facts
 from sniffer.domain.facts_place import read_place
 from sniffer.domain.facts_text import fact_text
 from sniffer.domain.fingerprint import normalized
+from sniffer.domain.housing_rooms import read_bedrooms
 from sniffer.domain.listing_state import listing_cutoff
 from sniffer.domain.passport import (
     ENGINE_CC_BAND,
@@ -32,7 +33,7 @@ from sniffer.search.intake_rules import (
 )
 from sniffer.search.market_terms import RENTAL_PRICE_MARKERS, RENTAL_STEMS
 from sniffer.search.plan import SearchPlan, SearchTask
-from sniffer.search.rooms import read_bedrooms, room_counts
+from sniffer.search.rooms import room_counts
 from sniffer.search.vocabulary import (
     attribute_phrases,
     model_brand,

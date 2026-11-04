@@ -10,6 +10,7 @@ from typing import Any
 
 from sniffer.db import models
 from sniffer.domain.hard_filter import HardFilter
+from sniffer.domain.housing_rooms import read_bedrooms, read_total_rooms
 from sniffer.domain.passport import Budget, Category, Intent, Passport, PassportStatus
 from sniffer.domain.records import (
     BrokerCall,
@@ -25,7 +26,6 @@ from sniffer.domain.records import (
     SubscriptionState,
     User,
 )
-from sniffer.search.rooms import read_bedrooms, read_total_rooms
 
 
 def _legacy_housing_attributes(attributes: dict[str, Any], raw_query: str) -> dict[str, Any]:

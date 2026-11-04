@@ -20,6 +20,7 @@ import structlog
 from sniffer.broker.client import BrokerClient, BrokerError
 from sniffer.broker.usage import default_usage_sink
 from sniffer.config import get_settings
+from sniffer.domain.housing_rooms import read_bedrooms
 from sniffer.domain.passport import (
     Budget,
     Category,
@@ -38,7 +39,6 @@ from sniffer.search.intake_rules import (
 )
 from sniffer.search.market_terms import ALL_CITY_NAMES
 from sniffer.search.planner import StructuredCaller
-from sniffer.search.rooms import read_bedrooms
 
 log = structlog.get_logger(__name__)
 

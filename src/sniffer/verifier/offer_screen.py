@@ -20,8 +20,8 @@ from typing import Any, Protocol
 
 from sniffer.domain.facts_place import read_place
 from sniffer.domain.facts_text import fact_text
+from sniffer.domain.housing_rooms import read_bedrooms
 from sniffer.domain.passport import Category
-from sniffer.search.rooms import read_bedrooms
 
 SCREEN_CAPABILITY = "chat:sales"
 # Пачка — компромисс: меньше пачка — больше вызовов на накопленные 7 тысяч

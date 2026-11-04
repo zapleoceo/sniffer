@@ -7,12 +7,12 @@ from datetime import UTC, datetime
 
 from sniffer.bot.wording import accepted
 from sniffer.db.mappers import _legacy_housing_attributes
+from sniffer.domain.housing_rooms import read_bedrooms, read_total_rooms
 from sniffer.domain.records import Listing
 from sniffer.matching.rules import worth_sending
 from sniffer.search.intake import intake_schema, merge
 from sniffer.search.intake_rules import parse_query
 from sniffer.search.relevance import _wrong_bedrooms, rank_items
-from sniffer.search.rooms import read_bedrooms, read_total_rooms
 from sniffer.sources.base import RawItem
 from sniffer.verifier.offer_screen import parse_verdicts, screen_schema
 from sniffer.worker.screening import screened_fields

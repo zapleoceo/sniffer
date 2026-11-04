@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from sniffer.domain.districts import PLACES, ZONE_PHRASES, ZONE_WORDS
+from sniffer.domain.housing_rooms import read_bedrooms, read_total_rooms
 from sniffer.domain.passport import (
     RENTED_CATEGORIES,
     Category,
@@ -36,7 +37,7 @@ from sniffer.search.housing_preferences import KEY as HOUSING_PREFERENCES_KEY
 from sniffer.search.housing_preferences import updates as housing_preference_updates
 from sniffer.search.market_terms import ALL_CITY_NAMES, ATTRIBUTE_TERMS, LangTerms
 from sniffer.search.motorbike_models import BODY_SCOOTER, MOTORBIKE_BRANDS
-from sniffer.search.rooms import read_bedrooms, read_rooms, read_total_rooms
+from sniffer.search.rooms import read_rooms
 from sniffer.search.vocabulary import (
     brand_category,
     category_hints,

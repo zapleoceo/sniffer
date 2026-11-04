@@ -30,12 +30,12 @@ from sniffer.broker.client import BrokerCapError, BrokerClient, BrokerError
 from sniffer.config import get_settings
 from sniffer.db.engine import session_scope
 from sniffer.db.repositories.listings import ListingRepository
+from sniffer.domain.housing_rooms import read_bedrooms, read_total_rooms
 from sniffer.domain.passport import Category
 from sniffer.domain.records import Listing
 from sniffer.pipeline.listing_facts import fact_columns
 from sniffer.search.intake_rules import parse_query
 from sniffer.search.motorbike_models import MOTORBIKE_BRANDS
-from sniffer.search.rooms import read_bedrooms, read_total_rooms
 from sniffer.verifier.offer_screen import (
     SCREEN_BATCH,
     OfferVerdict,

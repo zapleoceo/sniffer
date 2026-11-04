@@ -197,7 +197,7 @@ HOUSING = (
             "category": "apartment",
             "city": "nha_trang",
             "budget.max": 10_000_000.0,
-            "attributes.rooms": 2,
+            "attributes.bedrooms": 2,
         },
     ),
     Scenario(

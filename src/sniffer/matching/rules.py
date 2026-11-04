@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 from math import exp
 
 from sniffer.domain.districts import complete_zone
+from sniffer.domain.housing_rooms import read_bedrooms
 from sniffer.domain.match_filter import build_match_filter, ceiling_vnd, floor_vnd
 from sniffer.domain.model_key import model_aliases, model_words
 from sniffer.domain.passport import (
@@ -30,7 +31,6 @@ from sniffer.domain.passport import (
 )
 from sniffer.domain.records import Listing, MatchFilter
 from sniffer.matching.attribute_match import conflicts, matches
-from sniffer.search.rooms import read_bedrooms
 
 # Насколько старая карточка ещё годится в подписку. Тот же порог, что у
 # `verifier/liveness.py`: объявление старше двух недель чаще продано, чем нет.
