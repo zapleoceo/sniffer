@@ -661,8 +661,8 @@ def detect_housing_attributes(text: str, category: Category | None) -> dict[str,
     if rooms is not None:
         found["rooms"] = rooms
         if re.search(
-            r"(?:\b(?:минимум|не\s+менее|от)\s*\d+\s*(?:комнат|спал)\w*|"
-            r"\b\d+\s*\+?\s*(?:комнат|спал)\w*\s*(?:минимум|и\s+более))",
+            r"(?:\b(?:минимум|миримум|не\s+менее|от)\s*\d+\s*(?:комнат|спал)\w*|"
+            r"\b\d+\s*\+?\s*(?:комнат|спал)\w*\s*(?:минимум|миримум|и\s+более))",
             text,
             re.IGNORECASE,
         ):

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+from sniffer.domain.districts import PLACE_BY_SLUG, ZONE_NAMES, complete_zone
 from sniffer.domain.passport import RENTED_CATEGORIES, Category, Intent, Passport
 
 # Единственное число — его читает человек, а не `passport.category.value`
@@ -66,12 +67,33 @@ def intent_label(passport: Passport) -> str:
 
 
 def budget_phrase(passport: Passport) -> str:
-    """«до 400 USD», «до 10 000 000 VND». Пустая строка — потолка цены нет."""
-    if not passport.budget.max:
+    """Display both budget bounds when the client gave a price range."""
+    if passport.budget.min is None and passport.budget.max is None:
         return ""
     currency = passport.budget.currency.value if passport.budget.currency else ""
-    amount = f"{passport.budget.max:,.2f}".rstrip("0").rstrip(".").replace(",", " ")
-    return f"до {amount} {currency}".strip()
+
+    def amount(value: float) -> str:
+        return f"{value:,.2f}".rstrip("0").rstrip(".").replace(",", " ")
+
+    if passport.budget.min is not None and passport.budget.max is not None:
+        return (
+            f"от {amount(passport.budget.min)} до {amount(passport.budget.max)} {currency}".strip()
+        )
+    if passport.budget.min is not None:
+        return f"от {amount(passport.budget.min)} {currency}".strip()
+    assert passport.budget.max is not None
+    return f"до {amount(passport.budget.max)} {currency}".strip()
+
+
+def district_phrase(passport: Passport) -> str:
+    """Name the verified selected location without claiming an unknown district."""
+    if not passport.districts:
+        return ""
+    zone = complete_zone(passport.districts)
+    if zone is not None:
+        return f"район: {ZONE_NAMES[zone]}"
+    names = [PLACE_BY_SLUG[slug].name for slug in passport.districts if slug in PLACE_BY_SLUG]
+    return f"район: {', '.join(names)}" if names else ""
 
 
 def plural(count: int, forms: tuple[str, str, str]) -> str:

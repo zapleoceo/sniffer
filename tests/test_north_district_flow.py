@@ -11,6 +11,7 @@ from decimal import Decimal
 import pytest
 from sqlalchemy.dialects import postgresql
 
+from sniffer.bot.wording import accepted
 from sniffer.db.repositories.listings import _filtered
 from sniffer.domain.districts import PLACE_BY_SLUG
 from sniffer.domain.records import Listing, MatchFilter
@@ -24,9 +25,42 @@ from sniffer.sources import chat_directory
 from sniffer.sources.base import RawItem
 
 QUERY = "2 комнаты минимум / Дом / Нячанг / Район север / До 10 млн"
+ACTUAL_QUERY_102 = "Дом\nНячанг \nСевер нячанга \nМиримум 2 комнаты \nОт 7 млн до 15 млн в масяц"
 
 
-def test_semantic_intake_keeps_grounded_district_and_minimum_rooms() -> None:
+def test_original_request_102_confirms_every_hard_condition() -> None:
+    passport = parse_query(ACTUAL_QUERY_102)
+    assert passport.attributes["rooms"] == 2
+    assert passport.attributes["rooms_min"] is True
+    assert passport.districts
+    assert (passport.budget.min, passport.budget.max) == (7_000_000, 15_000_000)
+    line = accepted(passport).splitlines()[0]
+    assert "дом" in line
+    assert "район: Север Нячанга" in line
+    assert "от 7 000 000 до 15 000 000 VND" in line
+    assert "не менее 2 комнат" in line
+    found = rank_items(
+        passport,
+        [
+            _card(1, "vinh_hai", 1, 9_000_000),
+            _card(2, "vinh_hai", 2, 7_000_000),
+            _card(3, "vinh_hai", 3, 15_000_000),
+            _card(4, "vinh_hai", 3, 6_000_000),
+            _card(5, "vinh_hai", 3, 16_000_000),
+        ],
+        usd_vnd=None,
+    )
+    assert {item.external_id for item in found} == {"2", "3"}
+
+
+def test_confirmation_does_not_claim_a_district_without_grounded_location() -> None:
+    passport = parse_query("Дом в Нячанге, не менее 2 комнаты, до 10 млн")
+    assert passport.districts == []
+    assert "район:" not in accepted(passport)
+
+
+@pytest.mark.parametrize("query", [QUERY, ACTUAL_QUERY_102])
+def test_semantic_intake_keeps_grounded_district_and_minimum_rooms(query: str) -> None:
     class Broker:
         def __init__(self) -> None:
             self.called = False
@@ -36,9 +70,9 @@ def test_semantic_intake_keeps_grounded_district_and_minimum_rooms() -> None:
             return {"category": "house", "city": "nha_trang", "budget_max": "10000000"}
 
     broker = Broker()
-    passport = asyncio.run(QueryIntake(broker=broker).parse(QUERY))
+    passport = asyncio.run(QueryIntake(broker=broker).parse(query))
     assert broker.called
-    assert passport.districts == parse_query(QUERY).districts
+    assert passport.districts == parse_query(query).districts
     assert passport.attributes["rooms_min"] is True
 
 
