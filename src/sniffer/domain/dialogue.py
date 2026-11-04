@@ -346,6 +346,8 @@ def _contradicts(current: Passport, fresh: Passport) -> bool:
     сказал, остаётся прежнее значение — иначе любой короткий повтор стирал бы
     собранные ответы.
     """
+    if fresh.districts and fresh.districts != current.districts:
+        return True
     if _contradicts_budget(current.budget, fresh.budget):
         return True
     return any(
