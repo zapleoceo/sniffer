@@ -22,7 +22,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from sniffer.domain.districts import PLACES, ZONE_PHRASES
+from sniffer.domain.districts import PLACES, ZONE_PHRASES, ZONE_WORDS
 from sniffer.domain.passport import (
     RENTED_CATEGORIES,
     Category,
@@ -406,7 +406,12 @@ def _query_districts(text: str, city: str | None) -> list[str]:
     if city not in (None, "nha_trang"):
         return []
     folded = text.casefold().replace("ё", "е")
-    zones = [zone for zone, phrase in ZONE_PHRASES.items() if re.search(phrase, folded)]
+    zones = [
+        zone
+        for zone, phrase in ZONE_PHRASES.items()
+        if re.search(phrase, folded)
+        or re.search(rf"\bрайон\s*[:\-]?\s*(?:{ZONE_WORDS[zone]})(?![\w-])", folded)
+    ]
     if len(zones) != 1:
         return []
     return sorted(
@@ -430,6 +435,14 @@ def detect_category(text: str) -> Category | None:
     """
     for category, pattern in _CATEGORY_RULES:
         if pattern.search(text):
+            # «Дом, минимум 2 комнаты»: the room count describes the house.
+            # A bare «комната в доме» still names a room, not a whole house.
+            if category is Category.ROOM and read_rooms(text) is not None:
+                if any(
+                    kind is Category.HOUSE and house_pattern.search(text)
+                    for kind, house_pattern in _CATEGORY_RULES
+                ):
+                    return Category.HOUSE
             return category
     return None
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from sniffer.domain.passport import Category
 from sniffer.search.intake_rules import parse_query
 from sniffer.search.refinements import refine, refines
 
@@ -71,3 +72,23 @@ def test_later_budget_edit_preserves_the_selected_districts() -> None:
     revised = refine(current, fresh, "до 600 долларов")
     assert revised.districts == current.districts
     assert revised.budget.max == 600
+
+
+def test_owner_northern_house_request_keeps_house_rooms_and_district() -> None:
+    request = parse_query("2 комнаты минимум / Дом / Нячанг / Район север / До 10 млн")
+
+    assert request.category == Category.HOUSE
+    assert request.city == "nha_trang"
+    assert request.attributes["rooms"] == 2
+    assert request.budget.max == 10_000_000
+    assert "vinh_hai" in request.districts
+    assert "vinh_phuoc" in request.districts
+
+
+def test_room_in_house_is_still_a_room_and_orientation_is_not_a_district() -> None:
+    request = parse_query("сниму комнату в доме в Нячанге, окна на север")
+
+    assert request.category == Category.ROOM
+    assert request.districts == []
+    assert not parse_query("дом в Дананге, район север").districts
+    assert not parse_query("дом в Нячанге, район северо-запад").districts
