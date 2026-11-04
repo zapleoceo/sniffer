@@ -30,6 +30,7 @@ from sniffer.domain.passport import (
 )
 from sniffer.domain.records import Listing, MatchFilter
 from sniffer.matching.attribute_match import conflicts, matches
+from sniffer.search.rooms import read_bedrooms
 
 # Насколько старая карточка ещё годится в подписку. Тот же порог, что у
 # `verifier/liveness.py`: объявление старше двух недель чаще продано, чем нет.
@@ -44,7 +45,7 @@ MATCH_MIN_SCORE = 0.55
 MONITOR_MAX_AGE = timedelta(hours=24)
 # Свойства паспорта, чьё сравнение у слежения НЕ равенство: объём идёт полосой, направление
 # — служебное, модель судится словами. Равенство по ним резало бы «от 250» и «200 ±25%» (D3).
-_NOT_EQUALITY = frozenset({"engine_cc", "engine_cc_dir", "model", "rooms_min"})
+_NOT_EQUALITY = frozenset({"engine_cc", "engine_cc_dir", "model", "rooms_min", "bedrooms"})
 
 
 def filter_for(
@@ -93,6 +94,13 @@ def worth_sending(listing: Listing, passport: Passport, *, now: datetime | None 
     if passport.districts and listing.district not in passport.districts:
         zone = complete_zone(passport.districts)
         if listing.district is not None or zone is None or listing.attributes.get("zone") != zone:
+            return False
+    if isinstance(passport.attributes.get("bedrooms"), int):
+        wanted_bedrooms = passport.attributes["bedrooms"]
+        stated = listing.attributes.get("bedrooms")
+        from_text = read_bedrooms(f"{listing.title}\n{listing.summary}")
+        known = from_text if from_text is not None else stated
+        if not isinstance(known, int) or known < wanted_bedrooms:
             return False
     wanted_model = str(passport.attributes.get("model") or "")
     if wanted_model and not _listing_has_model(listing, wanted_model):

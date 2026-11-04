@@ -35,6 +35,7 @@ from sniffer.domain.records import Listing
 from sniffer.pipeline.listing_facts import fact_columns
 from sniffer.search.intake_rules import parse_query
 from sniffer.search.motorbike_models import MOTORBIKE_BRANDS
+from sniffer.search.rooms import read_bedrooms, read_total_rooms
 from sniffer.verifier.offer_screen import (
     SCREEN_BATCH,
     OfferVerdict,
@@ -93,14 +94,28 @@ def screened_fields(listing: Listing, verdict: OfferVerdict) -> dict[str, Any]:
             attributes.setdefault("engine_cc", verdict.engine_cc)
     else:
         attributes.pop("power", None)
-    if verdict.category in _HOUSING and verdict.rooms is not None:
+    listing_text = f"{listing.title}\n{listing.summary}"
+    explicit_bedrooms = read_bedrooms(listing_text)
+    explicit_rooms = read_total_rooms(listing_text)
+    if (
+        verdict.category in _HOUSING
+        and verdict.rooms is not None
+        and (explicit_bedrooms is None or explicit_rooms is not None)
+    ):
         attributes.setdefault("rooms", verdict.rooms)
+    if verdict.category in _HOUSING and (verdict.bedrooms or explicit_bedrooms):
+        attributes["bedrooms"] = verdict.bedrooms or explicit_bedrooms
+        if explicit_rooms is None:
+            attributes.pop("rooms", None)
+    if verdict.category in _HOUSING and verdict.zone:
+        attributes.setdefault("zone", verdict.zone)
     return {
         "keep": True,
         "note": note,
         "category": verdict.category,
         "deal_type": verdict.deal,
         "attributes": attributes,
+        **({"district": verdict.district} if verdict.district and listing.district is None else {}),
     }
 
 

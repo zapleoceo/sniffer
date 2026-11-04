@@ -18,7 +18,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from sniffer.domain.facts_place import read_place
+from sniffer.domain.facts_text import fact_text
 from sniffer.domain.passport import Category
+from sniffer.search.rooms import read_bedrooms
 
 SCREEN_CAPABILITY = "chat:sales"
 # Пачка — компромисс: меньше пачка — больше вызовов на накопленные 7 тысяч
@@ -57,6 +60,12 @@ SYSTEM = (
     "why — до десяти слов, почему такой вердикт."
 )
 
+SYSTEM += (
+    " For housing, return exact source quotes for district_evidence and "
+    "bedrooms_evidence. Empty means unknown. Bedrooms exclude the living room; "
+    "do not infer location or bedrooms from the search request."
+)
+
 
 @dataclass(frozen=True, slots=True)
 class OfferVerdict:
@@ -67,6 +76,9 @@ class OfferVerdict:
     brand: str = ""
     engine_cc: int | None = None
     rooms: int | None = None
+    bedrooms: int | None = None
+    district: str | None = None
+    zone: str | None = None
     why: str = ""
 
     @property
@@ -109,6 +121,8 @@ def screen_schema() -> dict[str, Any]:
                         "brand": text,
                         "engine_cc": text,
                         "rooms": text,
+                        "district_evidence": text,
+                        "bedrooms_evidence": text,
                         "why": text,
                     },
                     "required": [
@@ -120,6 +134,8 @@ def screen_schema() -> dict[str, Any]:
                         "brand",
                         "engine_cc",
                         "rooms",
+                        "district_evidence",
+                        "bedrooms_evidence",
                         "why",
                     ],
                 },
@@ -153,10 +169,12 @@ async def screen_offers(texts: list[str], broker: StructuredBroker) -> list[Offe
         system=SYSTEM,
         max_tokens=SCREEN_TOKENS_PER_ITEM * len(texts) + SCREEN_TOKENS_OVERHEAD,
     )
-    return parse_verdicts(payload, len(texts))
+    return parse_verdicts(payload, len(texts), texts=texts)
 
 
-def parse_verdicts(payload: dict[str, Any], count: int) -> list[OfferVerdict | None]:
+def parse_verdicts(
+    payload: dict[str, Any], count: int, *, texts: list[str] | None = None
+) -> list[OfferVerdict | None]:
     found: list[OfferVerdict | None] = [None] * count
     for row in payload.get("verdicts", []):
         if not isinstance(row, dict):
@@ -168,6 +186,17 @@ def parse_verdicts(payload: dict[str, Any], count: int) -> list[OfferVerdict | N
         deal, power = str(row.get("deal")), str(row.get("power"))
         if kind not in KINDS or category not in {c.value for c in Category}:
             continue
+        source = texts[number - 1] if texts is not None else ""
+        location_quote = str(row.get("district_evidence") or "").strip()
+        bedroom_quote = str(row.get("bedrooms_evidence") or "").strip()
+        place = (
+            read_place(fact_text(location_quote))
+            if location_quote and location_quote in source
+            else None
+        )
+        bedrooms = (
+            read_bedrooms(bedroom_quote) if bedroom_quote and bedroom_quote in source else None
+        )
         found[number - 1] = OfferVerdict(
             kind=kind,
             category=category,
@@ -178,6 +207,9 @@ def parse_verdicts(payload: dict[str, Any], count: int) -> list[OfferVerdict | N
             # мотоцикл 1300; спален у сдаваемого жилья до десяти.
             engine_cc=_number(row.get("engine_cc"), 49, 1300),
             rooms=_number(row.get("rooms"), 0, 10),
+            bedrooms=bedrooms,
+            district=place.district if place else None,
+            zone=place.zone if place else None,
             why=str(row.get("why") or "")[:120],
         )
     return found

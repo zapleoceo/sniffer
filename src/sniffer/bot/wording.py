@@ -232,6 +232,9 @@ def accepted(passport: Passport) -> str:
             parts.append(f"не менее {rooms} комнат")
         else:
             parts.append(f"{rooms} комн.")
+    bedrooms = passport.attributes.get("bedrooms")
+    if bedrooms is not None:
+        parts.append(f"от {bedrooms} спален")
     furnished = passport.attributes.get("furnished")
     if furnished is True:
         parts.append("с мебелью")

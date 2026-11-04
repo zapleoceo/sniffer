@@ -32,7 +32,7 @@ from sniffer.search.intake_rules import (
 )
 from sniffer.search.market_terms import RENTAL_PRICE_MARKERS, RENTAL_STEMS
 from sniffer.search.plan import SearchPlan, SearchTask
-from sniffer.search.rooms import room_counts
+from sniffer.search.rooms import read_bedrooms, room_counts
 from sniffer.search.vocabulary import (
     attribute_phrases,
     model_brand,
@@ -189,6 +189,8 @@ def _contradicts(item: RawItem, passport: Passport, usd_vnd: float | None) -> bo
     if _wrong_rooms(
         text, passport.attributes.get("rooms"), minimum=passport.attributes.get("rooms_min") is True
     ):
+        return True
+    if _wrong_bedrooms(item, text, passport.attributes.get("bedrooms")):
         return True
     ceiling = _budget_ceiling_vnd(passport.budget, usd_vnd)
     floor = _budget_floor_vnd(passport.budget, usd_vnd)
@@ -347,6 +349,23 @@ def _wrong_rooms(text: str, wanted: object, *, minimum: bool = False) -> bool:
         if minimum
         else int(str(wanted)) not in found
     )
+
+
+def _wrong_bedrooms(item: RawItem, text: str, wanted: object) -> bool:
+    """A bedroom constraint needs evidence; a total-room count is insufficient."""
+    if wanted is None:
+        return False
+    try:
+        required = int(str(wanted))
+    except ValueError:
+        return True
+    attributes = item.raw.get("attributes")
+    stated = attributes.get("bedrooms") if isinstance(attributes, dict) else None
+    from_text = read_bedrooms(text)
+    # A conflicting structured value cannot override the original listing.
+    if from_text is not None:
+        return from_text < required
+    return not isinstance(stated, int) or stated < required
 
 
 # ── Прокат: оффер аренды в тексте лота ───────────────────────────────────────
