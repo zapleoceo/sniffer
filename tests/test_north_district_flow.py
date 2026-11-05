@@ -15,7 +15,9 @@ from sniffer.bot.wording import accepted
 from sniffer.db import models
 from sniffer.db.mappers import passport_values, to_stored_passport
 from sniffer.db.repositories.listings import _filtered
+from sniffer.db.repositories.passports import PassportRepository, _removed_floor_query
 from sniffer.domain.districts import PLACE_BY_SLUG
+from sniffer.domain.passport_edit import Change, apply_changes
 from sniffer.domain.records import Listing, MatchFilter
 from sniffer.matching.rules import filter_for, worth_sending
 from sniffer.search.intake import QueryIntake
@@ -61,7 +63,7 @@ def test_legacy_saved_range_recovers_floor_on_repeat_without_writing_row() -> No
     row.budget = {**row.budget, "min": None}
     saved_budget = dict(row.budget)
 
-    repeated = to_stored_passport(row).passport
+    repeated = to_stored_passport(row, recover_legacy_floor=True).passport
     assert row.budget == saved_budget
     assert (repeated.budget.min, repeated.budget.max) == (7_000_000, 15_000_000)
     assert repeated.districts == original.districts
@@ -105,6 +107,41 @@ def test_legacy_floor_does_not_override_an_explicit_saved_floor() -> None:
     row = models.Passport(id=73, user_id=1, version=3, root_id=71, **passport_values(original))
     row.budget = {**row.budget, "min": 8_000_000}
     assert to_stored_passport(row).passport.budget.min == 8_000_000
+
+
+def test_explicit_later_floor_removal_stays_removed_on_reload() -> None:
+    original = parse_query(ACTUAL_QUERY_102)
+    revised, payload = apply_changes(original, [Change("budget_min")])
+    assert payload["removed"] == ["budget_min"]
+    row = models.Passport(id=74, user_id=1, version=3, root_id=71, **passport_values(revised))
+
+    class Session:
+        async def scalar(self, _query: object) -> int:
+            return 1  # Existing manual_edit event removed budget_min in this root.
+
+    restored = asyncio.run(PassportRepository(Session()).map_stored(row))  # type: ignore[arg-type]
+    assert restored.passport.budget.min is None
+    assert to_stored_passport(row).passport.budget.min is None
+
+
+def test_repository_recovers_only_after_event_check() -> None:
+    original = parse_query(ACTUAL_QUERY_102)
+    row = models.Passport(id=75, user_id=1, version=2, root_id=71, **passport_values(original))
+    row.budget = {**row.budget, "min": None}
+
+    class Session:
+        async def scalar(self, _query: object) -> None:
+            return None
+
+    restored = asyncio.run(PassportRepository(Session()).map_stored(row))  # type: ignore[arg-type]
+    assert restored.passport.budget.min == 7_000_000
+
+
+def test_explicit_floor_removal_query_uses_same_root_and_json_event() -> None:
+    statement = _removed_floor_query(71).compile(dialect=postgresql.dialect())  # type: ignore[no-untyped-call]
+    assert "passport_events.payload @>" in str(statement)
+    assert 71 in statement.params.values()
+    assert {"removed": ["budget_min"]} in statement.params.values()
 
 
 def test_confirmation_does_not_claim_a_district_without_grounded_location() -> None:

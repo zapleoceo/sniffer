@@ -29,6 +29,7 @@ from sniffer.db import models
 from sniffer.db.mappers import to_subscription_state
 from sniffer.db.repositories.base import Repository
 from sniffer.db.repositories.delivery import OUTBOX_CANCELLED, OUTBOX_PENDING, entitled
+from sniffer.db.repositories.passports import PassportRepository
 from sniffer.domain.monitoring import Overflow
 from sniffer.domain.records import SubscriptionState
 
@@ -179,7 +180,8 @@ class MonitorRepository(Repository):
         broken: list[BrokenSubscription] = []
         for subscription, passport in rows:
             try:
-                ready.append(to_subscription_state(subscription, passport))
+                stored = await PassportRepository(self._session).map_stored(passport)
+                ready.append(to_subscription_state(subscription, passport, stored_passport=stored))
             except Exception as exc:
                 # Не перечисляем «ожидаемые» типы: незнакомое значение может прийти любым
                 # исключением разбора, и список ожиданий — это и есть дефект. Строка не

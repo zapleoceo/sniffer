@@ -34,10 +34,35 @@ def not_archived() -> ColumnElement[bool]:
     )
 
 
+def _removed_floor_query(root: int) -> Select[tuple[int]]:
+    return (
+        select(models.PassportEvent.id)
+        .join(models.Passport, models.Passport.id == models.PassportEvent.passport_id)
+        .where(
+            or_(models.Passport.id == root, models.Passport.root_id == root),
+            models.PassportEvent.kind == "manual_edit",
+            models.PassportEvent.payload.contains({"removed": ["budget_min"]}),
+        )
+        .limit(1)
+    )
+
+
 class PassportRepository(Repository):
+    async def map_stored(self, row: models.Passport) -> StoredPassport:
+        """Read legacy ranges only after checking explicit lower-bound removals."""
+        budget = row.budget or {}
+        if budget.get("min") is not None or budget.get("max") is None:
+            return to_stored_passport(row)
+        candidate = to_stored_passport(row, recover_legacy_floor=True)
+        if candidate.passport.budget.min is None:
+            return candidate
+        root = row.root_id or row.id
+        removed = await self._session.scalar(_removed_floor_query(root))
+        return to_stored_passport(row) if removed is not None else candidate
+
     async def get(self, passport_id: int) -> StoredPassport | None:
         row = await self._session.get(models.Passport, passport_id)
-        return to_stored_passport(row) if row is not None else None
+        return await self.map_stored(row) if row is not None else None
 
     async def get_current(self, user_id: int) -> StoredPassport | None:
         """Паспорт, с которым клиент работает прямо сейчас.
@@ -69,7 +94,7 @@ class PassportRepository(Repository):
                 .where(models.User.id == user_id)
                 .values(active_passport_root=row.root_id or row.id)
             )
-        return to_stored_passport(row) if row is not None else None
+        return await self.map_stored(row) if row is not None else None
 
     async def current_of(self, user_id: int, root: int) -> StoredPassport | None:
         """Текущая версия поиска по корню — без указателя клиента и без убранных.
@@ -88,7 +113,7 @@ class PassportRepository(Repository):
             )
             .limit(1)
         )
-        return to_stored_passport(row) if row is not None else None
+        return await self.map_stored(row) if row is not None else None
 
     async def select(
         self, user_id: int, root: int, *, editing: bool = False, move_pointer: bool = True
@@ -188,7 +213,7 @@ class PassportRepository(Repository):
         rows = await self._session.execute(
             _overviews(user_id).order_by(recency.desc(), models.Passport.id.desc()).limit(limit)
         )
-        return [_overview(*row) for row in rows]
+        return [_overview(*row, passport=(await self.map_stored(row[0])).passport) for row in rows]
 
     async def get_query(self, user_id: int, root: int) -> QueryOverview | None:
         """Один поиск клиента по корню — независимо от того, помещается ли он в список.
@@ -201,7 +226,11 @@ class PassportRepository(Repository):
         chain = func.coalesce(models.Passport.root_id, models.Passport.id)
         found = await self._session.execute(_overviews(user_id).where(chain == root).limit(1))
         row = found.first()
-        return None if row is None else _overview(*row)
+        return (
+            None
+            if row is None
+            else _overview(*row, passport=(await self.map_stored(row[0])).passport)
+        )
 
     async def save_new(
         self, user_id: int, passport: Passport, *, move_pointer: bool = True
@@ -320,9 +349,13 @@ def _overviews(user_id: int) -> Select[tuple[models.Passport, models.Subscriptio
 
 
 def _overview(
-    passport: models.Passport, subscription: models.Subscription | None, active_root: int | None
+    row: models.Passport,
+    subscription: models.Subscription | None,
+    active_root: int | None,
+    *,
+    passport: Passport,
 ) -> QueryOverview:
-    root = passport.root_id or passport.id
+    root = row.root_id or row.id
     monitoring = "off"
     expires_at = None
     if subscription is not None:
@@ -333,7 +366,7 @@ def _overview(
             monitoring = "active" if subscription.is_active else "paused"
     return QueryOverview(
         root=root,
-        passport=to_stored_passport(passport).passport,
+        passport=passport,
         is_active=root == active_root,
         monitoring=monitoring,
         expires_at=expires_at,

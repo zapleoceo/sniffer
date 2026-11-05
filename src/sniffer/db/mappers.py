@@ -163,7 +163,9 @@ def to_job(row: models.Job) -> Job:
     )
 
 
-def to_stored_passport(row: models.Passport) -> StoredPassport:
+def to_stored_passport(
+    row: models.Passport, *, recover_legacy_floor: bool = False
+) -> StoredPassport:
     intent = Intent(row.intent) if row.intent else None
     return StoredPassport(
         id=row.id,
@@ -180,8 +182,10 @@ def to_stored_passport(row: models.Passport) -> StoredPassport:
             category=Category(row.category) if row.category else None,
             city=row.city,
             districts=list(row.districts),
-            budget=_legacy_budget_floor(
-                Budget.model_validate(row.budget or {}), row.raw_query, intent
+            budget=(
+                _legacy_budget_floor(Budget.model_validate(row.budget or {}), row.raw_query, intent)
+                if recover_legacy_floor
+                else Budget.model_validate(row.budget or {})
             ),
             attributes=_legacy_housing_attributes(dict(row.attributes), row.raw_query),
             must_have=list(row.must_have),
@@ -196,7 +200,12 @@ def to_stored_passport(row: models.Passport) -> StoredPassport:
     )
 
 
-def to_subscription_state(row: models.Subscription, passport: models.Passport) -> SubscriptionState:
+def to_subscription_state(
+    row: models.Subscription,
+    passport: models.Passport,
+    *,
+    stored_passport: StoredPassport | None = None,
+) -> SubscriptionState:
     """Подписка вместе с ТЕКУЩЕЙ версией паспорта её цепочки.
 
     Незнакомое значение в паспорте падает здесь (см. `to_stored_passport`), поэтому тот,
@@ -220,7 +229,7 @@ def to_subscription_state(row: models.Subscription, passport: models.Passport) -
         overflow_notified=row.overflow_notified,
         no_slot_since=row.no_slot_since,
         hard_filter=HardFilter.from_json(row.hard_filter),
-        passport=to_stored_passport(passport),
+        passport=stored_passport or to_stored_passport(passport),
     )
 
 

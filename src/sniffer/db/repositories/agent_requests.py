@@ -5,8 +5,8 @@ from __future__ import annotations
 from sqlalchemy import func, select
 
 from sniffer.db import models
-from sniffer.db.mappers import to_stored_passport
 from sniffer.db.repositories.base import Repository
+from sniffer.db.repositories.passports import PassportRepository
 from sniffer.domain.records import StoredPassport
 
 
@@ -22,4 +22,4 @@ class AgentRequestRepository(Repository):
         )
         if row is None:
             raise PermissionError("request_not_current_or_owned")
-        return to_stored_passport(row)
+        return await PassportRepository(self._session).map_stored(row)
