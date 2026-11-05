@@ -67,6 +67,7 @@ from sniffer.search.refinements import (
     price_refinement,
     refine,
     refines,
+    removes_room_minimum,
 )
 from sniffer.search.relevance import rank_items, with_vnd_budget
 from sniffer.search.vocabulary import is_served
@@ -323,9 +324,31 @@ class Conversation:
             # разговора выше устарел, поэтому читаем его заново.
             dialogue = await self._store.load(client)
         current = dialogue.passport
+        if current is not None and removes_room_minimum(message):
+            if "rooms" not in current.passport.attributes:
+                await send(Reply(text="Минимум комнат уже не задан."))
+                return
+            revised, payload = apply_changes(current.passport, [Change("rooms")])
+            attributes = dict(revised.attributes)
+            attributes.pop("rooms_min", None)
+            revised = revised.model_copy(update={"attributes": attributes})
+            dialogue = await self._store.revise(
+                dialogue, revised, kind=EVENT_MANUAL_EDIT, payload=payload
+            )
+            await self._ask_or_search(dialogue, send)
+            return
         floor_change, parse_message = (
             budget_floor_edit(current.passport, message) if current is not None else (None, message)
         )
+        if (
+            current is not None
+            and floor_change is not None
+            and floor_change.removes
+            and current.passport.budget.min is None
+            and not parse_message.strip(" ,;.")
+        ):
+            await send(Reply(text="Нижняя граница цены уже снята."))
+            return
         if current is not None and floor_change is None and keeps_budget_floor(message):
             stated = parse_query(message, default_city="")
             if (

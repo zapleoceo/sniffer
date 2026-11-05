@@ -6,6 +6,7 @@ import re
 
 from sniffer.domain.budget_rules import parse_budget
 from sniffer.domain.dialogue import apply_answer
+from sniffer.domain.housing_rooms import read_total_rooms
 from sniffer.domain.passport import Passport
 from sniffer.domain.passport_edit import Change
 from sniffer.search.housing_preferences import HOUSING, KEY
@@ -31,8 +32,8 @@ _FLOOR_WORDS = (
 )
 _REMOVE_WORDS = r"\b(?:убер\w*|убир\w*|сним\w*|удал\w*)\b"
 _REMOVE_BUDGET_FLOOR = re.compile(
-    rf"(?:{_FLOOR_WORDS}.{{0,35}}{_REMOVE_WORDS}|"
-    rf"{_REMOVE_WORDS}.{{0,35}}{_FLOOR_WORDS})",
+    rf"(?:{_FLOOR_WORDS}[^,.;!?]{{0,35}}{_REMOVE_WORDS}|"
+    rf"{_REMOVE_WORDS}[^,.;!?]{{0,35}}{_FLOOR_WORDS})",
     re.IGNORECASE,
 )
 _NEGATED_FLOOR_REMOVAL = re.compile(
@@ -44,6 +45,12 @@ _KEEP_BUDGET_FLOOR = re.compile(
     re.IGNORECASE,
 )
 _ROOM_MINIMUM = re.compile(r"\bминимум\s+(?:\d+|\w+)\s*(?:комнат|спал)\w*", re.IGNORECASE)
+_KEEP_ROOM_MINIMUM = re.compile(
+    r"\bминимум\s+(?:\d+|\w+)\s*комнат\w*\s+остав\w*\b", re.IGNORECASE
+)
+_REMOVE_ROOM_MINIMUM = re.compile(
+    rf"{_REMOVE_WORDS}\s+{_ROOM_MINIMUM.pattern}", re.IGNORECASE
+)
 _SET_BUDGET_FLOOR = re.compile(
     r"\b(?:подними|поставь|установи|сделай)\s+"
     r"(?:нижн(?:юю|ий)\s+границ\w*|минимум)\s+до\s*"
@@ -64,19 +71,31 @@ def keeps_budget_floor(text: str) -> bool:
 
 def removes_budget_floor(text: str) -> bool:
     """An explicit request to remove the current search's lower price bound."""
-    return (
-        _REMOVE_BUDGET_FLOOR.search(text) is not None
-        and not _ROOM_MINIMUM.search(text)
-        and not negates_budget_floor_removal(text)
-    )
+    removed = _REMOVE_BUDGET_FLOOR.search(text)
+    if removed is None or negates_budget_floor_removal(text):
+        return False
+    clause_start = max(text.rfind(",", 0, removed.start()), text.rfind(";", 0, removed.start())) + 1
+    clause_end_candidates = [
+        end for separator in (",", ";") if (end := text.find(separator, removed.end())) >= 0
+    ]
+    clause_end = min(clause_end_candidates, default=len(text))
+    return _ROOM_MINIMUM.search(text[clause_start:clause_end]) is None
 
 
 def budget_floor_edit(current: Passport, text: str) -> tuple[Change | None, str]:
     """Extract a price-floor edit while leaving other clauses for normal parsing."""
-    if removes_budget_floor(text) and current.budget.min is not None:
+    if removes_budget_floor(text):
         removed = _REMOVE_BUDGET_FLOOR.search(text)
         assert removed is not None
-        return Change("budget_min"), text[: removed.start()] + text[removed.end() :]
+        remainder = text[: removed.start()] + re.sub(
+            r"^\s+цен\w*\b", "", text[removed.end() :], count=1, flags=re.IGNORECASE
+        )
+        kept_rooms = _KEEP_ROOM_MINIMUM.search(remainder)
+        if kept_rooms is not None and (
+            read_total_rooms(kept_rooms.group()) == current.attributes.get("rooms")
+        ):
+            remainder = remainder[: kept_rooms.start()] + remainder[kept_rooms.end() :]
+        return Change("budget_min"), remainder
     set_floor = _SET_BUDGET_FLOOR.search(text)
     if set_floor is None:
         return None, text
@@ -87,6 +106,11 @@ def budget_floor_edit(current: Passport, text: str) -> tuple[Change | None, str]
         Change("budget_min", parsed.max),
         text[: set_floor.start()] + text[set_floor.end() :],
     )
+
+
+def removes_room_minimum(text: str) -> bool:
+    """Recognize a standalone removal of a room count, not a price edit."""
+    return _REMOVE_ROOM_MINIMUM.fullmatch(text.strip()) is not None
 
 
 def price_refinement(current: Passport, text: str) -> Passport | None:

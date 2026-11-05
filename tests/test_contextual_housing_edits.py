@@ -205,6 +205,60 @@ def test_compound_edit_applies_all_changes_in_one_root(
     assert store.monitoring == {root: "active"}
 
 
+def test_price_floor_removal_preserves_explicit_room_minimum(monkeypatch) -> None:
+    monkeypatch.setattr(
+        intake_module,
+        "get_settings",
+        lambda: Settings(broker_project_key="", default_city="nha_trang"),
+    )
+    store = MemoryStore()
+    original = parse_query(BASE, default_city="")
+    complete(store.start(Dialogue(user_id=1), original))
+    talker = Conversation(store, intake=QueryIntake, finder=_nothing, recorder=SilentJournal())
+    before = complete(store.load(CLIENT))
+    assert before.passport is not None
+
+    complete(
+        talker.on_text(CLIENT, "Убери нижнюю границу цены, минимум две комнаты оставь", _reply)
+    )
+    after = complete(store.load(CLIENT))
+    assert after.passport is not None
+    assert after.passport.root == before.passport.root
+    assert after.passport.passport.budget.min is None
+    assert after.passport.passport.budget.max == 15_000_000
+    assert after.passport.passport.attributes["rooms"] == 2
+    assert after.passport.passport.attributes["rooms_min"] is True
+
+    complete(talker.on_text(CLIENT, "Убери нижнюю границу цены", _reply))
+    repeated = complete(store.load(CLIENT))
+    assert repeated.passport is not None
+    assert repeated.passport.root == after.passport.root
+    assert repeated.passport.version == after.passport.version
+    assert repeated.passport.passport.budget.min is None
+
+
+def test_room_minimum_removal_does_not_remove_price_floor(monkeypatch) -> None:
+    monkeypatch.setattr(
+        intake_module,
+        "get_settings",
+        lambda: Settings(broker_project_key="", default_city="nha_trang"),
+    )
+    store = MemoryStore()
+    original = parse_query(BASE, default_city="")
+    complete(store.start(Dialogue(user_id=1), original))
+    talker = Conversation(store, intake=QueryIntake, finder=_nothing, recorder=SilentJournal())
+    before = complete(store.load(CLIENT))
+    assert before.passport is not None
+
+    complete(talker.on_text(CLIENT, "Убери минимум две комнаты", _reply))
+    after = complete(store.load(CLIENT))
+    assert after.passport is not None
+    assert after.passport.root == before.passport.root
+    assert after.passport.passport.budget.min == 7_000_000
+    assert after.passport.passport.budget.max == 15_000_000
+    assert "rooms" not in after.passport.passport.attributes
+
+
 def test_mock_model_sees_context_and_can_request_explicit_floor_removal(monkeypatch) -> None:
     monkeypatch.setattr(
         intake_module,
