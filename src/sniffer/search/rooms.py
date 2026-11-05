@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import re
 
+from sniffer.domain.housing_rooms import SPELLED_ROOM_NUMBERS
+
 # Правдоподобные границы. Ниже 1 комнаты не бывает, выше 9 — это уже не число
 # комнат, а чужое число, прижавшееся к слову случайно.
 MIN_ROOMS = 1
@@ -43,6 +45,10 @@ _WORD_ROOMS: tuple[tuple[int, re.Pattern[str]], ...] = (
 # обязано начинаться сразу за числом, а не искаться где-то дальше.
 _ROOM_UNIT = r"(?:спал(?:ьн|ен)\w*|комнат\w*|бедрум\w*|bedroom\w*|bed\b|br\b|room\w*)"
 _NUM_ROOMS_RE = re.compile(r"(?<!\d)(\d{1,2})[\s-]*" + _ROOM_UNIT, re.IGNORECASE)
+_SPELLED_ROOMS_RE = re.compile(
+    r"\b(" + "|".join(SPELLED_ROOM_NUMBERS) + r")\s+" + _ROOM_UNIT,
+    re.IGNORECASE,
+)
 
 
 def room_counts(text: str) -> list[int]:
@@ -64,6 +70,10 @@ def room_counts(text: str) -> list[int]:
         for match in _NUM_ROOMS_RE.finditer(text)
         if MIN_ROOMS <= int(match.group(1)) <= MAX_ROOMS
     ]
+    numbered.extend(
+        (match.start(), SPELLED_ROOM_NUMBERS[match.group(1).lower()])
+        for match in _SPELLED_ROOMS_RE.finditer(text)
+    )
     hits = numbered or [
         (match.start(), value) for value, pattern in _WORD_ROOMS for match in pattern.finditer(text)
     ]

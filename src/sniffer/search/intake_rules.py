@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from sniffer.domain.districts import PLACES, ZONE_PHRASES, ZONE_WORDS
-from sniffer.domain.housing_rooms import read_bedrooms, read_total_rooms
+from sniffer.domain.housing_rooms import SPELLED_ROOM_NUMBERS, read_bedrooms, read_total_rooms
 from sniffer.domain.passport import (
     RENTED_CATEGORIES,
     Category,
@@ -662,7 +662,9 @@ def detect_housing_attributes(text: str, category: Category | None) -> dict[str,
     if rooms is not None:
         found["rooms"] = rooms
         if re.search(
-            r"(?:\b(?:минимум|миримум|не\s+менее|от)\s*\d+\s*(?:комнат|спал)\w*|"
+            r"(?:\b(?:минимум|миримум|не\s+менее|от)\s*(?:\d+|"
+            + "|".join(SPELLED_ROOM_NUMBERS)
+            + r")\s*(?:комнат|спал)\w*|"
             r"\b\d+\s*\+?\s*(?:комнат|спал)\w*\s*(?:минимум|миримум|и\s+более))",
             text,
             re.IGNORECASE,
