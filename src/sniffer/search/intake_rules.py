@@ -412,6 +412,10 @@ def _query_districts(text: str, city: str | None) -> list[str]:
         for zone, phrase in ZONE_PHRASES.items()
         if re.search(phrase, folded)
         or re.search(rf"\bрайон\s*[:\-]?\s*(?:{ZONE_WORDS[zone]})(?![\w-])", folded)
+        or re.search(
+            rf"\bрайон\s+(?:поменяй|измени|замени)\s+на\s+(?:{ZONE_WORDS[zone]})(?![\w-])",
+            folded,
+        )
     ]
     if len(zones) != 1:
         return []

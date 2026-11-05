@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import re
 
+from sniffer.domain.budget_rules import parse_budget
 from sniffer.domain.dialogue import apply_answer
 from sniffer.domain.passport import Passport
+from sniffer.domain.passport_edit import Change
 from sniffer.search.housing_preferences import HOUSING, KEY
 from sniffer.search.housing_preferences import current as current_housing_preferences
 from sniffer.search.housing_preferences import updates as housing_preference_updates
@@ -25,7 +27,7 @@ _PLACE = re.compile(r"\b(?:в|во|на)\s+[^\W\d_]{3,}", re.IGNORECASE)
 
 _FLOOR_WORDS = (
     r"\b(?:нижн(?:юю|ий)\s+(?:границ\w*|порог\w*)|"
-    r"минимальн\w*\s+(?:цен\w*|бюджет\w*))\b"
+    r"минимальн\w*\s+(?:цен\w*|бюджет\w*)|минимум)\b"
 )
 _REMOVE_WORDS = r"\b(?:убер\w*|убир\w*|сним\w*|удал\w*)\b"
 _REMOVE_BUDGET_FLOOR = re.compile(
@@ -39,6 +41,13 @@ _NEGATED_FLOOR_REMOVAL = re.compile(
 )
 _KEEP_BUDGET_FLOOR = re.compile(
     rf"(?:{_FLOOR_WORDS}.{{0,35}}\bостав\w*\b|\bостав\w*\b.{{0,35}}{_FLOOR_WORDS})",
+    re.IGNORECASE,
+)
+_ROOM_MINIMUM = re.compile(r"\bминимум\s+(?:\d+|\w+)\s*(?:комнат|спал)\w*", re.IGNORECASE)
+_SET_BUDGET_FLOOR = re.compile(
+    r"\b(?:подними|поставь|установи|сделай)\s+"
+    r"(?:нижн(?:юю|ий)\s+границ\w*|минимум)\s+до\s*"
+    r"(?P<amount>\d[\d\s.,]*\s*(?:млн|миллион\w*|тыс\w*|vnd|донг\w*)?)",
     re.IGNORECASE,
 )
 
@@ -55,7 +64,29 @@ def keeps_budget_floor(text: str) -> bool:
 
 def removes_budget_floor(text: str) -> bool:
     """An explicit request to remove the current search's lower price bound."""
-    return _REMOVE_BUDGET_FLOOR.search(text) is not None and not negates_budget_floor_removal(text)
+    return (
+        _REMOVE_BUDGET_FLOOR.search(text) is not None
+        and not _ROOM_MINIMUM.search(text)
+        and not negates_budget_floor_removal(text)
+    )
+
+
+def budget_floor_edit(current: Passport, text: str) -> tuple[Change | None, str]:
+    """Extract a price-floor edit while leaving other clauses for normal parsing."""
+    if removes_budget_floor(text) and current.budget.min is not None:
+        removed = _REMOVE_BUDGET_FLOOR.search(text)
+        assert removed is not None
+        return Change("budget_min"), text[: removed.start()] + text[removed.end() :]
+    set_floor = _SET_BUDGET_FLOOR.search(text)
+    if set_floor is None:
+        return None, text
+    parsed = parse_budget("до " + set_floor.group("amount"), intent=current.intent)
+    if parsed.max is None or parsed.currency != current.budget.currency:
+        return None, text
+    return (
+        Change("budget_min", parsed.max),
+        text[: set_floor.start()] + text[set_floor.end() :],
+    )
 
 
 def price_refinement(current: Passport, text: str) -> Passport | None:

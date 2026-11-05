@@ -162,6 +162,49 @@ def test_keep_floor_is_noop_and_reversed_removal_edits_same_root(monkeypatch) ->
     assert store.monitoring == {}
 
 
+@pytest.mark.parametrize(
+    ("message", "floor", "ceiling", "zone"),
+    [
+        ("Убери нижнюю границу, верхнюю поставь 12 млн", None, 12_000_000, "north"),
+        ("Нижнюю границу не убирай, подними минимум до 9 млн", 9_000_000, 15_000_000, "north"),
+        ("Убери минимум и район поменяй на запад Нячанга", None, 15_000_000, "west"),
+    ],
+)
+def test_compound_edit_applies_all_changes_in_one_root(
+    monkeypatch, message: str, floor: int | None, ceiling: int, zone: str
+) -> None:
+    from sniffer.domain.districts import PLACE_BY_SLUG
+
+    monkeypatch.setattr(
+        intake_module,
+        "get_settings",
+        lambda: Settings(broker_project_key="", default_city="nha_trang"),
+    )
+    store = MemoryStore()
+    original = parse_query(BASE.replace("от 7", "от 8"), default_city="")
+    complete(store.start(Dialogue(user_id=1), original))
+    talker = Conversation(store, intake=QueryIntake, finder=_nothing, recorder=SilentJournal())
+    first = complete(store.load(CLIENT))
+    assert first.passport is not None
+    root = first.passport.root
+    store.monitoring[root] = "active"
+
+    complete(talker.on_text(CLIENT, message, _reply))
+    changed = complete(store.load(CLIENT))
+    assert changed.passport is not None
+    passport = changed.passport.passport
+    assert changed.passport.root == root
+    assert changed.passport.version == 2
+    assert (passport.budget.min, passport.budget.max) == (floor, ceiling)
+    assert passport.category is Category.HOUSE
+    assert passport.city == original.city
+    assert passport.attributes["rooms"] == original.attributes["rooms"]
+    assert passport.attributes["rooms_min"] == original.attributes["rooms_min"]
+    assert {PLACE_BY_SLUG[district].zone for district in passport.districts} == {zone}
+    assert {row.root for row in store.rows} == {root}
+    assert store.monitoring == {root: "active"}
+
+
 def test_mock_model_sees_context_and_can_request_explicit_floor_removal(monkeypatch) -> None:
     monkeypatch.setattr(
         intake_module,

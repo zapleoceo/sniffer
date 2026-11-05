@@ -61,12 +61,12 @@ from sniffer.search.intake_rules import parse_query
 from sniffer.search.live import run_plan
 from sniffer.search.planner import SearchPlanner
 from sniffer.search.refinements import (
+    budget_floor_edit,
     keeps_budget_floor,
     merge_edit,
     price_refinement,
     refine,
     refines,
-    removes_budget_floor,
 )
 from sniffer.search.relevance import rank_items, with_vnd_budget
 from sniffer.search.vocabulary import is_served
@@ -323,7 +323,10 @@ class Conversation:
             # разговора выше устарел, поэтому читаем его заново.
             dialogue = await self._store.load(client)
         current = dialogue.passport
-        if current is not None and keeps_budget_floor(message):
+        floor_change, parse_message = (
+            budget_floor_edit(current.passport, message) if current is not None else (None, message)
+        )
+        if current is not None and floor_change is None and keeps_budget_floor(message):
             stated = parse_query(message, default_city="")
             if (
                 stated.category is None
@@ -334,13 +337,6 @@ class Conversation:
             ):
                 await send(Reply(text="Нижнюю границу оставил без изменений."))
                 return
-        if current is not None and removes_budget_floor(message):
-            revised, payload = apply_changes(current.passport, [Change("budget_min")])
-            dialogue = await self._store.revise(
-                dialogue, revised, kind=EVENT_MANUAL_EDIT, payload=payload
-            )
-            await self._ask_or_search(dialogue, send)
-            return
         if current is not None and (not dialogue.state.pending or dialogue.editing):
             refined = price_refinement(current.passport, message)
             if refined is not None:
@@ -353,12 +349,14 @@ class Conversation:
                 await self._ask_or_search(dialogue, send)
                 return
         if dialogue.editing and current is not None:
-            passport, remove_floor = await self._parse_against_current(message, current.passport)
+            passport, remove_floor = await self._parse_against_current(
+                parse_message, current.passport
+            )
             passport = merge_edit(current.passport, passport)
             edit_payload: dict[str, object] = {"field": "query", "value": message}
-            if remove_floor:
-                passport, removal = apply_changes(passport, [Change("budget_min")])
-                edit_payload["removed"] = removal["removed"]
+            if floor_change is not None or remove_floor:
+                passport, changes = apply_changes(passport, [floor_change or Change("budget_min")])
+                edit_payload.update(changes)
             _lap("intake_ms")
             dialogue = await self._store.revise(
                 dialogue,
@@ -374,13 +372,15 @@ class Conversation:
                 return
 
         if current is not None:
-            passport, remove_floor = await self._parse_against_current(message, current.passport)
+            passport, remove_floor = await self._parse_against_current(
+                parse_message, current.passport
+            )
         else:
             passport, remove_floor = await self._intake().parse(message), False
         _lap("intake_ms")
-        if current is not None and remove_floor:
-            revised = merge_edit(current.passport, passport)
-            revised, payload = apply_changes(revised, [Change("budget_min")])
+        if current is not None and (floor_change is not None or remove_floor):
+            revised = refine(current.passport, passport, message)
+            revised, payload = apply_changes(revised, [floor_change or Change("budget_min")])
             dialogue = await self._store.revise(
                 dialogue, revised, kind=EVENT_MANUAL_EDIT, payload=payload
             )
@@ -432,6 +432,8 @@ class Conversation:
         self, message: str, current: Passport
     ) -> tuple[Passport, bool]:
         """Keep an absent city absent until the current search is merged."""
+        if not message.strip(" ,"):
+            return parse_query("", default_city=""), False
         intake = self._intake()
         if isinstance(intake, QueryIntake):
             return await intake.parse_edit(message, current)

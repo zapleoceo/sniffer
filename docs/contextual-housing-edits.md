@@ -17,6 +17,9 @@ create a search version or root. The model result is also rejected when the
 message negates removal. The
 result is saved as a `manual_edit` event with `removed: ["budget_min"]`, so the
 legacy floor recovery does not resurrect the earlier minimum from `raw_query`.
+Compound edits are applied in one revision: removing the floor and changing the
+upper bound or the named city zone does not discard the other clause. A request
+to raise the minimum is treated as a lower-bound edit, not as a new maximum.
 
 `tests/test_contextual_housing_edits.py` covers full restatement, partial upper
 bound edit, explicit lower bound removal, reload, restoration, one search root,
