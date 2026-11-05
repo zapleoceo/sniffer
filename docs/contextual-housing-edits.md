@@ -12,7 +12,9 @@ an explicit lower-budget removal action. An omitted lower bound is a **keep**,
 not a removal. The removal action requires a quote from the user's message;
 common direct removal phrasing is also recognized without a model call. The
 direct parser accepts both word orders and refuses negated removal requests.
-The model result is also rejected when the message negates removal. The
+An explicit request to leave the minimum unchanged is a no-op: it does not
+create a search version or root. The model result is also rejected when the
+message negates removal. The
 result is saved as a `manual_edit` event with `removed: ["budget_min"]`, so the
 legacy floor recovery does not resurrect the earlier minimum from `raw_query`.
 
@@ -20,3 +22,5 @@ legacy floor recovery does not resurrect the earlier minimum from `raw_query`.
 bound edit, explicit lower bound removal, reload, restoration, one search root,
 and a mocked structured model response. It uses synthetic data and does not
 demonstrate understanding by a live model or acceptance of a production search.
+Normal refinements keep `raw_query` as an audit trail; restoring search criteria
+does not erase that trail. An explicit card edit can replace the raw phrase.

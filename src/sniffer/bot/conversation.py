@@ -61,6 +61,7 @@ from sniffer.search.intake_rules import parse_query
 from sniffer.search.live import run_plan
 from sniffer.search.planner import SearchPlanner
 from sniffer.search.refinements import (
+    keeps_budget_floor,
     merge_edit,
     price_refinement,
     refine,
@@ -322,6 +323,17 @@ class Conversation:
             # разговора выше устарел, поэтому читаем его заново.
             dialogue = await self._store.load(client)
         current = dialogue.passport
+        if current is not None and keeps_budget_floor(message):
+            stated = parse_query(message, default_city="")
+            if (
+                stated.category is None
+                and stated.city is None
+                and not stated.districts
+                and not stated.attributes
+                and stated.budget.max is None
+            ):
+                await send(Reply(text="Нижнюю границу оставил без изменений."))
+                return
         if current is not None and removes_budget_floor(message):
             revised, payload = apply_changes(current.passport, [Change("budget_min")])
             dialogue = await self._store.revise(

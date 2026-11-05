@@ -126,6 +126,42 @@ def test_removal_respects_word_order_and_negation(text: str, expected: bool) -> 
     assert removes_budget_floor(text) is expected
 
 
+def test_keep_floor_is_noop_and_reversed_removal_edits_same_root(monkeypatch) -> None:
+    monkeypatch.setattr(
+        intake_module,
+        "get_settings",
+        lambda: Settings(broker_project_key="", default_city="nha_trang"),
+    )
+    store = MemoryStore()
+    original = parse_query(BASE, default_city="")
+    complete(store.start(Dialogue(user_id=1), original))
+    talker = Conversation(store, intake=QueryIntake, finder=_nothing, recorder=SilentJournal())
+    first = complete(store.load(CLIENT))
+    assert first.passport is not None
+    root = first.passport.root
+
+    for message in (
+        "Нижнюю границу не убери",
+        "Не убирай нижнюю границу",
+        "Нижнюю границу оставь",
+    ):
+        complete(talker.on_text(CLIENT, message, _reply))
+        current = complete(store.load(CLIENT))
+        assert current.passport is not None
+        assert current.passport.root == root
+        assert current.passport.version == 1
+        assert current.passport.passport.budget.min == 7_000_000
+
+    complete(talker.on_text(CLIENT, "Убери нижнюю границу", _reply))
+    removed = complete(store.load(CLIENT))
+    assert removed.passport is not None
+    assert removed.passport.root == root
+    assert removed.passport.version == 2
+    assert removed.passport.passport.budget.min is None
+    assert {row.root for row in store.rows} == {root}
+    assert store.monitoring == {}
+
+
 def test_mock_model_sees_context_and_can_request_explicit_floor_removal(monkeypatch) -> None:
     monkeypatch.setattr(
         intake_module,
@@ -136,13 +172,14 @@ def test_mock_model_sees_context_and_can_request_explicit_floor_removal(monkeypa
     class Broker:
         def __init__(self) -> None:
             self.prompts: list[str] = []
-
-        async def structured(self, prompt: str, **_kwargs: object) -> dict[str, str]:
-            self.prompts.append(prompt)
-            return {
+            self.response = {
                 "budget_min_action": "remove",
                 "budget_min_evidence": "без минимальной цены",
             }
+
+        async def structured(self, prompt: str, **_kwargs: object) -> dict[str, str]:
+            self.prompts.append(prompt)
+            return self.response
 
     broker = Broker()
     intake = QueryIntake(broker=broker)
@@ -154,3 +191,6 @@ def test_mock_model_sees_context_and_can_request_explicit_floor_removal(monkeypa
     assert "budget_min_action" in intake_schema()["required"]
     assert "budget_min_evidence" in intake_schema()["required"]
     assert "total_rooms_evidence" in intake_schema()["required"]
+    broker.response["budget_min_evidence"] = "нижнюю границу не убери"
+    _, negated_remove = complete(intake.parse_edit("Нижнюю границу не убери", current))
+    assert not negated_remove

@@ -37,10 +37,20 @@ _NEGATED_FLOOR_REMOVAL = re.compile(
     r"\bне\s+(?:(?:надо|нужно|следует)\s+)?(?:убер\w*|убир\w*|сним\w*|удал\w*)\b",
     re.IGNORECASE,
 )
+_KEEP_BUDGET_FLOOR = re.compile(
+    rf"(?:{_FLOOR_WORDS}.{{0,35}}\bостав\w*\b|\bостав\w*\b.{{0,35}}{_FLOOR_WORDS})",
+    re.IGNORECASE,
+)
 
 
 def negates_budget_floor_removal(text: str) -> bool:
-    return _NEGATED_FLOOR_REMOVAL.search(text) is not None
+    return bool(
+        re.search(_FLOOR_WORDS, text, re.IGNORECASE) and _NEGATED_FLOOR_REMOVAL.search(text)
+    )
+
+
+def keeps_budget_floor(text: str) -> bool:
+    return bool(negates_budget_floor_removal(text) or _KEEP_BUDGET_FLOOR.search(text))
 
 
 def removes_budget_floor(text: str) -> bool:
