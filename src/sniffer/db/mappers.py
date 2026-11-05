@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from sniffer.db import models
+from sniffer.domain.budget_rules import parse_budget
 from sniffer.domain.hard_filter import HardFilter
 from sniffer.domain.housing_rooms import read_bedrooms, read_total_rooms
 from sniffer.domain.passport import Budget, Category, Intent, Passport, PassportStatus
@@ -39,6 +40,25 @@ def _legacy_housing_attributes(attributes: dict[str, Any], raw_query: str) -> di
         result.pop("rooms", None)
         result.pop("rooms_min", None)
     return result
+
+
+def _legacy_budget_floor(budget: Budget, raw_query: str, intent: Intent | None) -> Budget:
+    """Recover an explicit range from a legacy row without changing stored data.
+
+    A follow-up can supersede the original range. In that case the saved budget
+    remains authoritative; never infer a floor from an earlier message.
+    """
+    if budget.min is not None or budget.max is None or "Latest follow-up:" in raw_query:
+        return budget
+    parsed = parse_budget(raw_query, intent=intent)
+    if (
+        parsed.min is None
+        or parsed.max != budget.max
+        or parsed.currency != budget.currency
+        or parsed.period != budget.period
+    ):
+        return budget
+    return budget.model_copy(update={"min": parsed.min})
 
 
 def to_chat(row: models.Chat) -> Chat:
@@ -143,7 +163,10 @@ def to_job(row: models.Job) -> Job:
     )
 
 
-def to_stored_passport(row: models.Passport) -> StoredPassport:
+def to_stored_passport(
+    row: models.Passport, *, recover_legacy_floor: bool = False
+) -> StoredPassport:
+    intent = Intent(row.intent) if row.intent else None
     return StoredPassport(
         id=row.id,
         user_id=row.user_id,
@@ -155,11 +178,15 @@ def to_stored_passport(row: models.Passport) -> StoredPassport:
             # В колонках лежат значения перечислений (`rent`, `apartment`).
             # Разворачиваем их явно: незнакомое значение обязано упасть здесь,
             # а не приехать в матчинг строкой, которую SQL молча не найдёт.
-            intent=Intent(row.intent) if row.intent else None,
+            intent=intent,
             category=Category(row.category) if row.category else None,
             city=row.city,
             districts=list(row.districts),
-            budget=Budget.model_validate(row.budget or {}),
+            budget=(
+                _legacy_budget_floor(Budget.model_validate(row.budget or {}), row.raw_query, intent)
+                if recover_legacy_floor
+                else Budget.model_validate(row.budget or {})
+            ),
             attributes=_legacy_housing_attributes(dict(row.attributes), row.raw_query),
             must_have=list(row.must_have),
             deal_breakers=list(row.deal_breakers),
@@ -173,7 +200,12 @@ def to_stored_passport(row: models.Passport) -> StoredPassport:
     )
 
 
-def to_subscription_state(row: models.Subscription, passport: models.Passport) -> SubscriptionState:
+def to_subscription_state(
+    row: models.Subscription,
+    passport: models.Passport,
+    *,
+    stored_passport: StoredPassport | None = None,
+) -> SubscriptionState:
     """Подписка вместе с ТЕКУЩЕЙ версией паспорта её цепочки.
 
     Незнакомое значение в паспорте падает здесь (см. `to_stored_passport`), поэтому тот,
@@ -197,7 +229,7 @@ def to_subscription_state(row: models.Subscription, passport: models.Passport) -
         overflow_notified=row.overflow_notified,
         no_slot_since=row.no_slot_since,
         hard_filter=HardFilter.from_json(row.hard_filter),
-        passport=to_stored_passport(passport),
+        passport=stored_passport or to_stored_passport(passport),
     )
 
 

@@ -34,6 +34,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sniffer.db import models
 from sniffer.db.mappers import to_subscription_state
 from sniffer.db.repositories.base import Repository
+from sniffer.db.repositories.passports import PassportRepository
 from sniffer.db.repositories.quota import QuotaRepository
 from sniffer.domain.monitoring import OVERFLOW_KIND
 from sniffer.domain.quota import Channel, Claim, Ticket
@@ -531,7 +532,10 @@ class DeliveryRepository(Repository):
             .limit(1)
         )
         row = found.first()
-        return to_subscription_state(row[0], row[1]) if row is not None else None
+        if row is None:
+            return None
+        stored = await PassportRepository(self._session).map_stored(row[1])
+        return to_subscription_state(row[0], row[1], stored_passport=stored)
 
     async def set_active(
         self, *, user_id: int, passport_root: int, active: bool, now: datetime | None = None
