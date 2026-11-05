@@ -21,14 +21,18 @@ Compound edits are applied in one revision: removing the floor and changing the
 upper bound or the named city zone does not discard the other clause. A request
 to raise the minimum is treated as a lower-bound edit, not as a new maximum.
 
-Removing a room minimum works for every housing category, including a room
-rental. The field registry does not list `rooms` for `Category.ROOM`, while the
-parser stores it there from the words of the request and the card shows it, so
-the edit asks the registry first and strips the attribute itself when the
-registry refuses. A refusal from the domain is answered in words on the same
-search root: a traceback inside the message handler would not merely lose the
-edit, it would send the message on as a new request and replace the current
-search with an empty one.
+Removing a room minimum works for every housing category and for either of
+its keys. The field registry owns `rooms` for a house and a flat but not for a
+room rental, and owns neither `rooms_min` nor `bedrooms` anywhere, while the
+parser stores them from the words of the request and the card prints them. The
+edit therefore asks the registry about each key and strips what the registry
+does not own. All of the keys are removed together: answering about one of them
+would report «уже не задан» for a condition that is still discarding results.
+
+A refusal from the domain is answered in words on the same search root. Nothing
+catches an exception raised here — `bot/app.py` starts polling without an error
+router — so a traceback means silence: the update is lost and the client is not
+told even that the edit failed. The search itself is left untouched.
 
 `tests/test_contextual_housing_edits.py` covers full restatement, partial upper
 bound edit, explicit lower bound removal, reload, restoration, one search root,

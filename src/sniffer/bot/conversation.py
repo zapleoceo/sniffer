@@ -238,13 +238,16 @@ class _Turn:
         )
 
 
-# Домен отклонил правку: человеку — слова, разговору — та же ветка. Трейсбек вместо
-# ответа не просто теряет правку: сообщение доходит до разбора как новый запрос, и
-# текущий поиск подменяется пустым.
+# Домен отклонил правку: человеку — слова, разговору — та же ветка. Исключение отсюда
+# не перехватывает никто (`bot/app.py` поднимает поллинг без errors-роутера), поэтому
+# трейсбек означает молчание в ответ: апдейт теряется, человек не узнаёт даже об отказе.
 EDIT_REFUSED = "Не получилось применить эту правку. Напишите, что поменять, другими словами."
 
-# Минимум комнат живёт в двух ключах атрибутов, и снимаются они всегда вместе.
-_ROOM_MINIMUM_KEYS = ("rooms", "rooms_min")
+# Чем бывает записан минимум комнат. Три ключа, потому что про спальни парсер пишет
+# `bedrooms` и при этом ВЫБРАСЫВАЕТ `rooms` (`intake_rules.detect_housing_attributes`),
+# а `_ROOM_MINIMUM` в `refinements` принимает и «комнат», и «спал». Снимаются вместе:
+# спросив про один ключ, бот отвечал бы «уже не задан» про условие, которое осталось.
+_ROOM_MINIMUM_KEYS = ("rooms", "rooms_min", "bedrooms")
 
 
 def _edited(passport: Passport, change: Change) -> tuple[Passport, dict[str, Any]] | None:
@@ -255,27 +258,35 @@ def _edited(passport: Passport, change: Change) -> tuple[Passport, dict[str, Any
         return None
 
 
+def room_minimum_keys(passport: Passport) -> list[str]:
+    """Какими ключами у этого поиска записан минимум комнат. Пусто — его нет."""
+    return [key for key in _ROOM_MINIMUM_KEYS if key in passport.attributes]
+
+
 def _without_room_minimum(passport: Passport) -> tuple[Passport, dict[str, Any]]:
-    """Снять минимум комнат — при любой категории поиска.
+    """Снять минимум комнат — при любой категории поиска и любом из его ключей.
 
-    Реестр полей признаёт `rooms` не у всякого жилья: у поиска КОМНАТЫ такого поля нет
-    (`specs_for(Category.ROOM)`), а в атрибутах он лежит и в карточке показан — «не менее
-    2 комнат», — потому что парсер кладёт его по словам, не спрашивая категорию. Поэтому
-    реестр спрашиваем первым, а на отказ снимаем атрибут сами: иначе «убери минимум 2
-    комнаты» на поиске комнаты падало бы `EditError` посреди разговора, а ответить «уже
-    не задан» значило бы соврать про условие, которое человек видит на экране.
+    Реестр полей владеет не всеми ключами: `rooms` он знает у дома и квартиры, но не у
+    поиска КОМНАТЫ (`specs_for(Category.ROOM)`), а `rooms_min` и `bedrooms` не знает
+    нигде. При этом парсер кладёт их по словам, не спрашивая категорию, и карточка их
+    печатает — «не менее 2 комнат». Поэтому про каждый ключ сначала спрашиваем реестр, а
+    чего он не признал, снимаем сами: иначе «убери минимум 2 комнаты» на поиске комнаты
+    падало бы `EditError` посреди разговора, а ответить «уже не задан» значило бы соврать
+    про условие, которое человек видит на экране и которое продолжает отсеивать находки.
 
-    Отказ тут возможен ровно один — чужая категория: снимать `rooms` ничто не запрещает,
-    `required` во всех категориях только у города.
+    Снятого может быть больше, чем признал реестр, поэтому в событие правки идут все
+    снятые ключи: журнал версий описывает ревизию, а не её половину.
     """
-    try:
-        revised, payload = apply_changes(passport, [Change("rooms")])
-    except EditError:
-        revised, payload = passport, {"set": {}, "removed": ["rooms"]}
+    removed = room_minimum_keys(passport)
+    revised = passport
+    for key in removed:
+        changed = _edited(revised, Change(key))
+        if changed is not None:
+            revised, _ = changed
     attributes = {
         key: value for key, value in revised.attributes.items() if key not in _ROOM_MINIMUM_KEYS
     }
-    return revised.model_copy(update={"attributes": attributes}), payload
+    return revised.model_copy(update={"attributes": attributes}), {"set": {}, "removed": removed}
 
 
 class SearchLimit(Protocol):
@@ -365,7 +376,7 @@ class Conversation:
             dialogue = await self._store.load(client)
         current = dialogue.passport
         if current is not None and removes_room_minimum(message):
-            if "rooms" not in current.passport.attributes:
+            if not room_minimum_keys(current.passport):
                 await send(Reply(text="Минимум комнат уже не задан."))
                 return
             revised, payload = _without_room_minimum(current.passport)

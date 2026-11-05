@@ -13,6 +13,7 @@ from sniffer.config import Settings
 from sniffer.db import models
 from sniffer.db.mappers import passport_values
 from sniffer.db.repositories.passports import PassportRepository
+from sniffer.domain.field_spec import spec_by_key
 from sniffer.domain.passport import Category
 from sniffer.domain.passport_edit import Change
 from sniffer.search import intake as intake_module
@@ -315,10 +316,10 @@ def test_room_search_drops_its_room_minimum_without_breaking_the_dialogue(
     """Снятие минимума комнат у поиска КОМНАТЫ: ответ, а не исключение, и тот же корень.
 
     Реестр полей не знает `rooms` у `Category.ROOM`, а парсер его туда кладёт по словам:
-    `apply_changes` отвечал на это `EditError` прямо в обработчике сообщения. Падение не
-    просто теряло правку — сообщение уходило дальше как новый запрос, и поиск человека
-    подменялся пустым. Здесь проверяется и то, что условие действительно снято: ответить
-    «уже не задан» было нельзя, карточка показывала «не менее 2 комнат».
+    `apply_changes` отвечал на это `EditError` прямо в обработчике сообщения. Перехватить
+    его некому, поэтому человек не получал вообще ничего — ни правки, ни отказа. Здесь
+    проверяется и то, что условие действительно снято: ответить «уже не задан» было
+    нельзя, карточка показывала «не менее 2 комнат».
     """
     monkeypatch.setattr(
         intake_module,
@@ -346,7 +347,8 @@ def test_room_search_drops_its_room_minimum_without_breaking_the_dialogue(
     # Минимум комнат снят обоими ключами, а не только признаком.
     assert "rooms" not in after.passport.passport.attributes
     assert "rooms_min" not in after.passport.passport.attributes
-    assert store.events[-1].payload["removed"] == ["rooms"]
+    # В событие идут ВСЕ снятые ключи: журнал версий описывает ревизию, а не её половину.
+    assert store.events[-1].payload["removed"] == ["rooms", "rooms_min"]
 
 
 def test_room_search_says_so_when_the_minimum_is_already_absent(
@@ -391,3 +393,56 @@ def test_a_refused_edit_is_words_not_a_traceback() -> None:
     assert _edited(passport, Change("budget_min", 0)) is None
     assert _edited(passport, Change("city")) is None
     assert _edited(parse_query(ROOM_SEARCH, default_city=""), Change("rooms")) is None
+
+
+def test_a_bedroom_minimum_is_removed_and_not_declared_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Минимум спален снимается той же просьбой, а не объявляется несуществующим.
+
+    Про спальни парсер пишет `bedrooms` и ВЫБРАСЫВАЕТ `rooms`, а охрана спрашивала
+    только `rooms`: бот отвечал «Минимум комнат уже не задан», пока условие оставалось в
+    паспорте и продолжало отсеивать находки. Та самая ложь, которой этот обработчик
+    обещает избегать, — только в другом ключе.
+    """
+    monkeypatch.setattr(
+        intake_module,
+        "get_settings",
+        lambda: Settings(broker_project_key="", default_city="nha_trang"),
+    )
+    said: list[str] = []
+
+    async def _collect(reply: object) -> None:
+        said.append(getattr(reply, "text", ""))
+
+    store = MemoryStore()
+    flat = "Сниму квартиру в Нячанге, минимум 2 спальни, до 15 млн VND в месяц"
+    complete(store.start(Dialogue(user_id=1), parse_query(flat, default_city="")))
+    talker = Conversation(store, intake=QueryIntake, finder=_nothing, recorder=SilentJournal())
+    before = complete(store.load(CLIENT))
+    assert before.passport is not None
+    assert before.passport.passport.attributes["bedrooms"] == 2
+
+    complete(talker.on_text(CLIENT, "убери минимум 2 спальни", _collect))
+
+    after = complete(store.load(CLIENT))
+    assert after.passport is not None
+    assert after.passport.root == before.passport.root
+    assert "bedrooms" not in after.passport.passport.attributes
+    assert after.passport.passport.budget.max == 15_000_000
+    assert store.events[-1].payload["removed"] == ["bedrooms"]
+    assert "уже не задан" not in " ".join(said)
+
+
+def test_the_room_minimum_stays_removable_by_the_registry() -> None:
+    """Снятие `rooms` держится на двух свойствах реестра — закрепляем их тестом.
+
+    `_without_room_minimum` снимает атрибут сам, когда реестр отказал, и это верно, пока
+    отказ означает «поле чужой категории». Пометят `rooms` как `required` или повесят на
+    него `companions` — и обход снимет то, что домен снимать запретил, а тесты останутся
+    зелёными: они проверяют, что отказ есть, но не проверяют его причину.
+    """
+    spec = spec_by_key("rooms")
+    assert spec is not None
+    assert spec.required is False
+    assert spec.companions == ()
