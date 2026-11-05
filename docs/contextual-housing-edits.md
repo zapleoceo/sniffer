@@ -21,6 +21,15 @@ Compound edits are applied in one revision: removing the floor and changing the
 upper bound or the named city zone does not discard the other clause. A request
 to raise the minimum is treated as a lower-bound edit, not as a new maximum.
 
+Removing a room minimum works for every housing category, including a room
+rental. The field registry does not list `rooms` for `Category.ROOM`, while the
+parser stores it there from the words of the request and the card shows it, so
+the edit asks the registry first and strips the attribute itself when the
+registry refuses. A refusal from the domain is answered in words on the same
+search root: a traceback inside the message handler would not merely lose the
+edit, it would send the message on as a new request and replace the current
+search with an empty one.
+
 `tests/test_contextual_housing_edits.py` covers full restatement, partial upper
 bound edit, explicit lower bound removal, reload, restoration, one search root,
 and a mocked structured model response. It uses synthetic data and does not

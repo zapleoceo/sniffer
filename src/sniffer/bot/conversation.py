@@ -16,7 +16,7 @@ from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 
 import structlog
 
@@ -52,7 +52,7 @@ from sniffer.domain.dialogue import (
 )
 from sniffer.domain.facets import facets_from
 from sniffer.domain.passport import Passport
-from sniffer.domain.passport_edit import Change, apply_changes
+from sniffer.domain.passport_edit import Change, EditError, apply_changes
 from sniffer.search.answers import interpret, is_skip
 from sniffer.search.currency import usd_vnd_rate
 from sniffer.search.facet_check import answer_survivor
@@ -238,6 +238,46 @@ class _Turn:
         )
 
 
+# Домен отклонил правку: человеку — слова, разговору — та же ветка. Трейсбек вместо
+# ответа не просто теряет правку: сообщение доходит до разбора как новый запрос, и
+# текущий поиск подменяется пустым.
+EDIT_REFUSED = "Не получилось применить эту правку. Напишите, что поменять, другими словами."
+
+# Минимум комнат живёт в двух ключах атрибутов, и снимаются они всегда вместе.
+_ROOM_MINIMUM_KEYS = ("rooms", "rooms_min")
+
+
+def _edited(passport: Passport, change: Change) -> tuple[Passport, dict[str, Any]] | None:
+    """Правка или `None`, если домен её отклонил. Отказ — ответ человеку, а не исключение."""
+    try:
+        return apply_changes(passport, [change])
+    except EditError:
+        return None
+
+
+def _without_room_minimum(passport: Passport) -> tuple[Passport, dict[str, Any]]:
+    """Снять минимум комнат — при любой категории поиска.
+
+    Реестр полей признаёт `rooms` не у всякого жилья: у поиска КОМНАТЫ такого поля нет
+    (`specs_for(Category.ROOM)`), а в атрибутах он лежит и в карточке показан — «не менее
+    2 комнат», — потому что парсер кладёт его по словам, не спрашивая категорию. Поэтому
+    реестр спрашиваем первым, а на отказ снимаем атрибут сами: иначе «убери минимум 2
+    комнаты» на поиске комнаты падало бы `EditError` посреди разговора, а ответить «уже
+    не задан» значило бы соврать про условие, которое человек видит на экране.
+
+    Отказ тут возможен ровно один — чужая категория: снимать `rooms` ничто не запрещает,
+    `required` во всех категориях только у города.
+    """
+    try:
+        revised, payload = apply_changes(passport, [Change("rooms")])
+    except EditError:
+        revised, payload = passport, {"set": {}, "removed": ["rooms"]}
+    attributes = {
+        key: value for key, value in revised.attributes.items() if key not in _ROOM_MINIMUM_KEYS
+    }
+    return revised.model_copy(update={"attributes": attributes}), payload
+
+
 class SearchLimit(Protocol):
     """Сколько поисков можно держать: текст отказа, если открыть ещё один нельзя."""
 
@@ -328,10 +368,7 @@ class Conversation:
             if "rooms" not in current.passport.attributes:
                 await send(Reply(text="Минимум комнат уже не задан."))
                 return
-            revised, payload = apply_changes(current.passport, [Change("rooms")])
-            attributes = dict(revised.attributes)
-            attributes.pop("rooms_min", None)
-            revised = revised.model_copy(update={"attributes": attributes})
+            revised, payload = _without_room_minimum(current.passport)
             dialogue = await self._store.revise(
                 dialogue, revised, kind=EVENT_MANUAL_EDIT, payload=payload
             )
@@ -378,7 +415,11 @@ class Conversation:
             passport = merge_edit(current.passport, passport)
             edit_payload: dict[str, object] = {"field": "query", "value": message}
             if floor_change is not None or remove_floor:
-                passport, changes = apply_changes(passport, [floor_change or Change("budget_min")])
+                edited = _edited(passport, floor_change or Change("budget_min"))
+                if edited is None:
+                    await send(Reply(text=EDIT_REFUSED))
+                    return
+                passport, changes = edited
                 edit_payload.update(changes)
             _lap("intake_ms")
             dialogue = await self._store.revise(
@@ -402,8 +443,14 @@ class Conversation:
             passport, remove_floor = await self._intake().parse(message), False
         _lap("intake_ms")
         if current is not None and (floor_change is not None or remove_floor):
-            revised = refine(current.passport, passport, message)
-            revised, payload = apply_changes(revised, [floor_change or Change("budget_min")])
+            edited = _edited(
+                refine(current.passport, passport, message),
+                floor_change or Change("budget_min"),
+            )
+            if edited is None:
+                await send(Reply(text=EDIT_REFUSED))
+                return
+            revised, payload = edited
             dialogue = await self._store.revise(
                 dialogue, revised, kind=EVENT_MANUAL_EDIT, payload=payload
             )

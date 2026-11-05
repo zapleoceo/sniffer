@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+from collections.abc import Coroutine
+from typing import Any, cast
+
 import pytest
 
-from sniffer.bot.conversation import Conversation, Found
+from sniffer.bot.conversation import Conversation, Found, _edited
 from sniffer.bot.store import Client, Dialogue
 from sniffer.config import Settings
 from sniffer.db import models
 from sniffer.db.mappers import passport_values
 from sniffer.db.repositories.passports import PassportRepository
 from sniffer.domain.passport import Category
+from sniffer.domain.passport_edit import Change
 from sniffer.search import intake as intake_module
 from sniffer.search.intake import QueryIntake, intake_schema
 from sniffer.search.intake_rules import parse_query
@@ -32,16 +36,17 @@ async def _reply(_reply: object) -> None:
     return None
 
 
-def complete(coroutine):
+def complete[T](coroutine: Coroutine[Any, Any, T]) -> T:
     """Run a fake I/O coroutine without the broken Windows event loop."""
     try:
         coroutine.send(None)
     except StopIteration as finished:
-        return finished.value
+        # `StopIteration.value` объявлен как `Any`: приводим к тому, что обещает сигнатура.
+        return cast(T, finished.value)
     raise AssertionError("The isolated fake unexpectedly required real asynchronous I/O")
 
 
-def test_full_partial_remove_repeat_restore_one_root(monkeypatch) -> None:
+def test_full_partial_remove_repeat_restore_one_root(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         intake_module,
         "get_settings",
@@ -79,7 +84,9 @@ def test_full_partial_remove_repeat_restore_one_root(monkeypatch) -> None:
     assert removed.passport.passport.budget.min is None
     assert removed.passport.passport.budget.max == 15_000_000
     assert store.events[-1].payload["removed"] == ["budget_min"]
-    assert complete(store.load(CLIENT)).passport.passport.budget.min is None
+    reread = complete(store.load(CLIENT)).passport
+    assert reread is not None
+    assert reread.passport.budget.min is None
 
     complete(store.select(removed, root, editing=True))
     complete(talker.on_text(CLIENT, BASE, _reply))
@@ -126,7 +133,9 @@ def test_removal_respects_word_order_and_negation(text: str, expected: bool) -> 
     assert removes_budget_floor(text) is expected
 
 
-def test_keep_floor_is_noop_and_reversed_removal_edits_same_root(monkeypatch) -> None:
+def test_keep_floor_is_noop_and_reversed_removal_edits_same_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(
         intake_module,
         "get_settings",
@@ -171,7 +180,7 @@ def test_keep_floor_is_noop_and_reversed_removal_edits_same_root(monkeypatch) ->
     ],
 )
 def test_compound_edit_applies_all_changes_in_one_root(
-    monkeypatch, message: str, floor: int | None, ceiling: int, zone: str
+    monkeypatch: pytest.MonkeyPatch, message: str, floor: int | None, ceiling: int, zone: str
 ) -> None:
     from sniffer.domain.districts import PLACE_BY_SLUG
 
@@ -205,7 +214,9 @@ def test_compound_edit_applies_all_changes_in_one_root(
     assert store.monitoring == {root: "active"}
 
 
-def test_price_floor_removal_preserves_explicit_room_minimum(monkeypatch) -> None:
+def test_price_floor_removal_preserves_explicit_room_minimum(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(
         intake_module,
         "get_settings",
@@ -237,7 +248,7 @@ def test_price_floor_removal_preserves_explicit_room_minimum(monkeypatch) -> Non
     assert repeated.passport.passport.budget.min is None
 
 
-def test_room_minimum_removal_does_not_remove_price_floor(monkeypatch) -> None:
+def test_room_minimum_removal_does_not_remove_price_floor(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         intake_module,
         "get_settings",
@@ -259,7 +270,9 @@ def test_room_minimum_removal_does_not_remove_price_floor(monkeypatch) -> None:
     assert "rooms" not in after.passport.passport.attributes
 
 
-def test_mock_model_sees_context_and_can_request_explicit_floor_removal(monkeypatch) -> None:
+def test_mock_model_sees_context_and_can_request_explicit_floor_removal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(
         intake_module,
         "get_settings",
@@ -291,3 +304,90 @@ def test_mock_model_sees_context_and_can_request_explicit_floor_removal(monkeypa
     broker.response["budget_min_evidence"] = "нижнюю границу не убери"
     _, negated_remove = complete(intake.parse_edit("Нижнюю границу не убери", current))
     assert not negated_remove
+
+
+ROOM_SEARCH = "Сниму комнату в Нячанге, минимум 2 комнаты, до 7 млн VND в месяц"
+
+
+def test_room_search_drops_its_room_minimum_without_breaking_the_dialogue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Снятие минимума комнат у поиска КОМНАТЫ: ответ, а не исключение, и тот же корень.
+
+    Реестр полей не знает `rooms` у `Category.ROOM`, а парсер его туда кладёт по словам:
+    `apply_changes` отвечал на это `EditError` прямо в обработчике сообщения. Падение не
+    просто теряло правку — сообщение уходило дальше как новый запрос, и поиск человека
+    подменялся пустым. Здесь проверяется и то, что условие действительно снято: ответить
+    «уже не задан» было нельзя, карточка показывала «не менее 2 комнат».
+    """
+    monkeypatch.setattr(
+        intake_module,
+        "get_settings",
+        lambda: Settings(broker_project_key="", default_city="nha_trang"),
+    )
+    store = MemoryStore()
+    complete(store.start(Dialogue(user_id=1), parse_query(ROOM_SEARCH, default_city="")))
+    talker = Conversation(store, intake=QueryIntake, finder=_nothing, recorder=SilentJournal())
+    before = complete(store.load(CLIENT))
+    assert before.passport is not None
+    assert before.passport.passport.category is Category.ROOM
+    assert before.passport.passport.attributes["rooms"] == 2
+
+    complete(talker.on_text(CLIENT, "убери минимум 2 комнаты", _reply))
+
+    after = complete(store.load(CLIENT))
+    assert after.passport is not None
+    # Тот же поиск: ни нового корня, ни потерянного контекста.
+    assert after.passport.root == before.passport.root
+    assert {row.root for row in store.rows} == {before.passport.root}
+    assert after.passport.passport.category is Category.ROOM
+    assert after.passport.passport.city == before.passport.passport.city
+    assert after.passport.passport.budget.max == 7_000_000
+    # Минимум комнат снят обоими ключами, а не только признаком.
+    assert "rooms" not in after.passport.passport.attributes
+    assert "rooms_min" not in after.passport.passport.attributes
+    assert store.events[-1].payload["removed"] == ["rooms"]
+
+
+def test_room_search_says_so_when_the_minimum_is_already_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Повтор той же просьбы ничего не ломает и новой версии не создаёт."""
+    monkeypatch.setattr(
+        intake_module,
+        "get_settings",
+        lambda: Settings(broker_project_key="", default_city="nha_trang"),
+    )
+    said: list[str] = []
+
+    async def _collect(reply: object) -> None:
+        said.append(getattr(reply, "text", ""))
+
+    store = MemoryStore()
+    complete(store.start(Dialogue(user_id=1), parse_query(ROOM_SEARCH, default_city="")))
+    talker = Conversation(store, intake=QueryIntake, finder=_nothing, recorder=SilentJournal())
+    complete(talker.on_text(CLIENT, "убери минимум 2 комнаты", _reply))
+    once = complete(store.load(CLIENT))
+    assert once.passport is not None
+
+    complete(talker.on_text(CLIENT, "убери минимум 2 комнаты", _collect))
+
+    twice = complete(store.load(CLIENT))
+    assert twice.passport is not None
+    assert twice.passport.root == once.passport.root
+    assert twice.passport.version == once.passport.version
+    assert said == ["Минимум комнат уже не задан."]
+
+
+def test_a_refused_edit_is_words_not_a_traceback() -> None:
+    """Любой отказ домена превращается в `None`, а не в исключение из обработчика.
+
+    Ноль для «бюджета от» сегодня не доходит до этой правки (разбор суммы его не отдаёт),
+    и именно поэтому проверка идёт прямо по `_edited`: ворота должны держать весь класс
+    отказов `EditError`, а не тот единственный случай, который удалось придумать.
+    """
+    passport = parse_query(BASE, default_city="")
+    assert _edited(passport, Change("budget_min", 9_000_000)) is not None
+    assert _edited(passport, Change("budget_min", 0)) is None
+    assert _edited(passport, Change("city")) is None
+    assert _edited(parse_query(ROOM_SEARCH, default_city=""), Change("rooms")) is None

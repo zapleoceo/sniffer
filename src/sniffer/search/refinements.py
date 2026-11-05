@@ -45,12 +45,8 @@ _KEEP_BUDGET_FLOOR = re.compile(
     re.IGNORECASE,
 )
 _ROOM_MINIMUM = re.compile(r"\bминимум\s+(?:\d+|\w+)\s*(?:комнат|спал)\w*", re.IGNORECASE)
-_KEEP_ROOM_MINIMUM = re.compile(
-    r"\bминимум\s+(?:\d+|\w+)\s*комнат\w*\s+остав\w*\b", re.IGNORECASE
-)
-_REMOVE_ROOM_MINIMUM = re.compile(
-    rf"{_REMOVE_WORDS}\s+{_ROOM_MINIMUM.pattern}", re.IGNORECASE
-)
+_KEEP_ROOM_MINIMUM = re.compile(r"\bминимум\s+(?:\d+|\w+)\s*комнат\w*\s+остав\w*\b", re.IGNORECASE)
+_REMOVE_ROOM_MINIMUM = re.compile(rf"{_REMOVE_WORDS}\s+{_ROOM_MINIMUM.pattern}", re.IGNORECASE)
 _SET_BUDGET_FLOOR = re.compile(
     r"\b(?:подними|поставь|установи|сделай)\s+"
     r"(?:нижн(?:юю|ий)\s+границ\w*|минимум)\s+до\s*"
