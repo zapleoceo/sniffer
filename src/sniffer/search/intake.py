@@ -40,6 +40,7 @@ from sniffer.search.intake_rules import (
 )
 from sniffer.search.market_terms import ALL_CITY_NAMES
 from sniffer.search.planner import StructuredCaller
+from sniffer.search.refinements import negates_budget_floor_removal
 
 log = structlog.get_logger(__name__)
 
@@ -152,6 +153,7 @@ class QueryIntake:
             and bool(str(payload.get("budget_min_evidence") or "").strip())
             and str(payload.get("budget_min_evidence") or "").strip() in text
             and rules.budget.min is None
+            and not negates_budget_floor_removal(text)
         )
         return merged, removes_floor
 

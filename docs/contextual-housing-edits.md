@@ -11,6 +11,8 @@ criteria as context. Its response includes grounded quotes for total rooms and
 an explicit lower-budget removal action. An omitted lower bound is a **keep**,
 not a removal. The removal action requires a quote from the user's message;
 common direct removal phrasing is also recognized without a model call. The
+direct parser accepts both word orders and refuses negated removal requests.
+The model result is also rejected when the message negates removal. The
 result is saved as a `manual_edit` event with `removed: ["budget_min"]`, so the
 legacy floor recovery does not resurrect the earlier minimum from `raw_query`.
 

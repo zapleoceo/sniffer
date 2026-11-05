@@ -23,16 +23,29 @@ _PRICE_ONLY = re.compile(
 
 _PLACE = re.compile(r"\b(?:в|во|на)\s+[^\W\d_]{3,}", re.IGNORECASE)
 
+_FLOOR_WORDS = (
+    r"\b(?:нижн(?:юю|ий)\s+(?:границ\w*|порог\w*)|"
+    r"минимальн\w*\s+(?:цен\w*|бюджет\w*))\b"
+)
+_REMOVE_WORDS = r"\b(?:убер\w*|убир\w*|сним\w*|удал\w*)\b"
 _REMOVE_BUDGET_FLOOR = re.compile(
-    r"\b(?:нижн(?:юю|ий)\s+(?:границ\w*|порог\w*)|минимальн\w*\s+(?:цен\w*|бюджет\w*))\b"
-    r".{0,35}\b(?:убер\w*|убир\w*|сним\w*|удал\w*)\b",
+    rf"(?:{_FLOOR_WORDS}.{{0,35}}{_REMOVE_WORDS}|"
+    rf"{_REMOVE_WORDS}.{{0,35}}{_FLOOR_WORDS})",
+    re.IGNORECASE,
+)
+_NEGATED_FLOOR_REMOVAL = re.compile(
+    r"\bне\s+(?:(?:надо|нужно|следует)\s+)?(?:убер\w*|убир\w*|сним\w*|удал\w*)\b",
     re.IGNORECASE,
 )
 
 
+def negates_budget_floor_removal(text: str) -> bool:
+    return _NEGATED_FLOOR_REMOVAL.search(text) is not None
+
+
 def removes_budget_floor(text: str) -> bool:
     """An explicit request to remove the current search's lower price bound."""
-    return _REMOVE_BUDGET_FLOOR.search(text) is not None
+    return _REMOVE_BUDGET_FLOOR.search(text) is not None and not negates_budget_floor_removal(text)
 
 
 def price_refinement(current: Passport, text: str) -> Passport | None:

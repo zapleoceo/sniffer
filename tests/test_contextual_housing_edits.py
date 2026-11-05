@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from sniffer.bot.conversation import Conversation, Found
 from sniffer.bot.store import Client, Dialogue
 from sniffer.config import Settings
@@ -12,6 +14,7 @@ from sniffer.domain.passport import Category
 from sniffer.search import intake as intake_module
 from sniffer.search.intake import QueryIntake, intake_schema
 from sniffer.search.intake_rules import parse_query
+from sniffer.search.refinements import removes_budget_floor
 from sniffer.simulation.stubs import MemoryStore, SilentJournal
 
 BASE = "Дом, аренда, север Нячанга, минимум 2 комнаты, от 7 до 15 млн VND в месяц"
@@ -107,6 +110,20 @@ def test_written_bedrooms_are_not_total_rooms() -> None:
     assert passport.category is Category.HOUSE
     assert passport.attributes["bedrooms"] == 2
     assert "rooms" not in passport.attributes
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Нижнюю границу убери", True),
+        ("Убери нижнюю границу", True),
+        ("Нижнюю границу не убери", False),
+        ("Не убирай нижнюю границу", False),
+        ("Нижнюю границу не нужно убирать", False),
+    ],
+)
+def test_removal_respects_word_order_and_negation(text: str, expected: bool) -> None:
+    assert removes_budget_floor(text) is expected
 
 
 def test_mock_model_sees_context_and_can_request_explicit_floor_removal(monkeypatch) -> None:
