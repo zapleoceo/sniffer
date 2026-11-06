@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import json
 from enum import StrEnum
 from typing import Any
 
@@ -20,7 +21,7 @@ import structlog
 from sniffer.broker.client import BrokerClient, BrokerError
 from sniffer.broker.usage import default_usage_sink
 from sniffer.config import get_settings
-from sniffer.domain.housing_rooms import read_bedrooms
+from sniffer.domain.housing_rooms import read_bedrooms, read_total_rooms
 from sniffer.domain.passport import (
     Budget,
     Category,
@@ -39,6 +40,7 @@ from sniffer.search.intake_rules import (
 )
 from sniffer.search.market_terms import ALL_CITY_NAMES
 from sniffer.search.planner import StructuredCaller
+from sniffer.search.refinements import negates_budget_floor_removal
 
 log = structlog.get_logger(__name__)
 
@@ -63,7 +65,12 @@ Zoomer или другая. Список примеров не закрытый:
 
 SYSTEM_PROMPT += (
     " For housing requests, distinguish total rooms from bedrooms. Return exact "
-    "district_evidence and bedrooms_evidence copied from the user's text; use an "
+    "district_evidence, total_rooms_evidence, and bedrooms_evidence copied from the user's "
+    "text; rooms_minimum is yes only when the user states a lower bound. For an edit, "
+    "budget_min_action is remove only when the user explicitly removes the lower price "
+    "bound; budget_min_evidence must quote the exact words requesting removal. "
+    "An omitted bound means keep. Use the current search as context, not as facts "
+    "newly stated by the user. Use an "
     "empty string when absent or ambiguous. Never infer a district from the city."
 )
 
@@ -90,6 +97,16 @@ class QueryIntake:
         )
 
     async def parse(self, text: str, *, for_edit: bool = False) -> Passport:
+        parsed, _ = await self._parse(text, for_edit=for_edit, current=None)
+        return parsed
+
+    async def parse_edit(self, text: str, current: Passport) -> tuple[Passport, bool]:
+        """Parse one contextual edit; return an explicit lower-bound removal separately."""
+        return await self._parse(text, for_edit=True, current=current)
+
+    async def _parse(
+        self, text: str, *, for_edit: bool, current: Passport | None
+    ) -> tuple[Passport, bool]:
         settings = get_settings()
         # Город по умолчанию подставляется, а не спрашивается: клиент рынка
         # Нячанга по умолчанию в Нячанге, и вопрос «в каком городе?» на «нужен
@@ -105,19 +122,19 @@ class QueryIntake:
             # cannot add a question here, but can add seconds and overwrite a
             # correct model, so agent reasoning is reserved for ambiguity.
             log.info("intake.rules_only", reason="точная модель уже разобрана")
-            return rules
+            return rules, False
 
         if self._broker is None and not settings.broker_project_key.strip():
             # Ключа нет — идти некуда. Молча ждать таймаут на каждом сообщении
             # клиента дороже, чем сразу ответить по правилам.
             log.info("intake.rules_only", reason="брокер не настроен")
-            return rules
+            return rules, False
 
         try:
-            payload = await self._ask(text)
+            payload = await self._ask(text, current=current)
         except (BrokerError, httpx.HTTPError, TimeoutError) as exc:
             log.warning("intake.broker_failed", kind=type(exc).__name__, error=str(exc))
-            return rules
+            return rules, False
 
         merged = merge(rules, payload)
         if for_edit:
@@ -129,13 +146,34 @@ class QueryIntake:
             city=merged.city,
             budget_max=merged.budget.max,
         )
-        return merged
+        removes_floor = (
+            current is not None
+            and isinstance(payload, dict)
+            and payload.get("budget_min_action") == "remove"
+            and bool(str(payload.get("budget_min_evidence") or "").strip())
+            and str(payload.get("budget_min_evidence") or "").strip() in text
+            and rules.budget.min is None
+            and not negates_budget_floor_removal(text)
+        )
+        return merged, removes_floor
 
-    async def _ask(self, text: str) -> dict[str, Any]:
+    async def _ask(self, text: str, *, current: Passport | None = None) -> dict[str, Any]:
         broker = self._broker or BrokerClient(usage=default_usage_sink)
         self._broker = broker
+        context = (
+            "\nТекущий поиск: "
+            + json.dumps(
+                current.model_dump(
+                    mode="json",
+                    include={"intent", "category", "city", "districts", "budget", "attributes"},
+                ),
+                ensure_ascii=False,
+            )
+            if current is not None
+            else ""
+        )
         return await broker.structured(
-            f"Запрос клиента: {text}",
+            f"Запрос клиента: {text}{context}",
             schema=intake_schema(),
             schema_name="query_passport",
             system=SYSTEM_PROMPT,
@@ -169,14 +207,22 @@ def intake_schema() -> dict[str, Any]:
             "model",
             "engine_cc",
             "district_evidence",
+            "total_rooms_evidence",
+            "rooms_minimum",
             "bedrooms_evidence",
+            "budget_min_action",
+            "budget_min_evidence",
         ],
         "properties": {
             "intent": _enum(Intent),
             "category": _enum(Category),
             "city": {"type": "string", "enum": ["", *ALL_CITY_NAMES]},
             "district_evidence": {"type": "string"},
+            "total_rooms_evidence": {"type": "string"},
+            "rooms_minimum": {"type": "string", "enum": ["", "yes", "no"]},
             "bedrooms_evidence": {"type": "string"},
+            "budget_min_action": {"type": "string", "enum": ["", "keep", "remove"]},
+            "budget_min_evidence": {"type": "string"},
             "budget_max": {"type": "string", "description": "число без валюты, пусто если нет"},
             "currency": _enum(Currency),
             "period": _enum(PricePeriod),
@@ -244,12 +290,18 @@ def merge(rules: Passport, payload: Any) -> Passport:
     city = str(payload.get("city") or "").strip() or rules.city
     district_quote = str(payload.get("district_evidence") or "").strip()
     bedrooms_quote = str(payload.get("bedrooms_evidence") or "").strip()
+    rooms_quote = str(payload.get("total_rooms_evidence") or "").strip()
     districts = rules.districts
     if not districts and district_quote and district_quote in rules.raw_query:
         districts = _query_districts(district_quote, city)
     if "bedrooms" not in attributes and bedrooms_quote and bedrooms_quote in rules.raw_query:
         if (bedrooms := read_bedrooms(bedrooms_quote)) is not None:
             attributes["bedrooms"] = bedrooms
+    if "rooms" not in attributes and rooms_quote and rooms_quote in rules.raw_query:
+        if (rooms := read_total_rooms(rooms_quote)) is not None:
+            attributes["rooms"] = rooms
+            if payload.get("rooms_minimum") == "yes":
+                attributes["rooms_min"] = True
     return rules.model_copy(
         update={
             "intent": _member(Intent, payload.get("intent")) or rules.intent,

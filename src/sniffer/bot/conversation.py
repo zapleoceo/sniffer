@@ -16,7 +16,7 @@ from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 
 import structlog
 
@@ -52,6 +52,7 @@ from sniffer.domain.dialogue import (
 )
 from sniffer.domain.facets import facets_from
 from sniffer.domain.passport import Passport
+from sniffer.domain.passport_edit import Change, EditError, apply_changes
 from sniffer.search.answers import interpret, is_skip
 from sniffer.search.currency import usd_vnd_rate
 from sniffer.search.facet_check import answer_survivor
@@ -59,7 +60,15 @@ from sniffer.search.intake import QueryIntake
 from sniffer.search.intake_rules import parse_query
 from sniffer.search.live import run_plan
 from sniffer.search.planner import SearchPlanner
-from sniffer.search.refinements import merge_edit, price_refinement, refine, refines
+from sniffer.search.refinements import (
+    budget_floor_edit,
+    keeps_budget_floor,
+    merge_edit,
+    price_refinement,
+    refine,
+    refines,
+    removes_room_minimum,
+)
 from sniffer.search.relevance import rank_items, with_vnd_budget
 from sniffer.search.vocabulary import is_served
 from sniffer.sources.base import RawItem, registered_sources
@@ -229,6 +238,57 @@ class _Turn:
         )
 
 
+# Домен отклонил правку: человеку — слова, разговору — та же ветка. Исключение отсюда
+# не перехватывает никто (`bot/app.py` поднимает поллинг без errors-роутера), поэтому
+# трейсбек означает молчание в ответ: апдейт теряется, человек не узнаёт даже об отказе.
+EDIT_REFUSED = "Не получилось применить эту правку. Напишите, что поменять, другими словами."
+
+# Чем бывает записан минимум комнат. Три ключа, потому что про спальни парсер пишет
+# `bedrooms` и при этом ВЫБРАСЫВАЕТ `rooms` (`intake_rules.detect_housing_attributes`),
+# а `_ROOM_MINIMUM` в `refinements` принимает и «комнат», и «спал». Снимаются вместе:
+# спросив про один ключ, бот отвечал бы «уже не задан» про условие, которое осталось.
+_ROOM_MINIMUM_KEYS = ("rooms", "rooms_min", "bedrooms")
+
+
+def _edited(passport: Passport, change: Change) -> tuple[Passport, dict[str, Any]] | None:
+    """Правка или `None`, если домен её отклонил. Отказ — ответ человеку, а не исключение."""
+    try:
+        return apply_changes(passport, [change])
+    except EditError:
+        return None
+
+
+def room_minimum_keys(passport: Passport) -> list[str]:
+    """Какими ключами у этого поиска записан минимум комнат. Пусто — его нет."""
+    return [key for key in _ROOM_MINIMUM_KEYS if key in passport.attributes]
+
+
+def _without_room_minimum(passport: Passport) -> tuple[Passport, dict[str, Any]]:
+    """Снять минимум комнат — при любой категории поиска и любом из его ключей.
+
+    Реестр полей владеет не всеми ключами: `rooms` он знает у дома и квартиры, но не у
+    поиска КОМНАТЫ (`specs_for(Category.ROOM)`), а `rooms_min` и `bedrooms` не знает
+    нигде. При этом парсер кладёт их по словам, не спрашивая категорию, и карточка их
+    печатает — «не менее 2 комнат». Поэтому про каждый ключ сначала спрашиваем реестр, а
+    чего он не признал, снимаем сами: иначе «убери минимум 2 комнаты» на поиске комнаты
+    падало бы `EditError` посреди разговора, а ответить «уже не задан» значило бы соврать
+    про условие, которое человек видит на экране и которое продолжает отсеивать находки.
+
+    Снятого может быть больше, чем признал реестр, поэтому в событие правки идут все
+    снятые ключи: журнал версий описывает ревизию, а не её половину.
+    """
+    removed = room_minimum_keys(passport)
+    revised = passport
+    for key in removed:
+        changed = _edited(revised, Change(key))
+        if changed is not None:
+            revised, _ = changed
+    attributes = {
+        key: value for key, value in revised.attributes.items() if key not in _ROOM_MINIMUM_KEYS
+    }
+    return revised.model_copy(update={"attributes": attributes}), {"set": {}, "removed": removed}
+
+
 class SearchLimit(Protocol):
     """Сколько поисков можно держать: текст отказа, если открыть ещё один нельзя."""
 
@@ -315,6 +375,39 @@ class Conversation:
             # разговора выше устарел, поэтому читаем его заново.
             dialogue = await self._store.load(client)
         current = dialogue.passport
+        if current is not None and removes_room_minimum(message):
+            if not room_minimum_keys(current.passport):
+                await send(Reply(text="Минимум комнат уже не задан."))
+                return
+            revised, payload = _without_room_minimum(current.passport)
+            dialogue = await self._store.revise(
+                dialogue, revised, kind=EVENT_MANUAL_EDIT, payload=payload
+            )
+            await self._ask_or_search(dialogue, send)
+            return
+        floor_change, parse_message = (
+            budget_floor_edit(current.passport, message) if current is not None else (None, message)
+        )
+        if (
+            current is not None
+            and floor_change is not None
+            and floor_change.removes
+            and current.passport.budget.min is None
+            and not parse_message.strip(" ,;.")
+        ):
+            await send(Reply(text="Нижняя граница цены уже снята."))
+            return
+        if current is not None and floor_change is None and keeps_budget_floor(message):
+            stated = parse_query(message, default_city="")
+            if (
+                stated.category is None
+                and stated.city is None
+                and not stated.districts
+                and not stated.attributes
+                and stated.budget.max is None
+            ):
+                await send(Reply(text="Нижнюю границу оставил без изменений."))
+                return
         if current is not None and (not dialogue.state.pending or dialogue.editing):
             refined = price_refinement(current.passport, message)
             if refined is not None:
@@ -327,14 +420,24 @@ class Conversation:
                 await self._ask_or_search(dialogue, send)
                 return
         if dialogue.editing and current is not None:
-            passport = await self._parse_against_current(message)
+            passport, remove_floor = await self._parse_against_current(
+                parse_message, current.passport
+            )
             passport = merge_edit(current.passport, passport)
+            edit_payload: dict[str, object] = {"field": "query", "value": message}
+            if floor_change is not None or remove_floor:
+                edited = _edited(passport, floor_change or Change("budget_min"))
+                if edited is None:
+                    await send(Reply(text=EDIT_REFUSED))
+                    return
+                passport, changes = edited
+                edit_payload.update(changes)
             _lap("intake_ms")
             dialogue = await self._store.revise(
                 dialogue,
                 passport,
                 kind=EVENT_MANUAL_EDIT,
-                payload={"field": "query", "value": message},
+                payload=edit_payload,
             )
             await self._ask_or_search(dialogue, send)
             return
@@ -343,12 +446,27 @@ class Conversation:
             if answered:
                 return
 
-        passport = (
-            await self._parse_against_current(message)
-            if current is not None
-            else await self._intake().parse(message)
-        )
+        if current is not None:
+            passport, remove_floor = await self._parse_against_current(
+                parse_message, current.passport
+            )
+        else:
+            passport, remove_floor = await self._intake().parse(message), False
         _lap("intake_ms")
+        if current is not None and (floor_change is not None or remove_floor):
+            edited = _edited(
+                refine(current.passport, passport, message),
+                floor_change or Change("budget_min"),
+            )
+            if edited is None:
+                await send(Reply(text=EDIT_REFUSED))
+                return
+            revised, payload = edited
+            dialogue = await self._store.revise(
+                dialogue, revised, kind=EVENT_MANUAL_EDIT, payload=payload
+            )
+            await self._ask_or_search(dialogue, send)
+            return
         if current is not None and restates(current.passport, passport):
             # Та же просьба другими словами — не новый запрос. Начни здесь
             # цепочка заново, и повтор фразы обнулял бы собранные ответы вместе
@@ -391,12 +509,16 @@ class Conversation:
             return
         await self._open(dialogue, passport, send)
 
-    async def _parse_against_current(self, message: str) -> Passport:
+    async def _parse_against_current(
+        self, message: str, current: Passport
+    ) -> tuple[Passport, bool]:
         """Keep an absent city absent until the current search is merged."""
+        if not message.strip(" ,"):
+            return parse_query("", default_city=""), False
         intake = self._intake()
         if isinstance(intake, QueryIntake):
-            return await intake.parse(message, for_edit=True)
-        return await intake.parse(message)
+            return await intake.parse_edit(message, current)
+        return await intake.parse(message), False
 
     async def _begin_requested(self, dialogue: Dialogue, message: str, send: Send) -> bool:
         """Сообщение после `/new`: разобрать и открыть ветку. `False` — `/new` уже потрачен."""
