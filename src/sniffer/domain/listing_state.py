@@ -57,6 +57,10 @@ REASON_SCREEN = "screen"
 REASON_LIVENESS_DELETED = "liveness_deleted"
 REASON_LIVENESS_CLOSED = "liveness_closed"
 REASON_SUPERSEDED = "superseded"
+# Уборка первоисточников (docs/primary-sources.md): карточка слита с карточкой
+# первоисточника / у карточки нет определимого первоисточника.
+REASON_DUPLICATE_MERGED = "duplicate_merged"
+REASON_NOT_PRIMARY = "not_primary"
 
 
 def unseen_reason(source: str) -> str:
