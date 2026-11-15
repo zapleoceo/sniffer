@@ -181,6 +181,13 @@ CREATE TABLE IF NOT EXISTS raw_messages (
     -- pending → extracted | rejected | duplicate (кросспост: карточка уже есть)
     stage        TEXT        NOT NULL DEFAULT 'pending',
     gate_signals JSONB       NOT NULL DEFAULT '{}',
+    -- Первоисточник и отпечаток без цены (026_primary_sources.sql); NULL origin_kind —
+    -- сообщение само оригинал.
+    origin_kind       TEXT,
+    origin_chat_tg_id BIGINT,
+    origin_msg_id     BIGINT,
+    origin_username   TEXT,
+    identity_hash     TEXT,
     UNIQUE (chat_tg_id, msg_id)
 );
 

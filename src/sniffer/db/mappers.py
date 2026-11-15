@@ -94,6 +94,11 @@ def to_raw_message(row: models.RawMessage) -> RawMessage:
         stage=row.stage,
         gate_signals=dict(row.gate_signals),
         ingested_at=row.ingested_at,
+        origin_kind=row.origin_kind,
+        origin_chat_tg_id=row.origin_chat_tg_id,
+        origin_msg_id=row.origin_msg_id,
+        origin_username=row.origin_username,
+        identity_hash=row.identity_hash,
     )
 
 
@@ -109,6 +114,11 @@ def raw_message_values(message: RawMessage) -> dict[str, Any]:
         "posted_at": message.posted_at,
         "stage": message.stage,
         "gate_signals": message.gate_signals,
+        "origin_kind": message.origin_kind,
+        "origin_chat_tg_id": message.origin_chat_tg_id,
+        "origin_msg_id": message.origin_msg_id,
+        "origin_username": message.origin_username,
+        "identity_hash": message.identity_hash,
     }
 
 

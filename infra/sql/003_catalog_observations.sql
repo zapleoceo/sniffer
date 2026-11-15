@@ -21,6 +21,10 @@ CREATE TABLE IF NOT EXISTS catalog_publications (
     active BOOLEAN NOT NULL,
     fetched_at TIMESTAMPTZ NOT NULL,
     verified_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    -- Ключи личности и метка дубля (026_primary_sources.sql).
+    identity_keys TEXT[] NOT NULL DEFAULT '{}',
+    duplicate_of_source TEXT,
+    duplicate_of_external_id TEXT,
     PRIMARY KEY (source, external_id)
 );
 CREATE INDEX IF NOT EXISTS catalog_publications_search_idx

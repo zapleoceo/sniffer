@@ -90,6 +90,13 @@ class RawMessage:
     gate_signals: dict[str, Any] = field(default_factory=dict)
     ingested_at: datetime | None = None
     id: int | None = None
+    # Первоисточник (`domain.origin`): `None` — сообщение само оригинал.
+    origin_kind: str | None = None
+    origin_chat_tg_id: int | None = None
+    origin_msg_id: int | None = None
+    origin_username: str | None = None
+    # Отпечаток без цены (`domain.listing_identity`); `None` — текст слишком короткий.
+    identity_hash: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -111,3 +111,21 @@ class ListingMedia(BigIdMixin, Base):
     width: Mapped[int | None] = mapped_column(Integer)
     height: Mapped[int | None] = mapped_column(Integer)
     bytes: Mapped[int | None] = mapped_column(Integer)
+
+
+class ListingCleanupEvent(BigIdMixin, Base):
+    """Журнал уборки первоисточников и дублей (026_primary_sources.sql), только добавление."""
+
+    __tablename__ = "listing_cleanup_events"
+
+    listing_id: Mapped[int] = mapped_column(
+        ForeignKey("listings.id", ondelete="CASCADE"), nullable=False
+    )
+    canonical_listing_id: Mapped[int | None] = mapped_column(
+        ForeignKey("listings.id", ondelete="SET NULL")
+    )
+    action: Mapped[str] = mapped_column(Text, nullable=False)
+    before: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=NOW
+    )

@@ -89,6 +89,17 @@ class RawMessage(BigIdMixin, Base):
         Index("raw_messages_stage_idx", "stage", sa_text("posted_at DESC")),
         Index("raw_messages_hash_idx", "text_hash"),
         Index("raw_messages_posted_idx", "posted_at"),
+        Index(
+            "raw_messages_identity_idx",
+            "identity_hash",
+            postgresql_where=sa_text("identity_hash IS NOT NULL"),
+        ),
+        Index(
+            "raw_messages_origin_idx",
+            "origin_chat_tg_id",
+            "origin_msg_id",
+            postgresql_where=sa_text("origin_msg_id IS NOT NULL"),
+        ),
     )
 
     chat_tg_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -105,3 +116,10 @@ class RawMessage(BigIdMixin, Base):
     gate_signals: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=EMPTY_JSON
     )
+    # Первоисточник (026_primary_sources.sql): NULL origin_kind — сообщение само оригинал.
+    origin_kind: Mapped[str | None] = mapped_column(Text)
+    origin_chat_tg_id: Mapped[int | None] = mapped_column(BigInteger)
+    origin_msg_id: Mapped[int | None] = mapped_column(BigInteger)
+    origin_username: Mapped[str | None] = mapped_column(Text)
+    # Отпечаток текста без цены: перепост с новой ценой — то же объявление.
+    identity_hash: Mapped[str | None] = mapped_column(Text)
