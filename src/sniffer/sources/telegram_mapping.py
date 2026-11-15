@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from sniffer.config import get_settings
+from sniffer.domain.origin import message_origin
 from sniffer.domain.passport import Intent, counterpart_deal_type
 from sniffer.domain.prices import price_hint
 from sniffer.sources.base import RawItem
@@ -71,11 +72,16 @@ def to_item(
     if not text:
         # Фото без подписи, вход участника, закрепление — не объявления.
         return None
+    origin = message_origin(message, text)
+    if not origin.primary:
+        # Пересылка без адреса или сообщение-ссылка: ссылка вела бы на копию, а
+        # первоисточник не определён (docs/primary-sources.md). Не находка.
+        return None
     price_raw, price_vnd = price_hint(text, category=context.category, deal_type=context.deal_type)
     return RawItem(
         source=SOURCE_NAME,
         external_id=f"{chat.tg_id}:{message.id}",
-        url=message_link(chat, message.id, topic_id(message)),
+        url=origin.url or message_link(chat, message.id, topic_id(message)),
         text=text,
         price_raw=price_raw,
         price_vnd=price_vnd,

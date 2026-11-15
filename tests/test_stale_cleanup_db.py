@@ -438,6 +438,9 @@ async def test_cross_chat_repost_with_the_same_text_refreshes_too_pinned_known_r
     дату: «свежесть» от репоста — не свидетельство актуальности объявления
     (docs/architecture.md, «Известный риск»). Этот тест ломается, если поведение
     сменят, — и тогда документ надо править вместе с ним.
+
+    С 16.11.2026 (docs/primary-sources.md) карточка при этом остаётся на
+    первоисточнике: ссылка и сырьё — первого поста, от репоста — только дата.
     """
     await two_chats(db_session)
     await tick_with(db_session, monkeypatch, message(-100111, 1, NOW - timedelta(days=5)))
@@ -446,9 +449,10 @@ async def test_cross_chat_repost_with_the_same_text_refreshes_too_pinned_known_r
     rows = list(await db_session.scalars(select(models.Listing)))
     assert len(rows) == 1
     assert rows[0].posted_at == NOW - timedelta(days=1)
+    first = await RawMessageRepository(db_session).get_by_key(-100111, 1)
     second = await RawMessageRepository(db_session).get_by_key(-100222, 1)
-    assert second is not None and second.stage == "extracted"
-    assert rows[0].raw_message_id == second.id
+    assert second is not None and second.stage == "duplicate"
+    assert first is not None and rows[0].raw_message_id == first.id
 
 
 async def test_stale_messages_neither_create_nor_resurrect_a_card(

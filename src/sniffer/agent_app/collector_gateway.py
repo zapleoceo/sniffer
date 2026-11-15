@@ -16,6 +16,8 @@ from sniffer.db.engine import session_scope
 from sniffer.db.repositories.catalog_observations import CatalogObservationRepository
 from sniffer.db.repositories.collection_sources import CollectionSourceRepository
 from sniffer.db.repositories.collection_tasks import CollectionLease, CollectionTaskRepository
+from sniffer.domain.listing_identity import identity_keys
+from sniffer.domain.origin import OriginKind, PostRef
 from sniffer.search.currency import usd_vnd_rate
 from sniffer.sources.chotot import ChototSource
 
@@ -44,8 +46,10 @@ async def fetch_source(source: str, scope: CollectionScope, limit: int) -> list[
         return [
             Original(
                 "archive",
+                # Идентичность — та копия, что лежит у нас: по ней проекция находит
+                # прежнюю карточку. Ссылка — на первоисточник.
                 f"{row['chat_tg_id']}:{row['msg_id']}",
-                f"https://t.me/{row['username']}/{row['msg_id']}",
+                archive_url(row),
                 row["text"][:200],
                 row["text"][:30000],
                 row["ingested_at"],
@@ -108,6 +112,20 @@ async def fetch_source(source: str, scope: CollectionScope, limit: int) -> list[
         await adapter.aclose()
 
 
+def archive_url(row: dict[str, Any]) -> str:
+    """Ссылка на первоисточник строки архива: оригинал пересылки или сам пост.
+
+    Репозиторий отдаёт только первоисточники (пересылка без публичного адреса и
+    сообщение-ссылка отсечены в SQL), поэтому пересылка здесь всегда с именем.
+    """
+    if row.get("origin_kind") == OriginKind.FORWARD.value:
+        url = PostRef(int(row["origin_msg_id"]), username=row.get("origin_username")).url
+        if url is None:
+            raise ValueError("archive_origin_without_public_url")
+        return url
+    return f"https://t.me/{row['username']}/{row['msg_id']}"
+
+
 def _with_budget(
     scope: CollectionScope, low: object, high: object, currency: str | None
 ) -> CollectionScope:
@@ -151,6 +169,10 @@ def _raw_text(title: str, text: str, raw: dict[str, Any]) -> str:
     ]
 
 
+def _keys(original: Original) -> tuple[str, ...]:
+    return identity_keys(original.url, original.text, textual=original.source != "chotot")
+
+
 class CollectorGateway:
     def __init__(
         self,
@@ -165,6 +187,7 @@ class CollectorGateway:
         self.originals: list[Original] = []
         self.outcomes: dict[str, str] = {}
         self._staged: set[int] = set()
+        self._keys: set[str] = set()
         self.published = 0
         self.specs = (
             tool(
@@ -211,9 +234,22 @@ class CollectorGateway:
         originals = await self._fetch(source, self.scope, limit)
         if len(originals) > limit or any(item.source != source for item in originals):
             raise ValueError("invalid_source_result")
-        self.originals.extend(originals)
+        # Копии одного объявления внутри задания (кросспост, пересылка) дальше не идут:
+        # ни извлечения, ни staging. Дубли между заданиями ловит `_stage`.
+        fresh = [item for item in originals if self._first_time(item)]
+        self.originals.extend(fresh)
         self.outcomes[source] = "success"
-        return {"count": len(originals), "source": source}
+        result: dict[str, Any] = {"count": len(fresh), "source": source}
+        if len(fresh) < len(originals):
+            result["duplicates_skipped"] = len(originals) - len(fresh)
+        return result
+
+    def _first_time(self, original: Original) -> bool:
+        keys = set(_keys(original))
+        if keys & self._keys:
+            return False
+        self._keys |= keys
+        return True
 
     async def _stage(self, index: int, extracted: dict[str, Any]) -> dict[str, Any]:
         if type(index) is not int or not 0 <= index < len(self.originals):
@@ -223,6 +259,13 @@ class CollectorGateway:
         observed = observation(self.originals[index], extracted)
         async with self._sessions() as session:
             repo = CatalogObservationRepository(session)
+            # Объявление уже опубликовано под другим источником/номером (перепост,
+            # копия из другой группы): не пишем ни наблюдение, ни публикацию.
+            duplicate = await repo.duplicate_of(observed)
+            if duplicate is not None:
+                await session.commit()
+                self._staged.add(index)
+                return {"observation_id": None, "published": False, "duplicate_of": duplicate}
             identifier = await repo.stage(self.lease.id, self.lease.token, observed)
             # Facts from another city/category are retained in staging; not published.
             matches = (

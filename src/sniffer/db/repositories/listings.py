@@ -212,6 +212,48 @@ class ListingRepository(Repository):
         )
         return to_listing(row) if row is not None else None
 
+    async def get_by_identity(
+        self,
+        identity_hash: str,
+        *,
+        besides: int,
+        city: str,
+        category: str,
+        deal_type: str,
+    ) -> Listing | None:
+        """Активная карточка того же объявления без учёта цены (перепост с новой ценой).
+
+        В отличие от отпечатка текста, совпадение здесь не доказывает тождества
+        сделки, поэтому город, категория и сторона обязаны совпасть: иначе это
+        другое объявление, а не дубль.
+        """
+        row = await self._session.scalar(
+            select(models.Listing)
+            .join(models.RawMessage, models.Listing.raw_message_id == models.RawMessage.id)
+            .where(
+                models.RawMessage.identity_hash == identity_hash,
+                models.RawMessage.id != besides,
+                models.Listing.is_active.is_(True),
+                models.Listing.city == city,
+                models.Listing.category == category,
+                models.Listing.deal_type == deal_type,
+            )
+            .order_by(models.Listing.posted_at.desc(), models.Listing.id.desc())
+            .limit(1)
+        )
+        return to_listing(row) if row is not None else None
+
+    async def update_fields(self, listing_id: int, values: dict[str, Any]) -> None:
+        """Точечная правка карточки дублем: цена, свежесть или привязка к первоисточнику."""
+        unknown = set(values) - {*self._REPLACEABLE_FIELDS, "screened_at"}
+        if unknown:
+            raise ValueError(f"not_replaceable:{sorted(unknown)}")
+        if values:
+            await self._session.execute(
+                update(models.Listing).where(models.Listing.id == listing_id).values(**values)
+            )
+            await self._session.flush()
+
     async def refresh(self, listing_id: int, replacement: Listing) -> Listing:
         """Move a canonical duplicate card to its freshest original and facts."""
         values = {

@@ -8,6 +8,7 @@ LLM не является обязательным для появления к�
 
 from __future__ import annotations
 
+from sniffer.domain.origin import OriginKind, PostRef
 from sniffer.domain.passport import Category, Intent, default_deal_type
 from sniffer.domain.prices import parse_price
 from sniffer.domain.records import Chat, Listing, RawMessage
@@ -113,7 +114,7 @@ def listing_from(
         district=facts.district,
         title=facts.title,
         summary=_summary(raw.text),
-        tg_link=_link(chat.tg_id, chat.username, raw.msg_id),
+        tg_link=primary_link(raw, chat),
         posted_at=raw.posted_at,
         seller_id=raw.seller_id,
         price_amount=prices.amount,
@@ -130,6 +131,28 @@ def _monthly_rent_vnd(prices: PriceColumns) -> int | None:
     if prices.amount is None or prices.currency != "VND" or prices.period != "month":
         return None
     return int(prices.amount)
+
+
+def is_primary(raw: RawMessage) -> bool:
+    """Может ли сообщение стать карточкой со своей ссылкой (docs/primary-sources.md).
+
+    Пересылка без адреса оригинала и сообщение-ссылка первоисточником не являются:
+    ссылка на них вела бы на копию, а не на объявление.
+    """
+    if raw.origin_kind is None:
+        return True
+    return raw.origin_kind == OriginKind.FORWARD.value and _origin_url(raw) is not None
+
+
+def primary_link(raw: RawMessage, chat: Chat) -> str:
+    """Ссылка карточки: на оригинал пересылки, иначе на само сообщение."""
+    return _origin_url(raw) or _link(chat.tg_id, chat.username, raw.msg_id)
+
+
+def _origin_url(raw: RawMessage) -> str | None:
+    if raw.origin_kind != OriginKind.FORWARD.value or raw.origin_msg_id is None:
+        return None
+    return PostRef(raw.origin_msg_id, raw.origin_chat_tg_id, raw.origin_username).url
 
 
 def _link(tg_id: int, username: str | None, msg_id: int) -> str:
