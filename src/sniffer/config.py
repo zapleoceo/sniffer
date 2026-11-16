@@ -72,6 +72,10 @@ class Settings(BaseSettings):
     broker_url: str = "https://aib.zapleo.com"
     broker_project_key: str = ""
     broker_timeout_s: int = 120
+    # Empty disables the subscription prefix without changing the old role pins.
+    broker_primary_model: Literal["", "codex-sub/gpt-6.1-terra"] = ""
+    broker_primary_timeout_s: float = Field(default=30, ge=1, le=120)
+    broker_primary_cancel_timeout_s: float = Field(default=5, ge=1, le=30)
     # Закрепление модели по ролям (docs/architecture.md, «Модель по роли»).
     # Имена сверены с каталогом брокера (providers/specs.py, 04.10.2026).
     # Пустая строка в .env = не закреплять: идёт цепочка брокера по capability.
