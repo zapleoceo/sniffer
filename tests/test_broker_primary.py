@@ -106,6 +106,7 @@ async def test_terra_success_is_only_job(monkeypatch: pytest.MonkeyPatch) -> Non
     assert fake.keys[0]
     assert "max_tokens" not in fake.jobs[0] and "temperature" not in fake.jobs[0]
     assert fake.jobs[0]["no_shell"] is True
+    assert fake.jobs[0]["labels"] == {"workflow": "sniffer-primary"}
 
 
 @pytest.mark.parametrize("mode", ["error", "empty", "invalid", "refusal", "400", "503"])

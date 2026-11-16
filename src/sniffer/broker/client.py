@@ -197,6 +197,7 @@ class BrokerClient:
         model = self._settings.broker_primary_model
         subscription = {k: v for k, v in payload.items() if k not in {"max_tokens", "temperature"}}
         subscription["model"] = model
+        subscription["labels"] = {"workflow": "sniffer-primary"}
         if "tools" not in subscription:
             subscription["no_shell"] = True
         try:
