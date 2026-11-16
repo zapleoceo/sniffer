@@ -209,11 +209,35 @@ async def test_primary_survives_three_out_of_order_events(
     assert card.posted_at == NOW - timedelta(hours=1)
 
 
+def similar_observations() -> tuple[CatalogObservation, CatalogObservation]:
+    first = CatalogObservation.model_validate(
+        {
+            **chotot("1", "https://www.chotot.com/1.htm").model_dump(),
+            "source": "archive",
+            "url": "https://t.me/a_group/1",
+        }
+    )
+    other = CatalogObservation.model_validate(
+        {
+            **first.model_dump(),
+            "external_id": "2",
+            "url": "https://t.me/b_group/2",
+            "raw_text": first.raw_text.replace("100 VND", "200 VND"),
+            "facts": {**first.facts.model_dump(), "price_vnd": 200},
+            "evidence": tuple(
+                {**item.model_dump(), "quote": "200"}
+                if item.field == "price_vnd"
+                else item.model_dump()
+                for item in first.evidence
+            ),
+        }
+    )
+    return first, other
+
+
 async def test_publication_does_not_reject_a_price_only_similar_advert(
     db_session: AsyncSession,
 ) -> None:
-    from dataclasses import replace
-
     tasks = CollectionTaskRepository(db_session)
     task_id = await tasks.enqueue(
         {"city": "nha_trang", "category": "motorbike", "deal_type": "sell", "sources": ["archive"]},
@@ -225,20 +249,11 @@ async def test_publication_does_not_reject_a_price_only_similar_advert(
     lease = await tasks.claim()
     assert lease is not None
     repo = CatalogObservationRepository(db_session)
-    first = replace(chotot("1", "https://t.me/a_group/1"), source="archive")
+    first, other = similar_observations()
+    assert identity_hash(first.raw_text) == identity_hash(other.raw_text)
+    assert identity_hash(first.raw_text) is not None
     assert await repo.publish(task_id, lease.token, await repo.stage(task_id, lease.token, first))
     await db_session.commit()
-    other = replace(
-        first,
-        external_id="2",
-        url="https://t.me/b_group/2",
-        raw_text=first.raw_text.replace("100 VND", "200 VND"),
-        facts=replace(first.facts, price_vnd=200),
-        evidence=tuple(
-            replace(item, quote="200") if item.field == "price_vnd" else item
-            for item in first.evidence
-        ),
-    )
     assert await repo.duplicate_of(other) is None
     assert await repo.publish(task_id, lease.token, await repo.stage(task_id, lease.token, other))
     await db_session.commit()

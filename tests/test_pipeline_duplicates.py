@@ -106,7 +106,7 @@ def test_a_late_middle_copy_cannot_replace_the_original_after_refresh() -> None:
     primary = listing(1, 0, "https://t.me/a/1")
     repost = listing(2, 48, "https://t.me/b/2", price=5_500_000)
     refreshed = replace(primary, **merge_values(primary, repost))
-    middle = listing(3, 24, "https://t.me/c/3", price=5_800_000)
+    middle = listing(3, 24, "https://t.me/middle/3", price=5_800_000)
 
     assert merge_values(refreshed, middle) == {}
     assert refreshed.primary_posted_at == T0
