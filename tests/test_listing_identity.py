@@ -43,6 +43,14 @@ def test_chotot_gets_only_the_link_key() -> None:
 
 
 def test_telegram_gets_text_and_near_keys() -> None:
-    keys = identity_keys("https://t.me/a/1", FLAT, textual=True)
+    keys = identity_keys("https://t.me/a/1", FLAT, textual=True, near=True)
 
     assert [key.split(":", 1)[0] for key in keys] == ["url", "text", "near"]
+
+
+def test_price_only_similarity_does_not_share_keys_by_default() -> None:
+    first = identity_keys("https://t.me/a/1", FLAT, textual=True)
+    other = identity_keys("https://t.me/b/2", FLAT.replace("6 млн", "5 млн"), textual=True)
+
+    assert not set(first).intersection(other)
+    assert all(not key.startswith("near:") for key in first)

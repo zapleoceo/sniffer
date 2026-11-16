@@ -37,7 +37,10 @@ POST_COLUMNS = (
 
 def primary_rank(listing: Listing) -> tuple[bool, datetime]:
     """Меньше — ближе к первоисточнику: публичная ссылка, затем более ранний пост."""
-    return (listing.tg_link.startswith("https://t.me/c/"), listing.posted_at)
+    return (
+        listing.tg_link.startswith("https://t.me/c/"),
+        listing.primary_posted_at or listing.posted_at,
+    )
 
 
 def merge_values(existing: Listing, candidate: Listing) -> dict[str, Any]:

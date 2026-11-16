@@ -64,8 +64,9 @@ Now = Callable[[], datetime]
 
 
 class ArchivePipeline:
-    def __init__(self, *, now: Now = lambda: datetime.now(UTC)) -> None:
+    def __init__(self, *, now: Now = lambda: datetime.now(UTC), near: bool = False) -> None:
         self._now = now
+        self._near = near
 
     async def tick(self) -> int:
         async with session_scope() as session:
@@ -163,7 +164,7 @@ class ArchivePipeline:
         )
         listings = ListingRepository(session)
         existing = await listings.get_by_fingerprint(digest, besides=raw.id)
-        if existing is None and raw.identity_hash is not None:
+        if self._near and existing is None and raw.identity_hash is not None:
             # Тот же текст с другой ценой: перепост, а не новое объявление.
             await repo.lock_fingerprint(raw.identity_hash)
             existing = await listings.get_by_identity(

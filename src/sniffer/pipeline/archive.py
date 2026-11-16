@@ -116,6 +116,7 @@ def listing_from(
         summary=_summary(raw.text),
         tg_link=primary_link(raw, chat),
         posted_at=raw.posted_at,
+        primary_posted_at=raw.posted_at,
         seller_id=raw.seller_id,
         price_amount=prices.amount,
         price_currency=prices.currency,

@@ -84,3 +84,63 @@ def card(raw_id: int, external_id: str, hours: int, price: int) -> Listing:
         price_period="month",
         external_id=external_id,
     )
+
+
+async def test_merge_snapshot_restores_prices_attributes_and_deactivation(
+    db_session: AsyncSession,
+) -> None:
+    from dataclasses import replace
+
+    from sqlalchemy import update
+
+    await chats(db_session)
+    first_id, repost_id = await RawMessageRepository(db_session).add_many(
+        [raw(-1001, 1, 48), raw(-1002, 7, 1)]
+    )
+    listings = ListingRepository(db_session)
+    attrs = {"rooms": 1, "rate_amount": 6_000_000, "nested": {"original": True}}
+    keep = await listings.add(replace(card(first_id, "-1001:1", 48, 6_000_000), attributes=attrs))
+    gone = await listings.add(
+        replace(card(repost_id, "-1002:7", 1, 5_500_000), attributes={"rate_amount": 5_500_000})
+    )
+    assert keep.id is not None and gone.id is not None
+    await db_session.commit()
+    assert await PrimaryCleanupRepository(db_session).merge(
+        keep.id, (gone.id,), gone.id, NOW - timedelta(hours=1)
+    )
+    await db_session.commit()
+    db_session.expire_all()
+    changed = await listings.get(keep.id)
+    assert changed is not None and changed.attributes["rate_amount"] == 5_500_000
+    events = (await db_session.scalars(select(models.ListingCleanupEvent))).all()
+    assert len(events) == 2
+    for event in events:
+        before = event.before
+        assert set(models.Listing.__table__.columns.keys()) <= before.keys()
+        values = {
+            key: before[key]
+            for key in (
+                "attributes",
+                "price_currency",
+                "price_period",
+                "is_active",
+                "deactivated_reason",
+                "tg_link",
+            )
+        }
+        for key in ("posted_at", "deactivated_at"):
+            values[key] = datetime.fromisoformat(before[key]) if before[key] else None
+        for key in ("price_amount", "price_usd_month"):
+            values[key] = Decimal(str(before[key])) if before[key] is not None else None
+        await db_session.execute(
+            update(models.Listing).where(models.Listing.id == event.listing_id).values(**values)
+        )
+    await db_session.commit()
+    db_session.expire_all()
+    restored = await listings.get(keep.id)
+    restored_duplicate = await listings.get(gone.id)
+    assert restored is not None and restored.attributes == attrs
+    assert restored.price_amount == keep.price_amount and restored.posted_at == keep.posted_at
+    assert restored_duplicate is not None and restored_duplicate.is_active
+    row = await db_session.get(models.Listing, gone.id)
+    assert row is not None and row.deactivated_at is None and row.deactivated_reason is None

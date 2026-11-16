@@ -114,14 +114,16 @@ async def plan_link_fixes(cards: list[CardKeys]) -> list[LinkFix]:
     return plan_links(cards, lambda post: answers[post])
 
 
-def publication_plan(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def publication_plan(rows: list[dict[str, Any]], *, near: bool = False) -> list[dict[str, Any]]:
     """Ключи каждой публикации и, для дублей, на кого она указывает."""
     first: dict[tuple[str, str, str, str], tuple[str, str]] = {}
     ordered = sorted(rows, key=lambda row: (row["posted_at"] or "", row["fetched_at"]))
     plan = []
     for row in ordered:
         keys = list(
-            identity_keys(row["url"], row["raw_text"] or "", textual=row["source"] != "chotot")
+            identity_keys(
+                row["url"], row["raw_text"] or "", textual=row["source"] != "chotot", near=near
+            )
         )
         scope = (row["city"], row["category"], row["deal_type"])
         me = (row["source"], row["external_id"])
@@ -240,7 +242,7 @@ async def execute(args: argparse.Namespace) -> int:
     async with session_scope() as session:
         repo = PrimaryCleanupRepository(session)
         rebinds = await repo.earlier_copies()
-        publications = publication_plan(await repo.publications())
+        publications = publication_plan(await repo.publications(), near=args.near)
     movable = [row for row in rebinds if not row["blocked"]]
     result: dict[str, Any] = {
         "mode": "apply" if args.apply else "dry-run",

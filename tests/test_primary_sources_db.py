@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -103,7 +104,7 @@ async def test_a_repost_with_a_new_price_keeps_the_primary_link(
     await db_session.commit()
     repost = await raws.get_by_key(-1002, 7)
     assert repost is not None
-    assert await ArchivePipeline()._one(repost, db_session) == 1
+    assert await ArchivePipeline(near=True)._one(repost, db_session) == 1
     await db_session.commit()
 
     cards = (await db_session.scalars(select(models.Listing))).all()
@@ -166,3 +167,79 @@ async def test_a_second_copy_of_a_published_advert_is_reported_as_duplicate(
     assert await repo.duplicate_of(copy) == "https://www.chotot.com/42.htm"
     assert await repo.duplicate_of(first) is None
     assert len(await repo.search(city="nha_trang", category="motorbike")) == 1
+
+
+async def test_archive_keeps_price_only_similar_flats_separate_by_default(
+    db_session: AsyncSession,
+) -> None:
+    await chats(db_session)
+    raws = RawMessageRepository(db_session)
+    for chat, msg, body in [(-1001, 1, TEXT), (-1002, 2, TEXT.replace("6 млн", "5,5 млн"))]:
+        await raws.add_many([raw(chat, msg, 1, body)])
+        item = await raws.get_by_key(chat, msg)
+        assert item is not None
+        await ArchivePipeline()._one(item, db_session)
+        await db_session.commit()
+    cards = (await db_session.scalars(select(models.Listing))).all()
+    assert len(cards) == 2
+    assert {c.price_amount for c in cards} == {Decimal(6_000_000), Decimal(5_500_000)}
+
+
+@pytest.mark.parametrize("near", [False, True])
+async def test_primary_survives_three_out_of_order_events(
+    db_session: AsyncSession, near: bool
+) -> None:
+    await chats(db_session)
+    raws = RawMessageRepository(db_session)
+    for msg, hours, body in [
+        (1, 49, TEXT),
+        (2, 1, TEXT.replace("6 млн", "5,5 млн")),
+        (3, 25, TEXT.replace("6 млн", "5,8 млн")),
+    ]:
+        await raws.add_many([raw(-1001, msg, hours, body if near else TEXT)])
+        item = await raws.get_by_key(-1001, msg)
+        assert item is not None
+        await ArchivePipeline(near=near)._one(item, db_session)
+        await db_session.commit()
+        db_session.expire_all()
+    (card,) = (await db_session.scalars(select(models.Listing))).all()
+    assert card.external_id == "-1001:1"
+    assert card.tg_link == "https://t.me/a_group/1"
+    assert card.price_amount == Decimal(5_500_000 if near else 6_000_000)
+    assert card.posted_at == NOW - timedelta(hours=1)
+
+
+async def test_publication_does_not_reject_a_price_only_similar_advert(
+    db_session: AsyncSession,
+) -> None:
+    from dataclasses import replace
+
+    tasks = CollectionTaskRepository(db_session)
+    task_id = await tasks.enqueue(
+        {"city": "nha_trang", "category": "motorbike", "deal_type": "sell", "sources": ["archive"]},
+        user_id=1,
+        request_id=1,
+        request_version=1,
+        window_key="hour",
+    )
+    lease = await tasks.claim()
+    assert lease is not None
+    repo = CatalogObservationRepository(db_session)
+    first = replace(chotot("1", "https://t.me/a_group/1"), source="archive")
+    assert await repo.publish(task_id, lease.token, await repo.stage(task_id, lease.token, first))
+    await db_session.commit()
+    other = replace(
+        first,
+        external_id="2",
+        url="https://t.me/b_group/2",
+        raw_text=first.raw_text.replace("100 VND", "200 VND"),
+        facts=replace(first.facts, price_vnd=200),
+        evidence=tuple(
+            replace(item, quote="200") if item.field == "price_vnd" else item
+            for item in first.evidence
+        ),
+    )
+    assert await repo.duplicate_of(other) is None
+    assert await repo.publish(task_id, lease.token, await repo.stage(task_id, lease.token, other))
+    await db_session.commit()
+    assert len(await repo.search(city="nha_trang", category="motorbike")) == 2

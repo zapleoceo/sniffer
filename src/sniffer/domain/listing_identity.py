@@ -47,7 +47,7 @@ def identity_hash(text: str) -> str | None:
     return hashlib.sha256(f"{_VERSION}|{body}".encode()).hexdigest()
 
 
-def identity_keys(url: str, text: str, *, textual: bool) -> tuple[str, ...]:
+def identity_keys(url: str, text: str, *, textual: bool, near: bool = False) -> tuple[str, ...]:
     """Все ключи наблюдения каталога, по любому из которых находится дубль.
 
     `url` — ссылка на первоисточник: копии одной пересылки сходятся по ней.
@@ -57,6 +57,6 @@ def identity_keys(url: str, text: str, *, textual: bool) -> tuple[str, ...]:
     keys = [f"url:{same_post_key(url)}"]
     if textual:
         keys.append(f"text:{fingerprint(text)}")
-        if (near := identity_hash(text)) is not None:
-            keys.append(f"near:{near}")
+        if near and (digest := identity_hash(text)) is not None:
+            keys.append(f"near:{digest}")
     return tuple(keys)

@@ -23,6 +23,7 @@ def listing(raw_id: int, hours: int, link: str, price: int | None = 6_000_000) -
         summary=f"текст {raw_id}",
         tg_link=link,
         posted_at=T0 + timedelta(hours=hours),
+        primary_posted_at=T0 + timedelta(hours=hours),
         external_id=f"-100:{raw_id}",
         price_amount=Decimal(price) if price is not None else None,
         price_currency="VND" if price is not None else None,
@@ -99,3 +100,15 @@ def test_copies_without_a_public_original_are_not_primary() -> None:
     assert not is_primary(raw(origin_kind="pointer", origin_msg_id=3, origin_username="x_chat"))
     # Пересылка с адресом, но без имени канала: ссылку клиенту дать нельзя.
     assert not is_primary(raw(origin_kind="forward", origin_msg_id=55, origin_chat_tg_id=-1009))
+
+
+def test_a_late_middle_copy_cannot_replace_the_original_after_refresh() -> None:
+    primary = listing(1, 0, "https://t.me/a/1")
+    repost = listing(2, 48, "https://t.me/b/2", price=5_500_000)
+    refreshed = replace(primary, **merge_values(primary, repost))
+    middle = listing(3, 24, "https://t.me/c/3", price=5_800_000)
+
+    assert merge_values(refreshed, middle) == {}
+    assert refreshed.primary_posted_at == T0
+    assert refreshed.posted_at == repost.posted_at
+    assert refreshed.price_amount == Decimal(5_500_000)

@@ -22,11 +22,7 @@ from sniffer.domain.listing_dedup import PRICE_ATTRIBUTES
 from sniffer.domain.listing_state import REASON_DUPLICATE_MERGED, REASON_NOT_PRIMARY
 from sniffer.domain.origin import PostRef
 
-_SNAPSHOT = (
-    "jsonb_build_object('tg_link',tg_link,'price_amount',price_amount,"
-    "'price_currency',price_currency,'price_period',price_period,"
-    "'price_usd_month',price_usd_month,'posted_at',posted_at,'is_active',is_active)"
-)
+_SNAPSHOT = "to_jsonb(listings)"
 
 
 class PrimaryCleanupRepository(Repository):

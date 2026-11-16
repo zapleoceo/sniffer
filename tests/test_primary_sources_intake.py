@@ -266,3 +266,15 @@ def test_an_archive_forward_links_to_its_original() -> None:
     assert archive_url({**row, "origin_kind": None}) == "https://t.me/arenda_group/7"
     with pytest.raises(ValueError, match="archive_origin_without_public_url"):
         archive_url({**row, "origin_username": None})
+
+
+async def test_collector_retains_price_only_similar_flats(sessions: Any) -> None:
+    from tests.test_listing_identity import FLAT
+
+    copies = [
+        original("-1001:1", "https://t.me/a_group/1", FLAT),
+        original("-1002:2", "https://t.me/b_group/2", FLAT.replace("6 млн", "5 млн")),
+    ]
+    gateway = CollectorGateway(LEASE, sessions=sessions, fetch=AsyncMock(return_value=copies))
+    result = await gateway.call("sources_collect", {"source": "archive"})
+    assert result == {"count": 2, "source": "archive"}

@@ -122,6 +122,8 @@ class Listing:
     confidence: float = 0.0
     extracted_at: datetime | None = None
     is_active: bool = True
+    # Bound raw-message time, separate from mutable freshness.
+    primary_posted_at: datetime | None = None
     source: str = "telegram_archive"
     external_id: str | None = None
     id: int | None = None
