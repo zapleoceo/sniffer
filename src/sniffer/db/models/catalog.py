@@ -1,7 +1,7 @@
 """Core table mirrors for independently verified catalog observations."""
 
-from sqlalchemy import BigInteger, Boolean, Column, DateTime, ForeignKey, String, Table
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import BigInteger, Boolean, Column, DateTime, ForeignKey, String, Table, Text
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 
 from sniffer.db.models.base import Base
 
@@ -30,6 +30,10 @@ publications = Table(
     Column("active", Boolean, nullable=False),
     Column("fetched_at", DateTime(timezone=True), nullable=False),
     Column("verified_at", DateTime(timezone=True), nullable=False),
+    # Ключи личности и метка дубля (026_primary_sources.sql).
+    Column("identity_keys", ARRAY(Text), nullable=False, server_default="{}"),
+    Column("duplicate_of_source", String),
+    Column("duplicate_of_external_id", String),
 )
 coverage = Table(
     "catalog_coverage",

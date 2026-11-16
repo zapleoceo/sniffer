@@ -14,6 +14,7 @@ VND» дало 21.5 триллиона донгов, вставка упала �
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import structlog
@@ -32,9 +33,11 @@ from sniffer.pipeline.archive import (
     STAGE_REJECTED,
     STAGE_STALE,
     classify,
+    is_primary,
     listing_from,
     offer_deal_type,
 )
+from sniffer.pipeline.duplicates import merge_values
 from sniffer.search import vocabulary
 from sniffer.search.intake_rules import parse_query
 
@@ -43,12 +46,27 @@ log = structlog.get_logger(__name__)
 BATCH_SIZE = 50
 
 
+async def _with_origin_name(raw: RawMessage, chats: ChatRepository) -> RawMessage:
+    """Имя канала-оригинала из реестра, если в ответе Telegram его не было.
+
+    Без имени ссылка на оригинал невозможна, и пересылка считалась бы «без
+    адреса». Канал из нашего реестра мы знаем и так.
+    """
+    if raw.origin_username or raw.origin_chat_tg_id is None:
+        return raw
+    origin = await chats.get_by_tg_id(raw.origin_chat_tg_id)
+    if origin is None or not origin.username:
+        return raw
+    return replace(raw, origin_username=origin.username)
+
+
 Now = Callable[[], datetime]
 
 
 class ArchivePipeline:
-    def __init__(self, *, now: Now = lambda: datetime.now(UTC)) -> None:
+    def __init__(self, *, now: Now = lambda: datetime.now(UTC), near: bool = False) -> None:
         self._now = now
+        self._near = near
 
     async def tick(self) -> int:
         async with session_scope() as session:
@@ -103,7 +121,19 @@ class ArchivePipeline:
             await repo.set_stage([raw.id], STAGE_REJECTED, gate_signals=result.as_reject_signals())
             return 1
 
-        chat = await ChatRepository(session).get_by_tg_id(raw.chat_tg_id)
+        chats = ChatRepository(session)
+        raw = await _with_origin_name(raw, chats)
+        assert raw.id is not None
+        if not is_primary(raw):
+            # Пересылка без адреса оригинала или сообщение-ссылка: карточка с такой
+            # ссылкой вела бы на копию, а не на объявление (docs/primary-sources.md).
+            await repo.set_stage(
+                [raw.id],
+                STAGE_REJECTED,
+                gate_signals={"reason": "not_primary", "origin_kind": raw.origin_kind},
+            )
+            return 1
+        chat = await chats.get_by_tg_id(raw.chat_tg_id)
         if chat is None:
             log.warning("pipeline.unknown_chat", chat_tg_id=raw.chat_tg_id, raw_message_id=raw.id)
             await repo.set_stage(
@@ -134,6 +164,17 @@ class ArchivePipeline:
         )
         listings = ListingRepository(session)
         existing = await listings.get_by_fingerprint(digest, besides=raw.id)
+        if self._near and existing is None and raw.identity_hash is not None:
+            # Тот же текст с другой ценой: перепост, а не новое объявление.
+            await repo.lock_fingerprint(raw.identity_hash)
+            existing = await listings.get_by_identity(
+                raw.identity_hash,
+                besides=raw.id,
+                city=candidate.city,
+                category=candidate.category,
+                deal_type=candidate.deal_type,
+            )
+        stage = STAGE_EXTRACTED
         if existing is not None:
             assert existing.id is not None
             identity_changed = (
@@ -147,16 +188,13 @@ class ArchivePipeline:
                 # existing subscriptions can see the repaired offer.
                 await listings.deactivate(existing.id, reason=REASON_SUPERSEDED)
                 await listings.add(candidate)
-            elif raw.posted_at > existing.posted_at:
-                await listings.refresh(existing.id, candidate)
             else:
-                await repo.set_stage(
-                    [raw.id], STAGE_DUPLICATE, gate_signals=result.as_signals(), text_hash=digest
-                )
-                return 1
+                # Карточка остаётся на первоисточнике; от свежей копии — цена и свежесть.
+                values = merge_values(existing, candidate)
+                await listings.update_fields(existing.id, values)
+                if values.get("raw_message_id") != raw.id:
+                    stage = STAGE_DUPLICATE
         else:
             await listings.add(candidate)
-        await repo.set_stage(
-            [raw.id], STAGE_EXTRACTED, gate_signals=result.as_signals(), text_hash=digest
-        )
+        await repo.set_stage([raw.id], stage, gate_signals=result.as_signals(), text_hash=digest)
         return 1

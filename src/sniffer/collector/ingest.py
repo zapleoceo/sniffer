@@ -16,6 +16,8 @@ import structlog
 from telethon import errors
 
 from sniffer.domain.fingerprint import fingerprint
+from sniffer.domain.listing_identity import identity_hash
+from sniffer.domain.origin import message_origin
 from sniffer.domain.records import Chat, RawMessage
 from sniffer.sources.telegram_discover_reference import MAX_TRACKED_CHATS, MessageLike
 
@@ -149,6 +151,11 @@ def to_raw(chat: Chat, messages: Sequence[MessageLike]) -> list[RawMessage]:
             continue
         if posted_at.tzinfo is None:
             posted_at = posted_at.replace(tzinfo=UTC)
+        # Откуда сообщение на самом деле: пересылка и сообщение-ссылка — не
+        # первоисточник. Адрес оригинала берётся из заголовка пересылки и сущностей
+        # ответа — без лишнего запроса к Telegram.
+        origin = message_origin(message, text)
+        post = origin.post
         raw.append(
             RawMessage(
                 chat_tg_id=chat.tg_id,
@@ -161,6 +168,11 @@ def to_raw(chat: Chat, messages: Sequence[MessageLike]) -> list[RawMessage]:
                 # сможет извлекатель после нормализации продавца, не коллектор.
                 seller_id=None,
                 has_media=getattr(message, "media", None) is not None,
+                origin_kind=origin.kind.value if origin.kind is not None else None,
+                origin_chat_tg_id=post.chat_tg_id if post is not None else None,
+                origin_msg_id=post.msg_id if post is not None else None,
+                origin_username=post.username if post is not None else None,
+                identity_hash=identity_hash(text),
             )
         )
     return raw

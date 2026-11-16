@@ -513,7 +513,11 @@ async def test_stage_is_source_indexed_fenced_and_rejects_bad_evidence_before_wr
     storage: Storage, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _, sessions, _ = storage
-    repo = SimpleNamespace(stage=AsyncMock(return_value=20), publish=AsyncMock(return_value=True))
+    repo = SimpleNamespace(
+        stage=AsyncMock(return_value=20),
+        publish=AsyncMock(return_value=True),
+        duplicate_of=AsyncMock(return_value=None),
+    )
     monkeypatch.setattr(collector_gateway, "CatalogObservationRepository", lambda _: repo)
     gateway = CollectorGateway(LEASE, sessions=sessions, fetch=AsyncMock(return_value=[SOURCE]))
     await gateway.call("sources_collect", {"source": "chotot"})
@@ -545,7 +549,11 @@ async def test_stage_keeps_opposite_deal_out_of_requested_catalog(
         1,
         LEASE.deadline_at,
     )
-    repo = SimpleNamespace(stage=AsyncMock(return_value=20), publish=AsyncMock())
+    repo = SimpleNamespace(
+        stage=AsyncMock(return_value=20),
+        publish=AsyncMock(),
+        duplicate_of=AsyncMock(return_value=None),
+    )
     monkeypatch.setattr(collector_gateway, "CatalogObservationRepository", lambda _: repo)
     rental_source = Original(
         "archive",
@@ -638,6 +646,7 @@ async def test_real_mcp_collector_calls_known_source_without_model_tool_json(
         stage=AsyncMock(return_value=20),
         publish=AsyncMock(return_value=True),
         record_coverage=AsyncMock(),
+        duplicate_of=AsyncMock(return_value=None),
     )
     monkeypatch.setattr(marketplace_workflow, "CollectorGateway", lambda _: gateway)
     monkeypatch.setattr(marketplace_workflow, "session_scope", sessions)

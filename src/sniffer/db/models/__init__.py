@@ -29,7 +29,7 @@ from sniffer.db.models.discovery import (
     ChatRejectRetry,
 )
 from sniffer.db.models.jobs import Job
-from sniffer.db.models.listings import Listing, ListingMedia
+from sniffer.db.models.listings import Listing, ListingCleanupEvent, ListingMedia
 from sniffer.db.models.news import news_processing
 from sniffer.db.models.observability import (
     BrokerCall,
@@ -58,6 +58,7 @@ __all__ = [
     "DialogMessage",
     "Job",
     "Listing",
+    "ListingCleanupEvent",
     "ListingMedia",
     "Notification",
     "OfferView",

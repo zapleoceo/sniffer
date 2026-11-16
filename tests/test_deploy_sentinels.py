@@ -75,7 +75,7 @@ LEGACY_TABLES_WITHOUT_SENTINEL = frozenset(
         "broker_calls",
         "catalog_coverage",
         "catalog_observations",
-        "catalog_publications",
+        # catalog_publications охраняется колонками identity_keys/duplicate_of_* (026)
         "chat_join_events",
         "chat_rejects",
         # chats охраняется колонками excluded_* (020), поэтому из списка ушёл
@@ -87,7 +87,7 @@ LEGACY_TABLES_WITHOUT_SENTINEL = frozenset(
         "listing_media",
         "notifications",
         "passport_events",
-        "raw_messages",
+        # raw_messages охраняется колонками origin_*/identity_hash (026)
         # subscriptions, outbox, client_requests и payments охраняются колонками в deploy.sh
         "sellers",
         "telegram_sessions",

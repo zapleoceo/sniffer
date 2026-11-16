@@ -50,6 +50,11 @@ class CollectionSourceRepository(Repository):
             "r.text<>''",
             "r.posted_at>clock_timestamp()-interval '30 days'",
             "r.stage IN ('extracted','duplicate')",
+            # Только первоисточник: своё сообщение или пересылка с публичным адресом
+            # оригинала. Пересылка без адреса и сообщение-ссылка — копии, а не
+            # объявление (docs/primary-sources.md).
+            "(r.origin_kind IS NULL OR (r.origin_kind='forward' AND r.origin_msg_id IS NOT NULL "
+            "AND COALESCE(r.origin_username,oc.username) ~ '^[A-Za-z0-9_]{5,32}$'))",
             "(l.category=:category OR r.gate_signals @> CAST(:category_signal AS jsonb))",
         ]
         params: dict[str, Any] = {
@@ -125,23 +130,38 @@ class CollectionSourceRepository(Repository):
                 params.update(engine_low=int(engine_cc * 0.75), engine_high=int(engine_cc * 1.25))
         # Every clause is an application-owned literal above; customer values
         # remain bound parameters. Only the min/max operator is chosen locally.
+        # Копии одного объявления (кросспост, пересылка, перепост) схлопываются по
+        # отпечатку текста, а пересылки одного поста — ещё и по адресу оригинала.
+        # Остаётся копия с карточкой (её ждёт проекция в каталог), иначе самая
+        # РАННЯЯ — первоисточник; карточку на первоисточник переносят вход
+        # (`pipeline/duplicates.py`) и уборка. Свежесть группы — по самой поздней
+        # копии, чтобы живой перепост не уводил объявление вниз выдачи.
         statement = f"""
             WITH candidates AS (
                 SELECT r.chat_tg_id,r.msg_id,r.text,r.posted_at,r.ingested_at,
-                       c.username,
+                       c.username,r.origin_kind,r.origin_msg_id,
+                       COALESCE(r.origin_username,oc.username) AS origin_username,
                        row_number() OVER (
                            PARTITION BY r.text_hash
-                           ORDER BY r.posted_at DESC,r.id DESC
-                       ) AS duplicate_rank
+                           ORDER BY (l.id IS NULL),r.posted_at,r.id
+                       ) AS duplicate_rank,
+                       row_number() OVER (
+                           PARTITION BY COALESCE(r.origin_chat_tg_id,r.chat_tg_id),
+                                        COALESCE(r.origin_msg_id,r.msg_id)
+                           ORDER BY r.posted_at,r.id
+                       ) AS origin_rank,
+                       max(r.posted_at) OVER (PARTITION BY r.text_hash) AS fresh_at
                 FROM raw_messages r
                 JOIN chats c ON c.tg_id=r.chat_tg_id
+                LEFT JOIN chats oc ON oc.tg_id=r.origin_chat_tg_id
                 LEFT JOIN listings l ON l.raw_message_id=r.id AND l.is_active
                 WHERE {" AND ".join(clauses)}
             )
-            SELECT chat_tg_id,msg_id,text,posted_at,ingested_at,username
+            SELECT chat_tg_id,msg_id,text,posted_at,ingested_at,username,
+                   origin_kind,origin_msg_id,origin_username
             FROM candidates
-            WHERE duplicate_rank=1
-            ORDER BY posted_at DESC,msg_id DESC LIMIT :limit
+            WHERE duplicate_rank=1 AND origin_rank=1
+            ORDER BY fresh_at DESC,msg_id DESC LIMIT :limit
         """
         result = await self._session.execute(text(statement), params)
         return [dict(row) for row in result.mappings()]

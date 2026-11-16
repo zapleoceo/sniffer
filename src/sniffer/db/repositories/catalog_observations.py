@@ -16,6 +16,7 @@ from sniffer.db.models.catalog import observations, publications
 from sniffer.db.repositories.base import Repository
 from sniffer.db.repositories.collection_tasks import CollectionTaskRepository
 from sniffer.domain.catalog import CatalogObservation
+from sniffer.domain.listing_identity import identity_keys
 
 
 class CatalogRejected(ValueError):
@@ -63,6 +64,40 @@ class CatalogObservationRepository(Repository):
         assert identifier is not None
         return int(identifier)
 
+    async def duplicate_of(self, observation: CatalogObservation) -> str | None:
+        """Ссылка опубликованного первоисточника, если это наблюдение — его копия.
+
+        Копия — другой `(source, external_id)` с общим ключом личности (ссылка на
+        первоисточник, отпечаток текста или отпечаток без цены) в том же городе,
+        категории и стороне сделки. Ключи блокируются до конца транзакции: две
+        копии из параллельных заданий не опубликуются обе.
+        """
+        facts = observation.facts
+        if facts.city is None or facts.category is None or facts.deal_type is None:
+            return None
+        keys = sorted(_observation_keys(observation))
+        for key in keys:
+            await self._session.scalar(func.pg_advisory_xact_lock(func.hashtextextended(key, 0)))
+        row = await self._session.scalar(
+            select(observations.c.payload["url"].astext)
+            .join(publications, publications.c.observation_id == observations.c.id)
+            .where(
+                publications.c.identity_keys.overlap(keys),
+                publications.c.duplicate_of_source.is_(None),
+                publications.c.active.is_(True),
+                publications.c.city == facts.city,
+                publications.c.category == facts.category.value,
+                publications.c.deal_type == facts.deal_type,
+                ~(
+                    (publications.c.source == observation.source)
+                    & (publications.c.external_id == observation.external_id)
+                ),
+            )
+            .order_by(publications.c.fetched_at)
+            .limit(1)
+        )
+        return None if row is None else str(row)
+
     async def publish(self, task_id: int, token: str, observation_id: int) -> bool:
         lease = await CollectionTaskRepository(self._session).require_lease(task_id, token)
         row = (
@@ -101,6 +136,7 @@ class CatalogObservationRepository(Repository):
             "active": facts.active,
             "fetched_at": observation.fetched_at,
             "verified_at": func.clock_timestamp(),
+            "identity_keys": list(_observation_keys(observation)),
         }
         statement = insert(publications).values(**values)
         publish_statement = statement.on_conflict_do_update(
@@ -160,6 +196,8 @@ class CatalogObservationRepository(Repository):
                 publications.c.city == city,
                 publications.c.category == category,
                 publications.c.active.is_(True),
+                # Дубль первоисточника в выдачу не идёт (docs/primary-sources.md).
+                publications.c.duplicate_of_source.is_(None),
                 publications.c.fetched_at <= func.clock_timestamp(),
                 publications.c.fetched_at
                 >= func.clock_timestamp() - timedelta(seconds=fresh_seconds),
@@ -272,6 +310,12 @@ class CatalogObservationRepository(Repository):
         # Budget/query/attribute coverage must not be borrowed from an unrelated search.
         canonical = {key: value for key, value in scope.items() if key != "sources"}
         return hashlib.sha256(json.dumps(canonical, sort_keys=True).encode()).hexdigest()
+
+
+def _observation_keys(observation: CatalogObservation) -> tuple[str, ...]:
+    return identity_keys(
+        observation.url, observation.raw_text, textual=observation.source != "chotot"
+    )
 
 
 def _word_pattern(value: str) -> str:

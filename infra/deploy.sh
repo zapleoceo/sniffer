@@ -211,6 +211,15 @@ chat_exclusion_events                    # 020: журнал exclude/restore, ap
 chats             liveness_listing_id    # 021: курсор проверки живости по listing.id
 chats             liveness_checked_at    # 024: когда чат последним проходил проверку живости; NULL - ни разу
 news_processing                         # 025: независимое состояние новостей, без автонаполнения
+raw_messages      origin_kind            # 026: первоисточник сообщения; NULL — само оригинал
+raw_messages      origin_chat_tg_id      # 026: чат оригинала пересылки
+raw_messages      origin_msg_id          # 026: номер поста оригинала
+raw_messages      origin_username        # 026: имя чата оригинала, для публичной ссылки
+raw_messages      identity_hash          # 026: отпечаток текста без цены, дедуп перепостов
+catalog_publications identity_keys       # 026: ключи личности проверенной публикации
+catalog_publications duplicate_of_source # 026: публикация — дубль другой
+catalog_publications duplicate_of_external_id # 026: чей дубль
+listing_cleanup_events                   # 026: журнал уборки первоисточников и дублей
 SENTINELS
 }
 

@@ -90,6 +90,13 @@ class RawMessage:
     gate_signals: dict[str, Any] = field(default_factory=dict)
     ingested_at: datetime | None = None
     id: int | None = None
+    # Первоисточник (`domain.origin`): `None` — сообщение само оригинал.
+    origin_kind: str | None = None
+    origin_chat_tg_id: int | None = None
+    origin_msg_id: int | None = None
+    origin_username: str | None = None
+    # Отпечаток без цены (`domain.listing_identity`); `None` — текст слишком короткий.
+    identity_hash: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +122,8 @@ class Listing:
     confidence: float = 0.0
     extracted_at: datetime | None = None
     is_active: bool = True
+    # Bound raw-message time, separate from mutable freshness.
+    primary_posted_at: datetime | None = None
     source: str = "telegram_archive"
     external_id: str | None = None
     id: int | None = None

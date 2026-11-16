@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -199,8 +200,8 @@ class ListingRepository(Repository):
 
     async def get_by_fingerprint(self, text_hash: str, *, besides: int) -> Listing | None:
         """Return the active canonical card for another copy of the same advert."""
-        row = await self._session.scalar(
-            select(models.Listing)
+        result = await self._session.execute(
+            select(models.Listing, models.RawMessage.posted_at)
             .join(models.RawMessage, models.Listing.raw_message_id == models.RawMessage.id)
             .where(
                 models.RawMessage.text_hash == text_hash,
@@ -210,7 +211,51 @@ class ListingRepository(Repository):
             .order_by(models.Listing.posted_at.desc(), models.Listing.id.desc())
             .limit(1)
         )
-        return to_listing(row) if row is not None else None
+        row = result.one_or_none()
+        return replace(to_listing(row[0]), primary_posted_at=row[1]) if row is not None else None
+
+    async def get_by_identity(
+        self,
+        identity_hash: str,
+        *,
+        besides: int,
+        city: str,
+        category: str,
+        deal_type: str,
+    ) -> Listing | None:
+        """Активная карточка того же объявления без учёта цены (перепост с новой ценой).
+
+        В отличие от отпечатка текста, совпадение здесь не доказывает тождества
+        сделки, поэтому город, категория и сторона обязаны совпасть: иначе это
+        другое объявление, а не дубль.
+        """
+        result = await self._session.execute(
+            select(models.Listing, models.RawMessage.posted_at)
+            .join(models.RawMessage, models.Listing.raw_message_id == models.RawMessage.id)
+            .where(
+                models.RawMessage.identity_hash == identity_hash,
+                models.RawMessage.id != besides,
+                models.Listing.is_active.is_(True),
+                models.Listing.city == city,
+                models.Listing.category == category,
+                models.Listing.deal_type == deal_type,
+            )
+            .order_by(models.Listing.posted_at.desc(), models.Listing.id.desc())
+            .limit(1)
+        )
+        row = result.one_or_none()
+        return replace(to_listing(row[0]), primary_posted_at=row[1]) if row is not None else None
+
+    async def update_fields(self, listing_id: int, values: dict[str, Any]) -> None:
+        """Точечная правка карточки дублем: цена, свежесть или привязка к первоисточнику."""
+        unknown = set(values) - {*self._REPLACEABLE_FIELDS, "screened_at"}
+        if unknown:
+            raise ValueError(f"not_replaceable:{sorted(unknown)}")
+        if values:
+            await self._session.execute(
+                update(models.Listing).where(models.Listing.id == listing_id).values(**values)
+            )
+            await self._session.flush()
 
     async def refresh(self, listing_id: int, replacement: Listing) -> Listing:
         """Move a canonical duplicate card to its freshest original and facts."""
