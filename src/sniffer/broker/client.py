@@ -19,6 +19,7 @@ import structlog
 from sniffer.broker.contracts import UsageSink
 from sniffer.broker.output import InvalidOutput, OutputReason, check_schema, parse_object
 from sniffer.broker.pins import pinned_model
+from sniffer.broker.primary import PrimaryStopped, attempt
 from sniffer.config import get_settings
 
 log = structlog.get_logger(__name__)
@@ -141,6 +142,8 @@ class BrokerClient:
         max_tokens: int,
         temperature: float,
         model: str | None,
+        primary: bool = True,
+        primary_schema: dict[str, Any] | None = None,
     ) -> tuple[BrokerResult, bool]:
         """`chat` и признак «закреплённая модель отказала, ответ дан цепочкой».
 
@@ -163,6 +166,11 @@ class BrokerClient:
             payload["tools"] = tools
             payload["tool_choice"] = tool_choice if tool_choice is not None else "auto"
 
+        if primary and self._settings.broker_primary_model:
+            result = await self._primary(capability, payload, primary_schema)
+            if result is not None:
+                return result, False
+
         if model:
             try:
                 result = await self._run(capability, {**payload, "model": model})
@@ -182,6 +190,56 @@ class BrokerClient:
             result = await self._run(capability, payload)
         await self._account(capability, result)
         return result, fell_back
+
+    async def _primary(
+        self, capability: str, payload: dict[str, Any], schema: dict[str, Any] | None
+    ) -> BrokerResult | None:
+        model = self._settings.broker_primary_model
+        subscription = {k: v for k, v in payload.items() if k not in {"max_tokens", "temperature"}}
+        subscription["model"] = model
+        if "tools" not in subscription:
+            subscription["no_shell"] = True
+        try:
+            reply = await attempt(
+                self._client,
+                self._base_url,
+                self._key,
+                capability,
+                subscription,
+                timeout_s=self._settings.broker_primary_timeout_s,
+                cancel_timeout_s=self._settings.broker_primary_cancel_timeout_s,
+            )
+        except PrimaryStopped as exc:
+            if exc.reason == "cap":
+                raise BrokerCapError(CAP_ERROR) from None
+            raise BrokerError(str(exc)) from None
+        if reply is None:
+            log.info("broker.primary_fallback", model=model, reason="unavailable")
+            return None
+        body, job_id = reply
+        result = _result(body, job_id)
+        await self._account(capability, result)
+        if (
+            body.get("billing_type") != "subscription"
+            or result.provider != "codex-sub"
+            or result.model != model
+        ):
+            raise BrokerError("subscription result route or billing not attested")
+        try:
+            if schema is not None:
+                _validated(result, schema)
+            elif (
+                result.refusal
+                or not isinstance(result.text, str)
+                or (not result.text.strip() and not result.tool_calls)
+                or result.finish_reason not in {"stop", "end_turn", "completed", "tool_calls"}
+            ):
+                raise BrokerOutputError("incomplete", result)
+        except BrokerOutputError as exc:
+            log.info("broker.primary_fallback", model=model, reason=exc.reason, job_id=job_id)
+            return None
+        log.info("broker.primary_completed", model=model, job_id=job_id)
+        return result
 
     async def _run(self, capability: str, payload: dict[str, Any]) -> BrokerResult:
         job_id = await self._submit(capability, payload)
@@ -222,6 +280,7 @@ class BrokerClient:
             temperature=0.1,
             model=pin,
             response_format=response_format,
+            primary_schema=schema,
         )
         try:
             return _validated(result, schema)
@@ -242,12 +301,14 @@ class BrokerClient:
                 reason=exc.reason,
                 request_id=result.request_id,
             )
-        retry = await self.chat(
+        retry, _ = await self._chat(
             messages,
             capability=capability,
             max_tokens=max_tokens,
             temperature=0.1,
             response_format=response_format,
+            model=None,
+            primary=False,
         )
         return _validated(retry, schema)
 
@@ -312,20 +373,7 @@ class BrokerClient:
             status = body.get("status")
 
             if status == "done":
-                return BrokerResult(
-                    text=body.get("text", ""),
-                    provider=body.get("provider"),
-                    cost_usd=body.get("cost_usd"),
-                    request_id=_as_int(body.get("request_id")),
-                    model=body.get("model"),
-                    tokens_in=_as_int(body.get("tokens_in")) or 0,
-                    tokens_out=_as_int(body.get("tokens_out")) or 0,
-                    latency_ms=_as_int(body.get("latency_ms")),
-                    job_id=job_id,
-                    finish_reason=body.get("finish_reason"),
-                    refusal=bool(body.get("refusal")),
-                    tool_calls=body.get("tool_calls"),
-                )
+                return _result(body, job_id)
             if status == "error":
                 error = str(body.get("error", ""))
                 if CAP_ERROR in error:
@@ -353,6 +401,23 @@ class BrokerClient:
         # Широкий except намеренно: см. докстринг — ответ уже оплачен.
         except Exception as exc:
             log.warning("broker.usage_not_recorded", kind=type(exc).__name__, error=str(exc))
+
+
+def _result(body: dict[str, Any], job_id: int) -> BrokerResult:
+    return BrokerResult(
+        text=body.get("text", ""),
+        provider=body.get("provider"),
+        cost_usd=body.get("cost_usd"),
+        request_id=_as_int(body.get("request_id")),
+        model=body.get("model"),
+        tokens_in=_as_int(body.get("tokens_in")) or 0,
+        tokens_out=_as_int(body.get("tokens_out")) or 0,
+        latency_ms=_as_int(body.get("latency_ms")),
+        job_id=job_id,
+        finish_reason=body.get("finish_reason"),
+        refusal=bool(body.get("refusal")),
+        tool_calls=body.get("tool_calls"),
+    )
 
 
 def _validated(result: BrokerResult, schema: dict[str, Any]) -> dict[str, Any]:
