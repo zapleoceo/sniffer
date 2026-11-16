@@ -44,6 +44,15 @@ class Broker:
         job = int(path.rsplit("/", 1)[1])
         primary = self.jobs[job - 1].get("model") == TERRA
         mode = self.primary if primary else self.old
+        if primary and mode == "tool_wait":
+            return httpx.Response(
+                200,
+                json={
+                    "status": "cancelled" if self.cancelled else "pending",
+                    "tool_calls": [{"id": "call1"}],
+                    "poll_after_s": None,
+                },
+            )
         if primary and mode in {"timeout", "cancel_pending"}:
             if not self.cancelled:
                 raise httpx.ReadTimeout("poll timeout", request=request)
@@ -201,6 +210,20 @@ async def test_caller_cancellation_cancels_job_without_fallback(
     with pytest.raises(asyncio.CancelledError):
         await task
     assert fake.cancelled and len(fake.jobs) == 1
+
+
+async def test_pending_tool_callback_is_cancelled_before_native_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = Broker("tool_wait")
+    c = client(fake, monkeypatch)
+    result = await c.chat(
+        [{"role": "user", "content": "hello"}],
+        tools=[{"type": "function", "function": {"name": "search", "parameters": {}}}],
+    )
+    assert fake.cancelled and result.provider == "gemini"
+    assert [j.get("model") for j in fake.jobs] == [TERRA, None]
+    assert not any(path.endswith("/tool-results") for _, path in fake.calls)
 
 
 async def test_billing_mismatch_stops_without_paid_fallback(

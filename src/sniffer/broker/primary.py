@@ -68,6 +68,11 @@ async def attempt(
                     if "daily budget cap reached" in str(body.get("error", "")):
                         raise PrimaryStopped("cap")
                     return None
+                if body.get("tool_calls"):
+                    # Subscription tools pause a live CLI and require /tool-results,
+                    # unlike our stateless native API turns. Never expose an
+                    # unconsumed callback or leave it running beside the fallback.
+                    break
                 await asyncio.sleep(min(2.0, max(0.1, float(body.get("poll_after_s", 2)))))
     except (TimeoutError, httpx.HTTPError, ValueError, TypeError, AttributeError):
         if job_id is None:
