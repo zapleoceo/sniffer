@@ -14,12 +14,13 @@ from sniffer.db.repositories.catalog_observations import CatalogObservationRepos
 from sniffer.db.repositories.chats import ChatRepository
 from sniffer.db.repositories.collection_sources import CollectionSourceRepository
 from sniffer.db.repositories.collection_tasks import CollectionTaskRepository
+from sniffer.db.repositories.listings import ListingRepository
 from sniffer.db.repositories.raw_messages import RawMessageRepository
 from sniffer.domain.catalog import CatalogFacts, CatalogObservation, Evidence
 from sniffer.domain.fingerprint import fingerprint
 from sniffer.domain.listing_identity import identity_hash
 from sniffer.domain.passport import Category
-from sniffer.domain.records import Chat, RawMessage
+from sniffer.domain.records import Chat, Listing, RawMessage
 from sniffer.worker.archive import ArchivePipeline
 
 NOW = datetime.now(UTC).replace(microsecond=0)
@@ -212,7 +213,7 @@ async def test_primary_survives_three_out_of_order_events(
 def similar_observations() -> tuple[CatalogObservation, CatalogObservation]:
     first = CatalogObservation.model_validate(
         {
-            **chotot("1", "https://www.chotot.com/1.htm").model_dump(),
+            **chotot("-1001:1", "https://www.chotot.com/1.htm").model_dump(),
             "source": "archive",
             "url": "https://t.me/a_group/1",
         }
@@ -220,7 +221,7 @@ def similar_observations() -> tuple[CatalogObservation, CatalogObservation]:
     other = CatalogObservation.model_validate(
         {
             **first.model_dump(),
-            "external_id": "2",
+            "external_id": "-1002:2",
             "url": "https://t.me/b_group/2",
             "raw_text": first.raw_text.replace("100 VND", "200 VND"),
             "facts": {**first.facts.model_dump(), "price_vnd": 200},
@@ -250,6 +251,25 @@ async def test_publication_does_not_reject_a_price_only_similar_advert(
     assert lease is not None
     repo = CatalogObservationRepository(db_session)
     first, other = similar_observations()
+    await chats(db_session)
+    for observed in (first, other):
+        chat_id, msg_id = map(int, observed.external_id.split(":"))
+        (raw_id,) = await RawMessageRepository(db_session).add_many(
+            [raw(chat_id, msg_id, 1, observed.raw_text)]
+        )
+        await ListingRepository(db_session).add(
+            Listing(
+                raw_message_id=raw_id,
+                deal_type="sell",
+                category="motorbike",
+                city="nha_trang",
+                title=observed.title,
+                summary=observed.raw_text,
+                tg_link=observed.url,
+                posted_at=NOW - timedelta(hours=1),
+                external_id=observed.external_id,
+            )
+        )
     assert identity_hash(first.raw_text) == identity_hash(other.raw_text)
     assert identity_hash(first.raw_text) is not None
     assert await repo.publish(task_id, lease.token, await repo.stage(task_id, lease.token, first))
