@@ -89,8 +89,7 @@ async def attempt(
         raise
     # A known job must become terminal before the old route may start. A mere
     # cancel_requested means the CLI can still be running and is insufficient.
-    await _cancel(client, base_url, headers, job_id, cancel_timeout_s)
-    return None
+    return await _cancel(client, base_url, headers, job_id, cancel_timeout_s)
 
 
 async def _cancel(
@@ -99,7 +98,7 @@ async def _cancel(
     headers: dict[str, str],
     job_id: int,
     timeout_s: float,
-) -> None:
+) -> tuple[dict[str, Any], int] | None:
     try:
         async with asyncio.timeout(timeout_s):
             response = await client.post(f"{base_url}/v1/jobs/{job_id}/cancel", headers=headers)
@@ -114,8 +113,10 @@ async def _cancel(
                     "daily budget cap reached" in str(body.get("error", ""))
                 ):
                     raise PrimaryStopped("cap")
-                if body.get("status") in {"done", "error", "failed", "cancelled"}:
-                    return
+                if body.get("status") == "done":
+                    return body, job_id
+                if body.get("status") in {"error", "failed", "cancelled"}:
+                    return None
                 await asyncio.sleep(0.1)
     except (TimeoutError, httpx.HTTPError, ValueError, TypeError, AttributeError):
         raise PrimaryStopped("uncertain") from None

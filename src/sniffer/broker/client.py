@@ -195,11 +195,17 @@ class BrokerClient:
         self, capability: str, payload: dict[str, Any], schema: dict[str, Any] | None
     ) -> BrokerResult | None:
         model = self._settings.broker_primary_model
+        if payload.get("tools") or any(
+            m.get("role") == "tool" or m.get("tool_calls") for m in payload["messages"]
+        ):
+            # Broker rejects no_shell with client tools; its App Server path
+            # does not disable built-in tools. Keep the existing native route.
+            log.info("broker.primary_fallback", model=model, reason="unsupported_tool_protocol")
+            return None
         subscription = {k: v for k, v in payload.items() if k not in {"max_tokens", "temperature"}}
         subscription["model"] = model
         subscription["labels"] = {"workflow": "sniffer-primary"}
-        if "tools" not in subscription:
-            subscription["no_shell"] = True
+        subscription["no_shell"] = True
         try:
             reply = await attempt(
                 self._client,

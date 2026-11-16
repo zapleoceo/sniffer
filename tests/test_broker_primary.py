@@ -9,7 +9,7 @@ from typing import Any, Final
 import httpx
 import pytest
 
-from sniffer.broker.client import BrokerCapError, BrokerClient, BrokerError
+from sniffer.broker.client import BrokerCapError, BrokerClient, BrokerError, BrokerResult
 from sniffer.config import Settings
 
 TERRA: Final = "codex-sub/gpt-6.1-terra"
@@ -30,7 +30,8 @@ class Broker:
         self.calls.append((request.method, path))
         if path.endswith("/cancel"):
             self.cancelled = True
-            return httpx.Response(200, json={"state": "cancel_requested"})
+            state = "already_terminal" if self.primary.startswith("race_") else "cancel_requested"
+            return httpx.Response(200, json={"state": state})
         if request.method == "POST":
             body = json.loads(request.content)
             self.jobs.append(body)
@@ -44,6 +45,12 @@ class Broker:
         job = int(path.rsplit("/", 1)[1])
         primary = self.jobs[job - 1].get("model") == TERRA
         mode = self.primary if primary else self.old
+        if primary and mode.startswith("race_"):
+            if not self.cancelled:
+                raise httpx.ReadTimeout("poll timeout", request=request)
+            mode = mode.removeprefix("race_")
+            if mode in {"401", "403"}:
+                return httpx.Response(int(mode), text="access refused")
         if primary and mode == "tool_wait":
             return httpx.Response(
                 200,
@@ -166,13 +173,15 @@ async def test_timeout_confirms_cancellation_before_fallback(
     ]
 
 
-async def test_plain_chat_and_tools_take_primary(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_plain_chat_uses_primary_but_tools_keep_native_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     fake = Broker()
     c = client(fake, monkeypatch)
     await c.chat([{"role": "user", "content": "hello"}])
     tools = [{"type": "function", "function": {"name": "search", "parameters": {}}}]
     await c.chat([{"role": "user", "content": "hello"}], tools=tools)
-    assert [j.get("model") for j in fake.jobs] == [TERRA, TERRA]
+    assert [j.get("model") for j in fake.jobs] == [TERRA, None]
     assert fake.jobs[1]["tools"] == tools and "no_shell" not in fake.jobs[1]
 
 
@@ -188,7 +197,7 @@ async def test_wall_deadline_cancels_known_job(monkeypatch: pytest.MonkeyPatch) 
     c._client = httpx.AsyncClient(transport=httpx.MockTransport(slow))
     assert await ask(c) == {"a": "ok"}
     assert fake.cancelled
-    assert [j.get("model") for j in fake.jobs] == [TERRA, LITE]
+    assert [j.get("model") for j in fake.jobs] == [TERRA]
 
 
 async def test_caller_cancellation_cancels_job_without_fallback(
@@ -218,19 +227,18 @@ async def test_pending_tool_callback_is_cancelled_before_native_fallback(
 ) -> None:
     fake = Broker("tool_wait")
     c = client(fake, monkeypatch)
-    result = await c.chat(
-        [{"role": "user", "content": "hello"}],
-        tools=[{"type": "function", "function": {"name": "search", "parameters": {}}}],
-    )
-    assert fake.cancelled and result.provider == "gemini"
-    assert [j.get("model") for j in fake.jobs] == [TERRA, None]
+    assert await ask(c) == {"a": "ok"}
+    assert fake.cancelled
+    assert [j.get("model") for j in fake.jobs] == [TERRA, LITE]
     assert not any(path.endswith("/tool-results") for _, path in fake.calls)
 
 
+@pytest.mark.parametrize("mode", ["done", "race_done"])
 async def test_billing_mismatch_stops_without_paid_fallback(
     monkeypatch: pytest.MonkeyPatch,
+    mode: str,
 ) -> None:
-    fake = Broker()
+    fake = Broker(mode)
 
     def untrusted(request: httpx.Request) -> httpx.Response:
         response = fake(request)
@@ -243,3 +251,44 @@ async def test_billing_mismatch_stops_without_paid_fallback(
     with pytest.raises(BrokerError, match="not attested"):
         await ask(c)
     assert len(fake.jobs) == 1
+
+
+@pytest.mark.parametrize("mode", ["done", "invalid"])
+async def test_cancel_race_done_is_validated_and_accounted(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    fake = Broker(f"race_{mode}")
+    c = client(fake, monkeypatch)
+    accounted: list[BrokerResult] = []
+
+    async def usage(capability: str, result: BrokerResult) -> None:
+        accounted.append(result)
+
+    c._usage = usage
+    assert await ask(c) == {"a": "ok"}
+    expected = [TERRA] if mode == "done" else [TERRA, LITE]
+    assert [j.get("model") for j in fake.jobs] == expected
+    assert [r.job_id for r in accounted] == list(range(1, len(expected) + 1))
+    assert accounted[0].model == TERRA
+
+
+@pytest.mark.parametrize("mode", ["cap", "401", "403"])
+async def test_cancel_reconciliation_preserves_cap_and_access_guards(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    fake = Broker(f"race_{mode}")
+    c = client(fake, monkeypatch)
+    with pytest.raises(BrokerCapError if mode == "cap" else BrokerError):
+        await ask(c)
+    assert fake.cancelled and len(fake.jobs) == 1
+
+
+async def test_tool_history_never_enables_subscription_builtin_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = Broker()
+    c = client(fake, monkeypatch)
+    await c.chat([{"role": "tool", "content": "result", "tool_call_id": "call1"}])
+    assert len(fake.jobs) == 1 and "model" not in fake.jobs[0]
