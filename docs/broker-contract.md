@@ -80,3 +80,13 @@ request_id, job_id и доступный finish_reason, но не текст м�
 Проверка: `tests/test_broker_output.py` проводит ответы через реальный HTTP-клиент
 с MockTransport, проверяет схему, причины завершения, приватность диагностики
 и отсутствие скрытых повторов. Сеть и живая модель в этих тестах не используются.
+
+## Selecting another subscription model
+
+`BROKER_PRIMARY_MODEL` accepts an empty value (disabled) or a `codex-sub/<model-id>`
+from the live Broker catalog. The model suffix may contain letters, digits, dots,
+underscores and hyphens. Choose only an available model supporting the required
+capability; this configuration validation does not assert provider availability.
+The default deployment remains Terra 6.1. No model is enabled or selected by this
+change. Existing no-shell restrictions, timeouts, cancellation, billing and route
+attestation, and fallback handling remain in effect for every selected model.

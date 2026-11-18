@@ -292,3 +292,15 @@ async def test_tool_history_never_enables_subscription_builtin_tools(
     c = client(fake, monkeypatch)
     await c.chat([{"role": "tool", "content": "result", "tool_call_id": "call1"}])
     assert len(fake.jobs) == 1 and "model" not in fake.jobs[0]
+
+
+@pytest.mark.parametrize("model", ["", TERRA, "codex-sub/synthetic-model-2"])
+def test_primary_model_accepts_subscription_catalog_ids(model: str) -> None:
+    cfg = Settings(_env_file=None, broker_primary_model=model)  # type: ignore[call-arg]
+    assert cfg.broker_primary_model == model
+
+
+@pytest.mark.parametrize("model", ["api/model", "codex-sub/", "codex-sub/a b", "codex-sub/a/b"])
+def test_primary_model_rejects_other_routes_and_malformed_ids(model: str) -> None:
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, broker_primary_model=model)  # type: ignore[call-arg]
