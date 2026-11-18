@@ -296,10 +296,11 @@ async def test_tool_history_never_enables_subscription_builtin_tools(
 
 @pytest.mark.parametrize("model", ["", TERRA, "codex-sub/synthetic-model-2"])
 def test_primary_model_accepts_subscription_catalog_ids(model: str) -> None:
-    assert Settings(_env_file=None, broker_primary_model=model).broker_primary_model == model
+    cfg = Settings(_env_file=None, broker_primary_model=model)  # type: ignore[call-arg]
+    assert cfg.broker_primary_model == model
 
 
 @pytest.mark.parametrize("model", ["api/model", "codex-sub/", "codex-sub/a b", "codex-sub/a/b"])
 def test_primary_model_rejects_other_routes_and_malformed_ids(model: str) -> None:
     with pytest.raises(ValueError):
-        Settings(_env_file=None, broker_primary_model=model)
+        Settings(_env_file=None, broker_primary_model=model)  # type: ignore[call-arg]
