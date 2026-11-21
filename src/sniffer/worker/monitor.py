@@ -104,6 +104,7 @@ class MonitorAgent:
         clock: Clock = _utc_now,
         batch: int | None = None,
         lapse_grace: timedelta | None = None,
+        owner_only: int | None = None,
     ) -> None:
         # Курс нужен, чтобы долларовый бюджет стал потолком в донгах. Источник не задан
         # или не ответил — курса нет, и такой слот ждёт (см. `tick`). Выдуманный курс
@@ -112,6 +113,7 @@ class MonitorAgent:
         self._rate = UsdRate(rate)
         self._slots: Slots = slots or UnlimitedSlots()
         self._clock = clock
+        self._owner_only = owner_only
         settings = get_settings()
         self._batch = settings.monitor_batch if batch is None else batch
         self._grace = (
@@ -126,7 +128,7 @@ class MonitorAgent:
         queued = 0
         async with session_scope() as session:
             stores = Stores(
-                MonitorRepository(session),
+                MonitorRepository(session, owner_only=self._owner_only),
                 DeliveryRepository(session),
                 ListingRepository(session),
                 QuotaRepository(session),

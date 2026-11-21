@@ -327,7 +327,9 @@ def install(
         ledger=FakeLedger(),
     )
     monkeypatch.setattr(module, "session_scope", lambda: Scope(world.session))
-    monkeypatch.setattr(module, "MonitorRepository", lambda _session: world.monitors)
+    monkeypatch.setattr(
+        module, "MonitorRepository", lambda _session, owner_only=None: world.monitors
+    )
     monkeypatch.setattr(module, "DeliveryRepository", lambda _session: world.delivery)
     monkeypatch.setattr(module, "ListingRepository", lambda _session: world.listings)
     monkeypatch.setattr(module, "QuotaRepository", lambda _session: world.ledger)

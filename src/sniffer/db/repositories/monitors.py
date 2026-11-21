@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from sqlalchemy import ColumnElement, Select, Update, case, func, or_, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from sniffer.db import models
 from sniffer.db.mappers import to_subscription_state
@@ -101,13 +102,14 @@ def _ranked_statement(user_ids: Sequence[int], *, now: datetime) -> Select[tuple
 
 
 def _due_statement(
-    *, limit: int, now: datetime
+    *, limit: int, now: datetime, owner_only: int | None = None
 ) -> Select[tuple[models.Subscription, models.Passport]]:
+    scope = [] if owner_only is None else [models.User.tg_user_id == owner_only]
     return (
         select(models.Subscription, models.Passport)
         .join(models.Passport, _chain() == models.Subscription.passport_root)
         .join(models.User, models.User.id == models.Subscription.user_id)
-        .where(*_servable(now))
+        .where(*_servable(now), *scope)
         # NULLS FIRST: новая подписка (ни разу не смотрели) идёт раньше всех, а дальше —
         # по давности обхода. `id` разводит равные: порядок должен быть полным, иначе
         # две подписки с одним временем могли бы меняться местами от прохода к проходу.
@@ -123,12 +125,20 @@ def _due_statement(
     )
 
 
-def _lapse_statement(*, now: datetime) -> Update:
+def _user_scope(owner_only: int | None) -> list[ColumnElement[bool]]:
+    if owner_only is None:
+        return []
+    owner = select(models.User.id).where(models.User.tg_user_id == owner_only)
+    return [models.Subscription.user_id.in_(owner)]
+
+
+def _lapse_statement(*, now: datetime, owner_only: int | None = None) -> Update:
     lapsed = models.Subscription.expires_at <= now
     return (
         update(models.Subscription)
         # `no_slot_since IS NULL`: начало паузы пишется один раз, повтор его не сдвигает.
         .where(
+            *_user_scope(owner_only),
             models.Subscription.no_slot_since.is_(None),
             or_(models.Subscription.is_active.is_(False), lapsed),
         )
@@ -138,11 +148,13 @@ def _lapse_statement(*, now: datetime) -> Update:
     )
 
 
-def _cancel_statement(*, cutoff: datetime) -> Update:
+def _cancel_statement(*, cutoff: datetime, owner_only: int | None = None) -> Update:
     # Просроченной считается подписка с ограниченным сроком, вышедшим РАНЬШЕ границы:
     # `NULL < …` — это NULL, то есть «бессрочная» сюда не попадает. Строки без подписки
     # (ответы сбора каталога) не попадают тоже: у них нет соединения с подписками.
-    lapsed = select(models.Subscription.id).where(models.Subscription.expires_at < cutoff)
+    lapsed = select(models.Subscription.id).where(
+        models.Subscription.expires_at < cutoff, *_user_scope(owner_only)
+    )
     # `SKIP LOCKED`: нотифаер держит взятые в отправку строки до конца пачки, и обычный
     # UPDATE по ним встал бы в очередь за его коммитом — на секунды, а проход матчера стоит
     # на пути всего воркера. Результат от этого не меняется: строка, которую нотифаер уже
@@ -163,6 +175,10 @@ def _cancel_statement(*, cutoff: datetime) -> Update:
 
 
 class MonitorRepository(Repository):
+    def __init__(self, session: AsyncSession, *, owner_only: int | None = None) -> None:
+        super().__init__(session)
+        self._owner_only = owner_only
+
     async def claim_due(self, *, limit: int, now: datetime) -> DueSubscriptions:
         """Порция подписок на этот проход, заблокированная до конца транзакции.
 
@@ -175,7 +191,9 @@ class MonitorRepository(Repository):
         вернул бы дефект D6 (выбор по одному «сейчас», оценка — по другому), и на ошибку
         вызова должен указывать `mypy`, а не тест, который об этом не знает.
         """
-        rows = await self._session.execute(_due_statement(limit=limit, now=now))
+        rows = await self._session.execute(
+            _due_statement(limit=limit, now=now, owner_only=self._owner_only)
+        )
         ready: list[SubscriptionState] = []
         broken: list[BrokenSubscription] = []
         for subscription, passport in rows:
@@ -206,7 +224,9 @@ class MonitorRepository(Repository):
         внутри льготы возвращает подписку в право, и очередь доходит как ни в чём не
         бывало. Возвращает, сколько строк отменено.
         """
-        cancelled = await self._session.execute(_cancel_statement(cutoff=now - grace))
+        cancelled = await self._session.execute(
+            _cancel_statement(cutoff=now - grace, owner_only=self._owner_only)
+        )
         return len(cancelled.all())
 
     async def touch(self, subscription_id: int, *, now: datetime) -> None:
@@ -278,7 +298,7 @@ class MonitorRepository(Repository):
         когда мы заметили), у выключенного слота без истёкшего срока — «сейчас». Возвращает, у
         скольких слотов пауза началась.
         """
-        began = await self._session.execute(_lapse_statement(now=now))
+        began = await self._session.execute(_lapse_statement(now=now, owner_only=self._owner_only))
         return len(began.all())
 
     async def set_no_slot_since(self, subscription_id: int, since: datetime | None) -> None:

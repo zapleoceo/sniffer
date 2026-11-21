@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sniffer.bot.app import SERVICE
+from sniffer.bot.catalog_entry import SERVICE
 from sniffer.runtime.service import run_service
 
 if __name__ == "__main__":

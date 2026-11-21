@@ -11,7 +11,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
@@ -20,6 +21,8 @@ import structlog
 from fastapi import Cookie, FastAPI, Form, Query, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
+from sniffer.catalog_mcp.address import MOUNT
+from sniffer.catalog_mcp.server import make_server
 from sniffer.config import get_settings
 from sniffer.dashboard import auth, data, inventory, reauth, views
 from sniffer.dashboard.html import error_page, esc, login_page
@@ -126,7 +129,22 @@ def _html(body: str, status: int = 200) -> HTMLResponse:
 def create_app() -> FastAPI:
     # Документацию OpenAPI выключаем: описывать наружу нечего, а /docs — это
     # ещё одна страница, которая обязана быть закрытой, и однажды не будет.
-    app = FastAPI(title="SnifferBot dashboard", docs_url=None, redoc_url=None, openapi_url=None)
+    catalog = make_server()
+    catalog_http = catalog.streamable_http_app()
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        async with catalog.session_manager.run():
+            yield
+
+    app = FastAPI(
+        title="SnifferBot dashboard",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+        lifespan=lifespan,
+    )
+    app.mount(MOUNT, catalog_http)
 
     @app.middleware("http")
     async def _headers(request: Request, call_next: CallNext) -> Response:

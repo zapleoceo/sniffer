@@ -95,7 +95,7 @@ async def test_the_notifier_reads_thread_links_only_when_topics_are_enabled(
 
     monkeypatch.setattr(ports, "session_scope", scope)
     monkeypatch.setattr(ports, "get_settings", lambda: Settings(topics_enabled=enabled))
-    monkeypatch.setattr(ports, "DeliveryRepository", lambda _s: object())
+    monkeypatch.setattr(ports, "DeliveryRepository", lambda _s, owner_only=None: object())
     monkeypatch.setattr(ports, "UserRepository", lambda _s: object())
     monkeypatch.setattr(ports, "TabRepository", lambda _s: "tabs")
 
