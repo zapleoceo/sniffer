@@ -429,6 +429,56 @@ if [ "$PREFLIGHT_ONLY" -eq 1 ]; then
   exit 0
 fi
 
+# MCP removes consumer subscription delivery. Fail closed before touching the current
+# stack when a paid period or a recurring arrangement may still be live. Psql can
+# expose errors with values, so neither query output nor an error enters public CI logs.
+catalog_billing_gate() {
+  local safe
+  if ! safe="$(docker compose exec -T postgres psql -X -At -U sniffer -d sniffer \
+      -v ON_ERROR_STOP=1 -q 2>/dev/null <<'CATALOG_BILLING_GATE'
+BEGIN READ ONLY;
+SET LOCAL statement_timeout = '5s';
+SELECT CASE WHEN
+  EXISTS (
+    SELECT 1 FROM subscriptions
+    WHERE is_active AND expires_at > now() AND NULLIF(charge_id, '') IS NOT NULL
+  ) OR EXISTS (
+    SELECT 1 FROM payments AS p
+    JOIN users AS u ON u.id = p.user_id
+    WHERE p.provider = 'telegram_stars'
+      AND (
+        (p.status IN ('paid', 'refunding') AND p.period_end > now())
+        OR (p.status IN ('paid', 'refunding', 'refunded')
+          AND (p.is_recurring OR p.is_first_recurring)
+          AND (
+            SELECT CASE WHEN e.kind IN ('sub_canceled', 'renewal_canceled') THEN 'closed'
+              ELSE 'live' END
+            FROM billing_events AS e
+            WHERE e.tg_user_id = COALESCE(p.tg_user_id, u.tg_user_id)
+              AND (e.payload->>'invoice_payload' = p.invoice_payload
+                OR e.charge_id = p.invoice_payload)
+              AND e.kind IN ('sub_active', 'sub_canceled', 'renewal_canceled')
+              AND e.created_at >= p.created_at
+            ORDER BY e.created_at DESC, e.id DESC
+            LIMIT 1
+          ) IS DISTINCT FROM 'closed'
+        )
+      )
+  )
+  THEN 'block' ELSE 'pass' END;
+ROLLBACK;
+CATALOG_BILLING_GATE
+)"; then
+    die "MCP: состояние старых платных подписок не подтверждено; переключение запрещено" 41
+  fi
+  if [ "$safe" != "pass" ]; then
+    die "MCP: есть незавершённые платные обязательства; переключение запрещено" 41
+  fi
+  info "MCP: проверка журнала прежних платных подписок пройдена"
+}
+
+catalog_billing_gate
+
 # ── 3. Код ──────────────────────────────────────────────────────────────────
 log "код"
 PREV_SHA="$(git rev-parse HEAD 2>/dev/null || echo '')"
@@ -558,6 +608,7 @@ fi
 
 # ── 5. Запуск ───────────────────────────────────────────────────────────────
 log "запуск"
+catalog_billing_gate
 # --remove-orphans действует внутри compose-проекта sniffer и до контейнеров
 # Веры и Степана не дотягивается.
 docker compose $COMPOSE_PROFILE_ARGS up -d --remove-orphans

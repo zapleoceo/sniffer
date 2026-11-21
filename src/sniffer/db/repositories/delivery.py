@@ -30,6 +30,7 @@ from sqlalchemy import (
 from sqlalchemy import cast as sa_cast
 from sqlalchemy.dialects.postgresql import ARRAY, REAL
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from sniffer.db import models
 from sniffer.db.mappers import to_subscription_state
@@ -74,6 +75,15 @@ def entitled(now: datetime) -> ColumnElement[bool]:
 
 
 class DeliveryRepository(Repository):
+    def __init__(self, session: AsyncSession, *, owner_only: int | None = None) -> None:
+        super().__init__(session)
+        self._owner_only = owner_only
+
+    def _recipient_scope(self) -> list[ColumnElement[bool]]:
+        if self._owner_only is None:
+            return []
+        return [models.User.tg_user_id == self._owner_only]
+
     async def advance_scan(self, subscription_id: int, listing_id: int) -> None:
         """Монотонно запомнить последнюю рассмотренную карточку."""
         await self._session.execute(
@@ -173,6 +183,7 @@ class DeliveryRepository(Repository):
             .where(
                 models.Outbox.status == OUTBOX_PENDING,
                 models.Outbox.scheduled_at <= (now or datetime.now(UTC)),
+                *self._recipient_scope(),
             )
             .order_by(models.Outbox.scheduled_at, models.Outbox.id)
             .limit(limit)
@@ -210,6 +221,7 @@ class DeliveryRepository(Repository):
                 models.Outbox.id.in_(list(ids)),
                 models.Outbox.status == OUTBOX_PENDING,
                 models.Outbox.scheduled_at <= now,
+                *self._recipient_scope(),
                 or_(
                     models.Outbox.subscription_id.is_(None),
                     models.Outbox.subscription_id.in_(active_ids),
@@ -451,6 +463,9 @@ class DeliveryRepository(Repository):
         # `SKIP LOCKED`: строку, которую нотифаер уже взял в отправку, отмена не ждёт —
         # судьба такой строки решена (отменять отправляемое поздно), а ожидание
         # блокировки стояло бы на пути всего прохода.
+        if self._owner_only is not None:
+            owner = select(models.User.id).where(*self._recipient_scope())
+            conditions = (*conditions, models.Outbox.user_id.in_(owner))
         pending = (
             select(models.Outbox.id)
             .where(models.Outbox.status == OUTBOX_PENDING, *conditions)

@@ -165,7 +165,12 @@ async def test_the_process_builds_its_delivery_with_the_policy_from_the_environm
 
     class SpyDelivery:
         def __init__(
-            self, send: object, *, send_in_thread: object = None, policy: Policy | None = None
+            self,
+            send: object,
+            *,
+            send_in_thread: object = None,
+            policy: Policy | None = None,
+            scope: object,
         ) -> None:
             seen.append(policy)
 

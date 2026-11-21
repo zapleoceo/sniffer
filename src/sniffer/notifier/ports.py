@@ -81,11 +81,11 @@ Scope = Callable[[], AbstractAsyncContextManager[Work]]
 
 
 @asynccontextmanager
-async def work_scope() -> AsyncIterator[Work]:
+async def work_scope(*, owner_only: int | None = None) -> AsyncIterator[Work]:
     """Боевая единица работы: своя сессия, коммит — за вызывающим."""
     async with session_scope() as session:
         yield Work(
-            queue=DeliveryRepository(session),
+            queue=DeliveryRepository(session, owner_only=owner_only),
             users=UserRepository(session),
             commit=session.commit,
             # Без флага тем нотифаер шлёт, как слал: связей он не читает вовсе.

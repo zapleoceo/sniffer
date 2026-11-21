@@ -20,7 +20,7 @@ from collections.abc import Awaitable, Callable, Sequence
 
 import structlog
 
-from sniffer.config import Settings
+from sniffer.config import Settings, get_settings
 from sniffer.runtime.service import Service, idle_loop, run_service
 from sniffer.search.currency import usd_vnd_rate
 from sniffer.worker.archive import ArchivePipeline
@@ -63,7 +63,9 @@ def build_monitor() -> MonitorAgent:
     не видел — дефект сидел в проводке, а не в самом матчере. Поэтому проводка вынесена в
     функцию, и её проверяет отдельный тест.
     """
-    return MonitorAgent(rate=usd_vnd_rate, slots=LedgerSlots())
+    return MonitorAgent(
+        rate=usd_vnd_rate, slots=LedgerSlots(), owner_only=get_settings().owner_chat_id
+    )
 
 
 # Как часто агент слежения смотрит, не появилось ли новое. Секунды, а не 15 минут коллектора:

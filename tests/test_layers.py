@@ -32,6 +32,8 @@ FORBIDDEN: dict[str, frozenset[str]] = {
             "bot",
             "agents",
             "agent_app",
+            # Read-only public MCP transport composes a sealed database projection.
+            "catalog_mcp",
             "broker",
             "collector",
             "dashboard",
@@ -52,6 +54,8 @@ FORBIDDEN: dict[str, frozenset[str]] = {
         {
             "agents",
             "agent_app",
+            # Read-only public MCP transport composes a sealed database projection.
+            "catalog_mcp",
             "bot",
             "collector",
             "dashboard",
@@ -155,6 +159,7 @@ def test_every_package_of_the_project_is_judged_or_named() -> None:
         "simulation",
         # Composition root for private MCP/agent runtime; holds injected repositories/adapters.
         "agent_app",
+        "catalog_mcp",
     }
     packages = {path.name for path in SRC.iterdir() if path.is_dir() and path.name != "__pycache__"}
 
