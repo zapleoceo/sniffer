@@ -10,7 +10,8 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 
-from sniffer.catalog_mcp.address import MCP_PATH, PUBLIC_HOST
+from sniffer.catalog_mcp.address import MCP_PATH, PERSONAL_PATH, PUBLIC_HOST
+from sniffer.catalog_mcp.watch_tools import MODELS, register_watches
 from sniffer.db.engine import session_scope
 from sniffer.db.repositories.public_catalog import PublicCatalogRepository
 from sniffer.domain.districts import PLACES
@@ -25,22 +26,20 @@ from sniffer.domain.public_catalog import (
     PublicListing,
 )
 from sniffer.search.market_terms import ALL_CITY_NAMES
-from sniffer.search.motorbike_models import MOTORBIKE_MODELS
 
-MODELS = frozenset(model.slug for model in MOTORBIKE_MODELS)
 READ_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True)
 
 
-def make_server() -> FastMCP:
+def make_server(*, personal: bool = False) -> FastMCP:
     catalog = FastMCP(
-        "SnifferBot Public Catalog",
+        "SnifferBot Personal Catalog" if personal else "SnifferBot Public Catalog",
         instructions=(
             "Browse active public listings and open their original links. "
             "Use catalog_guide for filter values. For another page, pass next_before_id "
             "as before_id with the same filters. Unknown facts are null. "
             "This catalog does not guarantee that a source listing is still available."
         ),
-        streamable_http_path=MCP_PATH,
+        streamable_http_path=PERSONAL_PATH if personal else MCP_PATH,
         stateless_http=True,
         json_response=True,
         max_request_body_size=16384,
@@ -105,4 +104,6 @@ def make_server() -> FastMCP:
             sources=["telegram", "chotot"],
         )
 
+    if personal:
+        register_watches(catalog)
     return catalog

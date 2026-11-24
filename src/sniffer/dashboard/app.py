@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -21,11 +22,14 @@ import structlog
 from fastapi import Cookie, FastAPI, Form, Query, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-from sniffer.catalog_mcp.address import MOUNT
+from sniffer.catalog_mcp.address import MOUNT, PERSONAL_PATH, PUBLIC_HOST
 from sniffer.catalog_mcp.server import make_server
+from sniffer.catalog_mcp.watch_tools import bearer_token
 from sniffer.config import get_settings
 from sniffer.dashboard import auth, data, inventory, reauth, views
 from sniffer.dashboard.html import error_page, esc, login_page
+from sniffer.db.engine import session_scope
+from sniffer.db.repositories.catalog_watches import CatalogWatchRepository
 from sniffer.domain.reject_retry import RetryCode, RetryResult, RetryStatus
 
 log = structlog.get_logger(__name__)
@@ -130,11 +134,13 @@ def create_app() -> FastAPI:
     # Документацию OpenAPI выключаем: описывать наружу нечего, а /docs — это
     # ещё одна страница, которая обязана быть закрытой, и однажды не будет.
     catalog = make_server()
+    personal = make_server(personal=True)
     catalog_http = catalog.streamable_http_app()
+    catalog_http.router.routes.extend(personal.streamable_http_app().router.routes)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        async with catalog.session_manager.run():
+        async with catalog.session_manager.run(), personal.session_manager.run():
             yield
 
     app = FastAPI(
@@ -145,6 +151,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     app.mount(MOUNT, catalog_http)
+    auth_slots = asyncio.Semaphore(2)
 
     @app.middleware("http")
     async def _headers(request: Request, call_next: CallNext) -> Response:
@@ -153,6 +160,25 @@ def create_app() -> FastAPI:
         Middleware, а не установка в каждом хендлере: забытый хендлер — это
         страница без CSP, и заметить это по диффу невозможно.
         """
+        if request.url.path == MOUNT + PERSONAL_PATH:
+            if request.url.hostname != PUBLIC_HOST:
+                return _json(421, {"error": "Invalid Host header."})
+            if (origin := request.headers.get("origin")) and origin != f"https://{PUBLIC_HOST}":
+                return _json(403, {"error": "Invalid Origin header."})
+            token = bearer_token(request)
+            if not token:
+                return _json(
+                    401, {"error": "Personal MCP key required."}, {"WWW-Authenticate": "Bearer"}
+                )
+            try:
+                async with asyncio.timeout(2), auth_slots, session_scope() as session:
+                    chat = await CatalogWatchRepository(session).authenticate(token)
+            except Exception:
+                return _json(503, {"error": "Watch management temporarily unavailable."})
+            if chat is None:
+                return _json(
+                    401, {"error": "Invalid personal MCP key."}, {"WWW-Authenticate": "Bearer"}
+                )
         response = await call_next(request)
         for name, value in SECURITY_HEADERS.items():
             response.headers.setdefault(name, value)

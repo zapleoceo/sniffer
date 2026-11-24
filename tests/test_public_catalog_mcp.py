@@ -81,7 +81,13 @@ def test_mcp_http_discovery_and_protocol_allowlist() -> None:
         assert client.get("/database").status_code == 401
 
 
-async def test_bot_hands_out_mcp_and_rejects_old_checkout() -> None:
+async def test_bot_hands_out_mcp_and_rejects_old_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unavailable() -> None:
+        raise RuntimeError("test: personal credential storage unavailable")
+
+    monkeypatch.setattr(catalog_entry, "session_scope", unavailable)
     session = tg.RecordingSession()
     bot = tg.make_bot(session)
     dispatcher = catalog_entry.dispatcher()

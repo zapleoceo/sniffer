@@ -129,6 +129,22 @@ def _public_rows(cities: Collection[str]) -> Select[Any]:
     )
 
 
+def validate_filters(spec: Filters, models: Collection[str]) -> None:
+    if spec.district is not None:
+        place = PLACE_BY_SLUG.get(spec.district)
+        if place is None or (spec.city is not None and spec.city != place.city):
+            raise ValueError("Unknown district for this city; use catalog_guide.")
+    low, high = spec.min_price_vnd, spec.max_price_vnd
+    if low is not None and high is not None and low > high:
+        raise ValueError("min_price_vnd exceeds max_price_vnd")
+    if spec.model is not None and _model_slug(spec.model) not in models:
+        raise ValueError("Unknown catalog model slug; omit the filter to browse.")
+
+
+def _model_slug(name: str) -> str:
+    return name.strip().replace("-", "_").replace(" ", "_")
+
+
 def _match(query: Select[Any], spec: Filters, models: Collection[str]) -> Select[Any]:
     for column, value in (
         (Listing.city, spec.city),
