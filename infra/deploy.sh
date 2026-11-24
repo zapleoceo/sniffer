@@ -220,9 +220,9 @@ catalog_publications identity_keys       # 026: ключи личности пр
 catalog_publications duplicate_of_source # 026: публикация — дубль другой
 catalog_publications duplicate_of_external_id # 026: чей дубль
 listing_cleanup_events                   # 026: журнал уборки первоисточников и дублей
-catalog_watch_credentials token_hash    # 027: hashes only; free catalog-watch authentication
-catalog_watches after_id               # 027: no historic backlog on watch creation
-catalog_watch_delivered canonical_url   # 027: cross-watch duplicate delivery guard
+catalog_watch_credentials               # 027: hashes only; free catalog-watch authentication
+catalog_watches                                     # 027: no historic backlog on watch creation
+catalog_watch_delivered                 # 027: cross-watch duplicate delivery guard
 SENTINELS
 }
 
