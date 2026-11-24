@@ -1,4 +1,4 @@
-"""Нотифаер: доставляет существующие внутренние уведомления владельцу.
+"""Нотифаер: личные MCP-рассылки и прежние внутренние уведомления владельцу.
 
 Очередь наполняет `worker/monitor.py`: новая карточка, подошедшая подписке,
 становится строкой в `outbox`. Здесь она превращается в сообщение.
@@ -19,6 +19,7 @@ from aiogram.enums import ParseMode
 from aiogram.types import LinkPreviewOptions
 
 from sniffer.config import Settings, get_settings
+from sniffer.notifier import catalog_watches
 from sniffer.notifier.delivery import Delivery, Sender, ThreadSender
 from sniffer.notifier.policy import policy_from
 from sniffer.notifier.ports import work_scope
@@ -42,16 +43,28 @@ async def run(stop: asyncio.Event) -> None:
     log.info("notifier.started")
     settings = get_settings()
     bot = Bot(token=settings.bot_token, session=bot_session(settings))
+    send = _sender(bot)
     delivery = Delivery(
-        _sender(bot),
+        send,
         send_in_thread=_thread_sender(bot),
         policy=policy_from(settings),
         scope=partial(work_scope, owner_only=settings.owner_chat_id),
     )
+
     # No periodic Stars reconciliation in the catalog product: its historic “report” mode
     # can still resync slots and cancel individual provider renewals.
+    async def delivery_tick() -> bool:
+        # Evaluate both queues even when the first still has pending rows.
+        owner_work = await delivery.tick()
+        try:
+            watch_work = await catalog_watches.tick(send)
+        except Exception as exc:
+            log.warning("catalog_watch.tick_failed", kind=type(exc).__name__)
+            watch_work = False
+        return bool(owner_work) or watch_work
+
     try:
-        await idle_loop(stop, delivery.tick, service=NAME, poll_interval_s=POLL_INTERVAL_S)
+        await idle_loop(stop, delivery_tick, service=NAME, poll_interval_s=POLL_INTERVAL_S)
     finally:
         # Сессия aiohttp живёт внутри Bot: не закрыть её значит оставить
         # предупреждение в логе на каждой остановке контейнера.

@@ -1,4 +1,4 @@
-"""The customer bot only hands out the public MCP endpoint."""
+"""Telegram client entry point: MCP onboarding and historical payment support."""
 
 from __future__ import annotations
 
@@ -22,8 +22,10 @@ from aiogram.types import (
 
 from sniffer.bot import catalog_legacy
 from sniffer.bot.handlers import membership
-from sniffer.catalog_mcp.address import MCP_URL
+from sniffer.catalog_mcp.address import MCP_URL, PERSONAL_URL
 from sniffer.config import Settings, get_settings
+from sniffer.db.engine import session_scope
+from sniffer.db.repositories.catalog_watches import CatalogWatchRepository
 from sniffer.runtime.service import Service
 from sniffer.telegram_env import bot_session
 
@@ -38,7 +40,16 @@ INTRO = (
     "Тип подключения: Streamable HTTP, без авторизации.\n\n"
     f"<code>{MCP_URL}</code>\n\n"
     "Поддерживается не каждым клиентом; например, в Claude соединение добавляется в веб.\n\n"
+    "Личный ключ для рассылок: /mcp.\n\n"
     "Например: «Покажи квартиры в Нячанге до 6,5 млн донгов в месяц»."
+)
+PERSONAL_INTRO = (
+    "\n\nДля бесплатных обновлений в этом Telegram подключите личный MCP:\n"
+    f"<code>{PERSONAL_URL}</code>\n"
+    "Заголовок Authorization: <code>Bearer {token}</code>\n"
+    "Управляйте рассылками через create_watch, list_watches и stop_watch.\n"
+    "Ключ приватный; не вставляйте его в чат ассистента, только в настройку заголовков. "
+    "Новая команда /mcp заменяет предыдущий ключ; рассылки при этом сохраняются."
 )
 LEGACY_CHECKOUT_DISABLED = "Новые подписки не оформляются. По прежним платежам: /paysupport."
 
@@ -66,6 +77,21 @@ def dispatcher() -> Dispatcher:
     @router.callback_query()
     async def stale_button(callback: CallbackQuery) -> None:
         await callback.answer("Эта кнопка устарела. Откройте /mcp.", show_alert=True)
+
+    @router.message(Command("mcp"))
+    async def personal_connection(message: Message) -> None:
+        sender = message.from_user
+        if sender is None or sender.is_bot or sender.id != message.chat.id:
+            return
+        try:
+            async with asyncio.timeout(4), session_scope() as session:
+                token = await CatalogWatchRepository(session).issue(sender.id)
+                await session.commit()
+        except Exception:
+            text = INTRO + "\n\nЛичный ключ пока недоступен. Повторите /mcp позже."
+        else:
+            text = INTRO + PERSONAL_INTRO.format(token=token)
+        await message.answer(text, reply_markup=ReplyKeyboardRemove())
 
     @router.message()
     async def introduction(message: Message) -> None:
