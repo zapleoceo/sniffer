@@ -123,7 +123,8 @@ async def test_public_catalog_uses_same_policy_for_page_filters_and_detail(
         city="nha_trang",
         excluded_at=MOMENT,
     )
-    db_session.add_all([public, private, excluded])
+    author = Chat(tg_id=104, username="OriginalMarket", title="Author feed", city="nha_trang")
+    db_session.add_all([public, private, excluded, author])
     trusted = RawMessage(
         chat_tg_id=101,
         msg_id=39,
@@ -156,7 +157,18 @@ async def test_public_catalog_uses_same_policy_for_page_filters_and_detail(
         origin_msg_id=7,
         origin_username="SomePrivateName",
     )
-    db_session.add_all([trusted, invite, excluded_post, pointer, forward])
+    public_forward = RawMessage(
+        chat_tg_id=101,
+        msg_id=44,
+        text="Public forward",
+        text_hash="public-forward",
+        posted_at=MOMENT,
+        origin_kind="forward",
+        origin_chat_tg_id=104,
+        origin_msg_id=9,
+        origin_username="OriginalMarket",
+    )
+    db_session.add_all([trusted, invite, excluded_post, pointer, forward, public_forward])
     await db_session.flush()
 
     def item(
@@ -191,6 +203,7 @@ async def test_public_catalog_uses_same_policy_for_page_filters_and_detail(
 
     safe_tg = item("https://t.me/PublicMarket/39", raw=trusted)
     safe_board = item("https://www.chotot.com/123456.htm", source="chotot", price=7_000_000)
+    safe_forward = item("https://t.me/OriginalMarket/9", raw=public_forward, price=7_000_000)
     hidden = [
         item("https://t.me/ImpersonatesPublic/40", raw=invite),
         item("https://t.me/ExcludedMarket/41", raw=excluded_post),
@@ -204,9 +217,11 @@ async def test_public_catalog_uses_same_policy_for_page_filters_and_detail(
     repo = PublicCatalogRepository(db_session, cities={"nha_trang"}, models={"vision"})
     first = await repo.page(Filters(), before_id=None, limit=1)
     assert [card.id for card in first.items] == [safe_board.id]
+    assert first.items[0].source_evidence == "marketplace_post"
     assert first.next_before_id == safe_board.id
     second = await repo.page(Filters(), before_id=first.next_before_id, limit=1)
     assert [card.id for card in second.items] == [safe_tg.id]
+    assert second.items[0].source_evidence == "telegram_observed"
     assert second.next_before_id is None
     filtered = await repo.page(
         Filters(max_price_vnd=6_500_000, min_rooms=2, balcony=True, separate_kitchen=True),
@@ -220,6 +235,22 @@ async def test_public_catalog_uses_same_policy_for_page_filters_and_detail(
     assert all(word not in detail.model_dump_json() for word in ("secret", "0912345678", "seller"))
     for row in hidden:
         assert await repo.detail(row.id) is None
+
+    db_session.add(safe_forward)
+    await db_session.flush()
+    strict = await repo.page(Filters(source_reference_only=True), before_id=None, limit=10)
+    assert [(c.id, c.source_evidence) for c in strict.items] == [
+        (safe_forward.id, "telegram_forward_origin"),
+        (safe_board.id, "marketplace_post"),
+    ]
+    verified = await repo.detail(safe_forward.id)
+    assert verified == strict.items[0]
+    assert strict.items[0].url == "https://t.me/OriginalMarket/9"
+    assert (
+        await repo.page(
+            Filters(source_reference_only=True, max_price_vnd=6_500_000), before_id=None, limit=10
+        )
+    ).items == []
 
 
 async def test_keyset_browse_has_no_hundred_item_ceiling(db_session: AsyncSession) -> None:

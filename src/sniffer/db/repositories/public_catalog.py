@@ -102,6 +102,7 @@ def _public_rows(cities: Collection[str]) -> Select[Any]:
         select(
             Listing.id,
             Listing.source,
+            RawMessage.origin_kind,
             Listing.category,
             Listing.city,
             Listing.district,
@@ -149,6 +150,8 @@ def _match(query: Select[Any], spec: Filters, models: Collection[str]) -> Select
                 ("telegram_archive", "archive") if spec.source == "telegram" else ("chotot",)
             )
         )
+    if spec.source_reference_only:
+        query = query.where(or_(Listing.source == "chotot", RawMessage.origin_kind == "forward"))
     low, high = spec.min_price_vnd, spec.max_price_vnd
     if low is not None and high is not None and low > high:
         raise ValueError("min_price_vnd exceeds max_price_vnd")
@@ -198,6 +201,13 @@ def _card(row: Row[Any], models: Collection[str]) -> PublicListing:
     return PublicListing(
         id=row.id,
         source="chotot" if row.source == "chotot" else "telegram",
+        source_evidence=(
+            "marketplace_post"
+            if row.source == "chotot"
+            else "telegram_forward_origin"
+            if row.origin_kind == "forward"
+            else "telegram_observed"
+        ),
         category=Category(row.category),
         city=row.city,
         district=district.slug if district and district.city == row.city else None,
