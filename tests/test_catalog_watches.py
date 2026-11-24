@@ -100,12 +100,6 @@ async def test_watch_personal_mcp_to_telegram_with_real_db(
         monkeypatch.setattr(module, "session_scope", isolated)
 
     async with sessions.begin() as session:
-        for table in (
-            "catalog_watch_delivered",
-            "catalog_watches",
-            "catalog_watch_credentials",
-        ):
-            await session.execute(text(f"DELETE FROM {table}"))  # noqa: S608 – literal allowlist
         forgery = tg.RecordingSession()
         sender = tg.make_bot(forgery)
         group = tg.message(from_id=OWNER, text="/mcp")

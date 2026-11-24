@@ -9,9 +9,9 @@ from hashlib import sha256
 from secrets import token_urlsafe
 
 from pydantic import BaseModel
-from sqlalchemy import Select, column, select, table, text
+from sqlalchemy import Select, select, text
 
-from sniffer.db.models import Listing
+from sniffer.db.models import Listing, catalog_watch_credentials, catalog_watch_delivered
 from sniffer.db.repositories.base import Repository
 from sniffer.db.repositories.public_catalog import _card, _match, _public_rows
 from sniffer.domain.catalog_watches import WatchFilters
@@ -56,7 +56,7 @@ class CatalogWatchRepository(Repository):
     async def authenticate(self, token: str, *, lock: bool = False) -> int | None:
         if not token.startswith(TOKEN_PREFIX) or not token.isascii() or len(token) != 47:
             return None
-        credentials = table("catalog_watch_credentials", column("tg_chat_id"), column("token_hash"))
+        credentials = catalog_watch_credentials
         query = select(credentials.c.tg_chat_id).where(
             credentials.c.token_hash == fingerprint(token)
         )
@@ -136,7 +136,7 @@ class CatalogWatchRepository(Repository):
     async def next_listing(
         self, watch: DueWatch, *, cities: Collection[str], models: Collection[str]
     ) -> PublicListing | None:
-        delivered = table("catalog_watch_delivered", column("canonical_url"), column("tg_chat_id"))
+        delivered = catalog_watch_delivered
         seen = (
             select(delivered.c.canonical_url)
             .where(delivered.c.tg_chat_id == watch.tg_chat_id)
