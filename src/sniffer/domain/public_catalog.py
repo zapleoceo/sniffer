@@ -12,6 +12,7 @@ from sniffer.domain.passport import Category, Currency, PricePeriod
 
 Deal = Literal["sell", "rent_out", "wanted"]
 Source = Literal["telegram", "chotot"]
+SourceEvidence = Literal["marketplace_post", "telegram_forward_origin", "telegram_observed"]
 Cursor = Annotated[int, Field(gt=0, le=2**63 - 1)]
 Amount = Annotated[int, Field(ge=0, le=10**12)]
 PageSize = Annotated[int, Field(ge=1, le=50)]
@@ -28,6 +29,7 @@ class Filters(BaseModel):
     category: Category | None = None
     deal_type: Deal | None = None
     source: Source | None = None
+    source_reference_only: bool = False
     min_price_vnd: Amount | None = None
     max_price_vnd: Amount | None = None
     price_period: PricePeriod | None = None
@@ -48,6 +50,7 @@ class PublicListing(BaseModel):
     price_currency: Currency | None
     price_period: PricePeriod | None
     source: Source
+    source_evidence: SourceEvidence = "telegram_observed"
     url: str
     posted_at: datetime
     rooms: int | None = None
