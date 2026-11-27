@@ -90,7 +90,11 @@ async def serve_slot(
         spec, after_id=cursor, before_id=blocked, limit=LISTINGS_PER_SUBSCRIPTION
     )
     ids = [item.id for item in batch if item.id is not None]
-    candidates = [item for item in batch if item.id and worth_sending(item, passport, now=moment)]
+    candidates = [
+        item
+        for item in batch
+        if item.id and worth_sending(item, passport, now=moment, usd_vnd=usd_vnd)
+    ]
     if subscription.hard_filter is not None:
         # Жёсткие условия подписки (`domain.hard_filter`): неизвестное — отказ, а не пропуск.
         candidates = [item for item in candidates if subscription.hard_filter.accepts(item)]
