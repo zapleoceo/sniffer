@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from math import exp
 
 from sniffer.domain.districts import complete_zone
@@ -29,6 +30,7 @@ from sniffer.domain.passport import (
     engine_cc_bounds,
     with_default_attributes,
 )
+from sniffer.domain.price_facts import parse_prices
 from sniffer.domain.records import Listing, MatchFilter
 from sniffer.matching.attribute_match import conflicts, matches
 
@@ -87,9 +89,17 @@ def score(listing: Listing, passport: Passport, *, now: datetime | None = None) 
     )
 
 
-def worth_sending(listing: Listing, passport: Passport, *, now: datetime | None = None) -> bool:
+def worth_sending(
+    listing: Listing,
+    passport: Passport,
+    *,
+    now: datetime | None = None,
+    usd_vnd: float | None = None,
+) -> bool:
     moment = now or datetime.now(UTC)
     if _age(listing, moment) > MONITOR_MAX_AGE:
+        return False
+    if _unknown_price_over_ceiling(listing, ceiling_vnd(passport.budget, usd_vnd)):
         return False
     if passport.districts and listing.district not in passport.districts:
         zone = complete_zone(passport.districts)
@@ -108,6 +118,28 @@ def worth_sending(listing: Listing, passport: Passport, *, now: datetime | None 
     if _known_attribute_conflicts(listing, passport):
         return False
     return score(listing, passport, now=now) >= MATCH_MIN_SCORE
+
+
+def _unknown_price_over_ceiling(listing: Listing, ceiling: Decimal | None) -> bool:
+    """Колонка цены пуста, а все суммы в донгах из текста выше потолка.
+
+    Колонка остаётся пустой и тогда, когда сумма в тексте есть, но в договор «донги
+    за месяц» не легла: «25 000 000 VND/день» за дом — опечатка вместо месяца, а
+    пересчёт в 750 млн за месяц выходит за границы правдоподобия, и воронка честно
+    пишет «цена неизвестна». Отбор в базе пропускает неизвестную цену, и подписка с
+    потолком 14 млн отправила такой дом (27.11.2026). Срок суммы здесь не важен:
+    сумма за сутки или неделю выше месячного потолка — тем более дороже месяц.
+    Если хоть одна сумма в тексте не выше потолка, карточку не режем: это может
+    быть сама цена, а залог или вилка — выше.
+    """
+    if ceiling is None or listing.price_amount is not None:
+        return False
+    amounts = [
+        fact.amount
+        for fact in parse_prices(f"{listing.title}\n{listing.summary}")
+        if fact.currency == "VND"
+    ]
+    return bool(amounts) and min(amounts) > ceiling
 
 
 def _listing_has_model(listing: Listing, wanted: str) -> bool:
