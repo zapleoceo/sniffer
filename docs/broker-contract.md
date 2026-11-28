@@ -2,12 +2,15 @@
 
 Все вызовы моделей остаются через AIbroker: submit `/v1/jobs`, затем polling.
 
-## Terra первой, прежняя схема запасной
+## Подписка первой, прежняя схема запасной
 
-Production Compose включает `BROKER_PRIMARY_MODEL=codex-sub/gpt-6.1-terra` перед
-каждым `BrokerClient.chat()` / `structured()`. Точный ID, subscription billing,
-`available=true`, structured и tools проверены 16.11.2026 через `/v1/models`
-с действующим ключом проекта Sniffer. Аккаунт выбирает Broker по действующей
+Production Compose включает `BROKER_PRIMARY_MODEL=codex-sub/gpt-6-luna` перед
+каждым `BrokerClient.chat()` / `structured()`. До 28.11.2026 первой шла
+`codex-sub/gpt-6.1-terra` (проверена 16.11.2026); по журналу брокера за трое
+суток у неё медиана 11 с и p90 21 с при потолке первой попытки 30 с, и
+медленный ответ уводил вызов в платный путь. Luna — самая быстрая из
+подтверждённых брокером подписочных моделей Codex; `available=true` для ключа
+проекта Sniffer проверено 28.11.2026 через `/v1/models`. Аккаунт выбирает Broker по действующей
 политике проекта; клиент не задаёт аккаунт и не расширяет доступ.
 
 Первая попытка ограничена `BROKER_PRIMARY_TIMEOUT_S` (30 секунд, включая submit).
@@ -21,20 +24,20 @@ fallback. Ключ, промпт и текст модели в диагност�
 метаданные можно читать через `GET /v1/jobs?label.workflow=sniffer-primary` без
 тестового запуска модели или чтения промптов.
 Если задание успело завершиться во время отмены, готовый ответ возвращается в
-тот же путь проверки billing/model, учёта и валидации. Валидный ответ Terra
+тот же путь проверки billing/model, учёта и валидации. Валидный ответ подписки
 исключает fallback; негодный учитывается, затем запускается прежний маршрут.
 
 При явном отказе модели, пустом/неполном ответе или негодном JSON запускается
 ровно прежняя схема: intake/offer_screen — `gemini/gemini-3.5-flash-lite`, затем
 один старый unpinned fallback; остальные роли — их прежняя настройка
 `BROKER_MODEL_*` или цепочка по capability. Негодный ответ этой цепочки не
-запускает Terra заново. Все прежние max_tokens/temperature сохраняются для
+запускает подписку заново. Все прежние max_tokens/temperature сохраняются для
 fallback. Подписочный контракт их не передаёт модели, поэтому первая попытка
 не отправляет эти параметры; ограничение времени не является лимитом токенов.
-Ответ Terra принимается только с subscription billing и ожидаемыми provider/model.
+Ответ подписки принимается только с subscription billing и ожидаемыми provider/model.
 Учёт завершённых ответов сохраняется, включая отклонённые локальной валидацией.
 
-Каждая попытка Terra передаёт `no_shell=true`. Контракт Broker отвергает этот
+Каждая попытка подписки передаёт `no_shell=true`. Контракт Broker отвергает этот
 флаг вместе с client tools; App Server tool-путь не применяет отключение
 встроенных инструментов. Поэтому запросы с tools или их историей сразу используют
 прежний маршрут: подписочное задание для них не создаётся. Ограничения Broker
@@ -87,6 +90,6 @@ request_id, job_id и доступный finish_reason, но не текст м�
 from the live Broker catalog. The model suffix may contain letters, digits, dots,
 underscores and hyphens. Choose only an available model supporting the required
 capability; this configuration validation does not assert provider availability.
-The default deployment remains Terra 6.1. No model is enabled or selected by this
-change. Existing no-shell restrictions, timeouts, cancellation, billing and route
+The default deployment is GPT-6 Luna (since 28.11.2026; Terra 6.1 before).
+Existing no-shell restrictions, timeouts, cancellation, billing and route
 attestation, and fallback handling remain in effect for every selected model.
