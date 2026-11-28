@@ -39,6 +39,7 @@ from sniffer.domain.monitoring import (
 from sniffer.domain.quota import Channel, Claim
 from sniffer.domain.records import SubscriptionState
 from sniffer.matching import filter_for, score, worth_sending
+from sniffer.matching.rules import MONITOR_MAX_AGE
 from sniffer.worker.monitor_queue import LOCAL_ZONE, after_quiet, payload, scheduled
 
 log = structlog.get_logger(__name__)
@@ -46,9 +47,13 @@ log = structlog.get_logger(__name__)
 # Сколько карточек смотрим на слот за проход. Не ради скорости: без потолка первый же слот на
 # пустой базе прочитал бы весь архив одной транзакцией.
 LISTINGS_PER_SUBSCRIPTION = 100
-# Сколько ждём вердикта ИИ-проверки по карточке из архива Telegram, прежде чем доверять без
-# него. Проверка обычно укладывается в минуту; пять минут — с запасом на паузу брокера.
-VERDICT_WAIT = timedelta(minutes=5)
+# Сколько ждём вердикта ИИ-проверки по карточке из архива Telegram. Срок равен окну новизны
+# слежения (`MONITOR_MAX_AGE`): к его концу карточка и так стара для отправки, то есть без
+# вердикта она не уходит никогда. Прежние пять минут «с запасом на паузу брокера» не
+# переживали дневной лимит: 28.11.2026 проверка встала в 08:20 UTC до полуночи, и через пять
+# минут подписке ушла реклама косметолога («выезд на дом» — категория house). Цена — при
+# остановленной проверке слежение ждёт её возобновления, а не шлёт непрочитанное.
+VERDICT_WAIT = MONITOR_MAX_AGE
 # Сводка «ещё N» уходит не сразу, а через это время: за полчаса набирается то, что стоит
 # назвать числом, и одно сообщение заменяет россыпь.
 OVERFLOW_DELAY = timedelta(minutes=30)

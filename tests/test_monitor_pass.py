@@ -556,5 +556,5 @@ async def test_a_card_waits_for_the_verdict_exactly_the_verdict_wait(
 
     await MonitorAgent().tick(now=NOW)
 
-    assert VERDICT_WAIT == timedelta(minutes=5)
+    assert VERDICT_WAIT == timedelta(hours=24)
     assert world.listings.verdict_cutoffs == [NOW - VERDICT_WAIT]

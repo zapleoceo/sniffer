@@ -102,7 +102,7 @@ async def _card(
             price_currency="VND" if price is not None else None,
         )
     )
-    # Карточка из архива Telegram без вердикта ИИ-проверки пять минут держит курсор (VERDICT_WAIT).
+    # Карточка архива Telegram без вердикта ИИ-проверки держит курсор (VERDICT_WAIT, 24 ч).
     # Здесь проверяется отбор слота, а не ожидание вердикта, поэтому карточка уже проверена.
     await session.execute(
         update(models.Listing).where(models.Listing.id == card.id).values(screened_at=_now())
