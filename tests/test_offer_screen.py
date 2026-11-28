@@ -220,7 +220,10 @@ async def test_a_broker_failure_pauses_and_keeps_the_cards() -> None:
     assert await screening.tick() == 1
 
 
-async def test_the_daily_cap_stops_until_midnight() -> None:
+async def test_the_daily_cap_stops_until_midnight(monkeypatch: Any) -> None:
+    from sniffer.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "broker_primary_model", "")
     catalog = Catalog([listing(1, "motorbike", "Lead")])
     now = [0.0]
     screening = job(Broker(BrokerCapError("cap"), {"verdicts": [row(1)]}), catalog, now)
@@ -230,6 +233,21 @@ async def test_the_daily_cap_stops_until_midnight() -> None:
     assert await screening.tick() == 0, "лимит до полуночи UTC, а не на десять минут"
     now[0] += 86_400
     assert await screening.tick() == 1
+
+
+async def test_with_a_subscription_first_the_cap_pauses_ten_minutes(monkeypatch: Any) -> None:
+    """Лимит считает платный путь: с подпиской первой следующая пачка снова пойдёт подпиской."""
+    from sniffer.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "broker_primary_model", "codex-sub/gpt-6-luna")
+    catalog = Catalog([listing(1, "motorbike", "Lead")])
+    now = [0.0]
+    screening = job(Broker(BrokerCapError("cap"), {"verdicts": [row(1)]}), catalog, now)
+
+    await screening.tick()
+    assert await screening.tick() == 0, "пауза есть"
+    now[0] += 601
+    assert await screening.tick() == 1, "но десять минут, а не до полуночи"
 
 
 async def test_a_tick_is_bounded_so_other_steps_run() -> None:

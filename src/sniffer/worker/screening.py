@@ -12,7 +12,9 @@
 для той же работы разъехался бы с первым.
 
 Отказ брокера — не авария. Дневной лимит проекта останавливает задачу до
-полуночи UTC (ретрай бюджета не создаёт), иная ошибка — на десять минут.
+полуночи UTC (ретрай бюджета не создаёт), а при подписке первой — на десять
+минут: лимит считает платный путь, подписку он не останавливает. Иная ошибка —
+на десять минут.
 Карточка без вердикта остаётся в каталоге как была: проверка улучшает
 каталог, а не условие его работы.
 """
@@ -163,6 +165,20 @@ class Screening:
             self._broker = BrokerClient(usage=default_usage_sink)
         return self._broker
 
+    @staticmethod
+    def _cap_pause() -> float:
+        """Пауза после дневного лимита: до полуночи, только если подписки первой нет.
+
+        Лимит проекта считает платный путь, а не подписку. С подпиской первой отказ
+        по лимиту значит лишь, что одна пачка ушла в платный путь (медленный ответ,
+        отмена); следующая снова пойдёт подпиской. 28.11.2026 одна отменённая
+        попытка Terra в 08:20 UTC остановила проверку до полуночи, хотя подписка
+        отвечала, и слежение шло без вердикта.
+        """
+        if get_settings().broker_primary_model:
+            return RETRY_AFTER_S
+        return _seconds_to_utc_midnight()
+
     async def tick(self) -> int:
         """Сколько карточек прочитано за проход."""
         broker = self._client()
@@ -178,7 +194,7 @@ class Screening:
                     [f"{row.title}\n{row.summary}" for row in batch], broker
                 )
             except BrokerCapError:
-                self._paused_until = self._clock() + _seconds_to_utc_midnight()
+                self._paused_until = self._clock() + self._cap_pause()
                 log.warning("screening.cap_reached")
                 break
             except (BrokerError, TimeoutError, OSError) as exc:
