@@ -15,6 +15,7 @@ from typing import Any
 from sniffer.broker.client import BrokerCapError, BrokerError
 from sniffer.domain.records import Listing
 from sniffer.verifier.offer_screen import (
+    SCREEN_BATCH,
     OfferVerdict,
     parse_verdicts,
     screen_offers,
@@ -252,11 +253,11 @@ async def test_with_a_subscription_first_the_cap_pauses_ten_minutes(monkeypatch:
 
 async def test_a_tick_is_bounded_so_other_steps_run() -> None:
     catalog = Catalog([listing(n, "motorbike", f"Lead {n}") for n in range(1, 100)])
-    answers = [{"verdicts": [row(i) for i in range(1, 16)]} for _ in range(5)]
+    answers = [{"verdicts": [row(i) for i in range(1, SCREEN_BATCH + 1)]} for _ in range(5)]
 
     await job(Broker(*answers), catalog, [0.0]).tick()
 
-    assert len(catalog.applied) == 15 * BATCHES_PER_TICK
+    assert len(catalog.applied) == SCREEN_BATCH * BATCHES_PER_TICK
 
 
 async def test_without_a_broker_key_the_job_sleeps(monkeypatch: Any) -> None:
