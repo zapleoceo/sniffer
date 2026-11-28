@@ -4,13 +4,13 @@
 
 ## Подписка первой, прежняя схема запасной
 
-Production Compose включает `BROKER_PRIMARY_MODEL=codex-sub/gpt-6-luna` перед
-каждым `BrokerClient.chat()` / `structured()`. До 28.11.2026 первой шла
-`codex-sub/gpt-6.1-terra` (проверена 16.11.2026); по журналу брокера за трое
-суток у неё медиана 11 с и p90 21 с при потолке первой попытки 30 с, и
-медленный ответ уводил вызов в платный путь. Luna — самая быстрая из
-подтверждённых брокером подписочных моделей Codex; `available=true` для ключа
-проекта Sniffer проверено 28.11.2026 через `/v1/models`. Аккаунт выбирает Broker по действующей
+Production Compose включает `BROKER_PRIMARY_MODEL=codex-sub/gpt-6.1-sol` перед
+каждым `BrokerClient.chat()` / `structured()`. Выбор 28.11.2026 по журналу
+брокера: Sol — 1007 заданий за трое суток без ошибок, медиана 8 с, p90 11 с;
+Terra 6.1 (первая с 16.11.2026) — медиана 11 с, p90 21 с, три отмены по потолку
+первой попытки в 30 с. GPT-6 Luna проверена в тот же день на проде и снята:
+3 из 11 пачек проверки объявлений вернули ответ не по `json_schema`, медиана 21 с.
+`available=true` для ключа проекта Sniffer проверено 28.11.2026 через `/v1/models`. Аккаунт выбирает Broker по действующей
 политике проекта; клиент не задаёт аккаунт и не расширяет доступ.
 
 Первая попытка ограничена `BROKER_PRIMARY_TIMEOUT_S` (30 секунд, включая submit).
@@ -90,6 +90,7 @@ request_id, job_id и доступный finish_reason, но не текст м�
 from the live Broker catalog. The model suffix may contain letters, digits, dots,
 underscores and hyphens. Choose only an available model supporting the required
 capability; this configuration validation does not assert provider availability.
-The default deployment is GPT-6 Luna (since 28.11.2026; Terra 6.1 before).
+The default deployment is GPT-6.1 Sol (since 28.11.2026; Terra 6.1 before, Luna
+tried and dropped the same day for invalid structured output).
 Existing no-shell restrictions, timeouts, cancellation, billing and route
 attestation, and fallback handling remain in effect for every selected model.

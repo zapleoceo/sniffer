@@ -239,7 +239,7 @@ async def test_with_a_subscription_first_the_cap_pauses_ten_minutes(monkeypatch:
     """Лимит считает платный путь: с подпиской первой следующая пачка снова пойдёт подпиской."""
     from sniffer.config import get_settings
 
-    monkeypatch.setattr(get_settings(), "broker_primary_model", "codex-sub/gpt-6-luna")
+    monkeypatch.setattr(get_settings(), "broker_primary_model", "codex-sub/gpt-6.1-sol")
     catalog = Catalog([listing(1, "motorbike", "Lead")])
     now = [0.0]
     screening = job(Broker(BrokerCapError("cap"), {"verdicts": [row(1)]}), catalog, now)

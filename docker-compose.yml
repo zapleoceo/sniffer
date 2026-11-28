@@ -19,7 +19,7 @@ x-app: &app
   image: sniffer:local
   env_file: .env
   environment: &broker-environment
-    BROKER_PRIMARY_MODEL: "${BROKER_PRIMARY_MODEL-codex-sub/gpt-6-luna}"
+    BROKER_PRIMARY_MODEL: "${BROKER_PRIMARY_MODEL-codex-sub/gpt-6.1-sol}"
     BROKER_PRIMARY_TIMEOUT_S: "${BROKER_PRIMARY_TIMEOUT_S:-30}"
     BROKER_PRIMARY_CANCEL_TIMEOUT_S: "${BROKER_PRIMARY_CANCEL_TIMEOUT_S:-5}"
   depends_on:
